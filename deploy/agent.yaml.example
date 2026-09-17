@@ -1,0 +1,64 @@
+# Trailox Agent configuration. No secret belongs in this file: passwords are referenced by
+# environment variable (password_env) or by file (password_file), so it can be committed.
+version: 1
+probeIntervalMinutes: 60           # how often each endpoint is re-probed (server version, columns, oldest row)
+gateway: https://agent.trailox.io
+
+endpoints:
+  - alias: prod-cluster            # letters, digits, - and _ ; becomes part of every identity on this source
+    engine: clickhouse
+    kind: onprem                   # onprem | cloud
+    host: clickhouse.internal      # reachable FROM THE AGENT; Trailox never learns it
+    port: 8443
+    tls: true
+    clusterName: ""                # "default" on ClickHouse Cloud, empty on a single node
+    username: trailox_monitor      # the read-only user created by the setup script
+    password_env: TRAILOX_CH_PROD_PASSWORD
+    # password_file: /run/secrets/ch_prod
+    collectSessionLog: true
+    storeRawQueryText: true        # false = the SQL text never leaves your network
+    excludedDatabases: []          # databases whose statements are never shipped, e.g. ["hr_private"]
+
+  # A Databricks workspace, read through its SQL Statement Execution API as a service
+  # principal. The agent holds the principal's OAuth secret; Trailox never sees it.
+  # - alias: lakehouse
+  #   engine: databricks
+  #   kind: cloud
+  #   host: dbc-xxxxxxxx-xxxx.cloud.databricks.com     # the workspace hostname (HTTPS 443; port/tls are ignored)
+  #   clusterName: 0123456789abcdef                    # the SQL warehouse id, 16 hex characters
+  #   username: 00000000-0000-0000-0000-000000000000   # the service principal's application id
+  #   password_env: TRAILOX_DBX_SECRET                 # its OAuth secret; or password_file: /run/secrets/dbx
+  #   collectSessionLog: true                          # sign-ins from system.access.audit
+  #   storeRawQueryText: true                          # statement_text is <REDACTED> unless the principal is in databricks_pii_access
+  #   excludedDatabases: []                            # Unity Catalog CATALOGS never inventoried (system/samples always excluded)
+
+  # An Amazon Redshift cluster or Serverless workgroup, over the Postgres wire protocol from
+  # inside your VPC, as a database user with the sys:monitor role.
+  # - alias: warehouse
+  #   engine: redshift
+  #   kind: cloud
+  #   host: my-wg.123456789012.eu-west-1.redshift-serverless.amazonaws.com   # cluster or workgroup endpoint
+  #   port: 5439
+  #   clusterName: my-wg                               # cluster identifier or workgroup name (descriptive)
+  #   username: trailox_agent                          # the user the setup script creates
+  #   password_env: TRAILOX_RS_PASSWORD                # its password; or password_file
+  #   options:
+  #     database: dev                                  # the database to sign in to
+  #   collectSessionLog: true                          # sign-ins from sys_connection_log
+  #   storeRawQueryText: true                          # false = sys_query_text is never shipped
+  #   excludedDatabases: []                            # databases whose statements are never shipped
+
+  # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
+  # stays here; register only the public half on the user.
+  # - alias: snowflake
+  #   engine: snowflake
+  #   kind: cloud
+  #   host: myorg-myaccount                            # the account identifier
+  #   clusterName: TRAILOX_MONITOR_WH                  # the warehouse the setup script creates
+  #   username: TRAILOX_AGENT                          # the service user
+  #   password_file: /run/secrets/sf_key               # its unencrypted PKCS#8 PEM private key
+  #   options:
+  #     role: TRAILOX_MONITOR                          # the role the setup script creates
+  #   collectSessionLog: true                          # sign-ins from LOGIN_HISTORY and SESSIONS
+  #   storeRawQueryText: true                          # false = QUERY_TEXT and BIND_VALUES are never shipped
+  #   excludedDatabases: []                            # databases never inventoried (SNOWFLAKE always excluded)

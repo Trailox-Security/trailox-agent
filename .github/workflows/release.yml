@@ -1,0 +1,109 @@
+# Build, test, and on a version tag publish a signed image with an SBOM to the public ECR
+# repository. Supply-chain controls: cosign keyless signature (Sigstore, OIDC of this workflow),
+# SBOM in SPDX and CycloneDX attached as attestations, image digest pinned in the release notes.
+#
+# Required repository configuration (Trailox side, once):
+#   - AWS_ROLE_TO_ASSUME  : an IAM role trusting GitHub OIDC with ecr-public:* on the repository
+#   - ECR_PUBLIC_ALIAS    : the public ECR registry alias (public.ecr.aws/<alias>)
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write        # cosign keyless + AWS OIDC
+  packages: read
+
+env:
+  IMAGE_NAME: trailox-agent
+
+jobs:
+  # The repo is public: nothing that looks like a credential may land in it, in any commit.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks (full history)
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 detect --source /repo --redact -v
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=results.trx"
+      - run: dotnet run --project src/Trailox.Agent -c Release --no-build -- version
+
+  image:
+    needs: [secret-scan, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version from tag
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1        # ECR Public authenticates in us-east-1 regardless of where you are
+      - name: Login to ECR Public
+        run: aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/${{ env.IMAGE_NAME }}:${{ steps.v.outputs.version }}
+            public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/${{ env.IMAGE_NAME }}:1
+          provenance: true
+          sbom: false
+
+      - name: SBOM (SPDX + CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - uses: anchore/sbom-action@v0
+        with:
+          image: public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign and attest
+        env:
+          REF: public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$REF"
+          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
+
+      # 🔴 NOT oci://public.ecr.aws/<alias>: that resolves to the repository <alias>/trailox-agent,
+      #    the IMAGE's repository, with the same version tag - the chart would overwrite the image.
+      - name: Package and push the Helm chart (OCI)
+        run: |
+          helm package charts/trailox-agent --version "${{ steps.v.outputs.version }}" --app-version "${{ steps.v.outputs.version }}"
+          helm push trailox-agent-${{ steps.v.outputs.version }}.tgz oci://public.ecr.aws/${{ secrets.ECR_PUBLIC_ALIAS }}/charts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.*.json

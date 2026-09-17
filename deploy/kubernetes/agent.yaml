@@ -1,0 +1,58 @@
+# Trailox Agent - plain Kubernetes manifest (the Helm chart in charts/trailox-agent is the same thing, parameterised).
+#
+#   kubectl create secret generic trailox-agent \
+#     --from-literal=TRAILOX_AGENT_KEY='tlx_...' \
+#     --from-literal=TRAILOX_CH_PROD_PASSWORD='...'
+#   kubectl create configmap trailox-agent-config --from-file=agent.yaml
+#   kubectl apply -f agent.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trailox-agent
+  labels: { app.kubernetes.io/name: trailox-agent }
+spec:
+  replicas: 1                      # exactly one: the gateway plans work per agent key
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: trailox-agent }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: trailox-agent }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: agent
+          image: public.ecr.aws/trailox/trailox-agent:1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          envFrom:
+            - secretRef: { name: trailox-agent }
+          # env:
+          #   - { name: HTTPS_PROXY, value: "http://proxy.internal:3128" }
+          #   - { name: NO_PROXY,    value: "clickhouse.internal,10.0.0.0/8" }
+          #   - { name: SSL_CERT_FILE, value: "/etc/trailox/ca/corp-ca.pem" }
+          volumeMounts:
+            - { name: config, mountPath: /etc/trailox, readOnly: true }
+            - { name: tmp,    mountPath: /tmp }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          livenessProbe:
+            exec: { command: ["dotnet", "trailox-agent.dll", "healthcheck"] }
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap: { name: trailox-agent-config }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }

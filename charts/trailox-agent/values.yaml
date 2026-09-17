@@ -1,0 +1,52 @@
+# Trailox Agent Helm values.
+image:
+  repository: public.ecr.aws/trailox/trailox-agent
+  tag: "1"
+  pullPolicy: IfNotPresent
+
+# The agent key (shown once at enrolment) and every database password come from ONE existing
+# Secret, referenced by name; the chart never creates a Secret with a value from values.yaml.
+#   kubectl create secret generic trailox-agent --from-literal=TRAILOX_AGENT_KEY=tlx_... --from-literal=TRAILOX_CH_PROD_PASSWORD=...
+#   (a Databricks endpoint adds --from-literal=TRAILOX_DBX_SECRET=<the service principal's OAuth secret>;
+#    a Redshift endpoint adds --from-literal=TRAILOX_RS_PASSWORD=<the monitoring user's password>;
+#    a Snowflake endpoint adds --from-file=TRAILOX_SF_KEY=trailox_agent.p8, its PKCS#8 private key,
+#    referenced as password_env: TRAILOX_SF_KEY)
+existingSecret: trailox-agent
+
+# agent.yaml, rendered into a ConfigMap. No secret belongs here.
+config:
+  version: 1
+  gateway: https://agent.trailox.io
+  endpoints:
+    - alias: prod-cluster
+      engine: clickhouse
+      kind: onprem
+      host: clickhouse.internal
+      port: 8443
+      tls: true
+      clusterName: ""
+      username: trailox_monitor
+      password_env: TRAILOX_CH_PROD_PASSWORD
+      collectSessionLog: true
+      storeRawQueryText: true
+      excludedDatabases: []
+
+# Extra environment (proxy, private CA, log level).
+env: []
+#  - name: HTTPS_PROXY
+#    value: http://proxy.internal:3128
+#  - name: NO_PROXY
+#    value: clickhouse.internal,10.0.0.0/8
+#  - name: SSL_CERT_FILE
+#    value: /etc/trailox/ca/corp-ca.pem
+
+# Mount a private CA bundle from an existing ConfigMap (key: corp-ca.pem) at /etc/trailox/ca.
+caConfigMap: ""
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

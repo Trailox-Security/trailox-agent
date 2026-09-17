@@ -1,0 +1,9 @@
+Trailox Agent {{ .Values.image.tag }} deployed as {{ include "trailox-agent.fullname" . }}.
+
+The agent reads the Secret "{{ .Values.existingSecret }}" for TRAILOX_AGENT_KEY and the database
+passwords named by password_env in your config. It connects OUT to {{ .Values.config.gateway }}
+on port 443 and to your databases; it listens on nothing.
+
+  kubectl logs deploy/{{ include "trailox-agent.fullname" . }} -f
+
+Endpoints appear under Database sources in Trailox after the first check-in (about a minute).

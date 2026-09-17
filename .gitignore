@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+TestResults/
+deploy/agent.yaml
+deploy/.env
+*.pem
+*.key

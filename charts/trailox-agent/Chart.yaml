@@ -1,0 +1,9 @@
+apiVersion: v2
+name: trailox-agent
+description: Trailox Agent - reads your database's own audit tables inside your network and ships them to Trailox, outbound only.
+type: application
+version: 0.1.0
+appVersion: "1"
+home: https://trailox.io
+sources:
+  - https://github.com/trailox/trailox-agent

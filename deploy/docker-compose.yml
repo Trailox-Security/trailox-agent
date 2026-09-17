@@ -1,0 +1,38 @@
+# Trailox Agent - docker compose example.
+#
+#   1. Put the agent key (shown once at enrolment) and each database password in a .env file
+#      next to this one, or export them in the environment. Never in agent.yaml.
+#   2. Copy agent.yaml.example to agent.yaml and describe your endpoints.
+#   3. docker compose up -d
+#
+# The container needs OUTBOUND HTTPS to agent.trailox.io (port 443) and to your databases. It
+# listens on nothing. Set HTTPS_PROXY / NO_PROXY / SSL_CERT_FILE below if your network needs them.
+
+services:
+  trailox-agent:
+    image: public.ecr.aws/trailox/trailox-agent:1
+    restart: unless-stopped
+
+    # ---- hardening: the container runs as an unprivileged user on a read-only filesystem ----
+    read_only: true
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]                # the liveness file lives here; nothing else is written
+    mem_limit: 512m
+    cpus: 0.5
+
+    environment:
+      TRAILOX_AGENT_KEY: ${TRAILOX_AGENT_KEY}                   # the key from the Trailox Agents page
+      TRAILOX_CH_PROD_PASSWORD: ${TRAILOX_CH_PROD_PASSWORD}     # referenced by password_env in agent.yaml
+      # TRAILOX_DBX_SECRET: ${TRAILOX_DBX_SECRET}                # a Databricks service principal's OAuth secret
+      # TRAILOX_RS_PASSWORD: ${TRAILOX_RS_PASSWORD}              # a Redshift monitoring user's password
+      # HTTPS_PROXY: http://proxy.internal:3128
+      # NO_PROXY: clickhouse.internal,10.0.0.0/8
+      # SSL_CERT_FILE: /etc/trailox/corp-ca.pem                # mount it read-only below
+      # TRAILOX_LOG_LEVEL: Information
+
+    volumes:
+      - ./agent.yaml:/etc/trailox/agent.yaml:ro
+      # - ./corp-ca.pem:/etc/trailox/corp-ca.pem:ro
+      # - ./trailox_agent.p8:/run/secrets/sf_key:ro             # a Snowflake service user's private key (password_file)

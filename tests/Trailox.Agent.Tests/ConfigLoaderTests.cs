@@ -1,0 +1,119 @@
+using Trailox.Agent.Config;
+
+namespace Trailox.Agent.Tests;
+
+public class ConfigLoaderTests
+{
+    private const string Good = """
+        version: 1
+        gateway: https://agent.trailox.io
+        probeIntervalMinutes: 30
+        endpoints:
+          - alias: prod-cluster
+            engine: clickhouse
+            kind: onprem
+            host: clickhouse.internal
+            port: 8443
+            tls: true
+            clusterName: ""
+            username: trailox_monitor
+            password_env: CH_PW
+            collectSessionLog: true
+            storeRawQueryText: false
+            excludedDatabases: [hr_private]
+        """;
+
+    /// <summary>A secret source for tests: no environment, no filesystem.</summary>
+    private sealed class FakeSecrets : ISecretReader
+    {
+        public Dictionary<string, string> Env { get; } = new();
+        public Dictionary<string, string> Files { get; } = new();
+
+        public string? FromEnvironment(string variable) => Env.TryGetValue(variable, out var v) ? v : null;
+
+        public string FromFile(string path) => Files.TryGetValue(path, out var v) ? v.TrimEnd('\r', '\n') : throw new FileNotFoundException(path);
+    }
+
+    private static FakeSecrets WithPassword() => new() { Env = { ["CH_PW"] = "s3cret" } };
+
+    [Fact]
+    public void A_good_config_parses_resolves_the_password_and_fingerprints_the_text()
+    {
+        var (config, fingerprint) = ConfigLoader.Parse(Good, WithPassword());
+
+        var e = Assert.Single(config.Endpoints);
+        Assert.Equal("prod-cluster", e.Alias);
+        Assert.Equal("clickhouse", e.Engine);
+        Assert.Equal("s3cret", e.Password);
+        Assert.False(e.StoreRawQueryText);
+        Assert.Equal(new[] { "hr_private" }, e.ExcludedDatabases);
+        Assert.Equal(30, config.ProbeIntervalMinutes);
+        Assert.StartsWith("sha256:", fingerprint);
+        Assert.Equal(7 + 64, fingerprint.Length);
+    }
+
+    [Fact]
+    public void Engine_defaults_apply_only_when_the_field_is_absent()
+    {
+        // Whole lines, indentation included, or the following key inherits eight spaces and the YAML is invalid.
+        var yaml = Good.Replace("    port: 8443\n", "").Replace("    username: trailox_monitor\n", "");
+        var (config, _) = ConfigLoader.Parse(yaml, WithPassword());
+        Assert.Equal(8443, config.Endpoints[0].Port);
+        Assert.Equal("trailox_monitor", config.Endpoints[0].Username);
+    }
+
+    [Fact]
+    public void The_password_never_appears_in_the_serialized_config()
+    {
+        var (config, _) = ConfigLoader.Parse(Good, WithPassword());
+        var yaml = new YamlDotNet.Serialization.SerializerBuilder().Build().Serialize(config);
+        Assert.DoesNotContain("s3cret", yaml);
+    }
+
+    [Fact]
+    public void A_password_file_is_read_and_trailing_newlines_dropped()
+    {
+        var yaml = Good.Replace("password_env: CH_PW", "password_file: /run/secrets/ch");
+        var secrets = new FakeSecrets { Files = { ["/run/secrets/ch"] = "pw-from-file\n" } };
+        var (config, _) = ConfigLoader.Parse(yaml, secrets);
+        Assert.Equal("pw-from-file", config.Endpoints[0].Password);
+    }
+
+    [Theory]
+    [InlineData("alias: prod-cluster", "alias: 'has space'", ".alias")]
+    [InlineData("engine: clickhouse", "engine: postgres", ".engine")]
+    [InlineData("engine: clickhouse", "engine: ''", ".engine")]
+    [InlineData("host: clickhouse.internal", "host: ''", ".host")]
+    [InlineData("port: 8443", "port: 70000", ".port")]
+    [InlineData("clusterName: \"\"", "clusterName: 'a b'", ".clusterName")]
+    [InlineData("username: trailox_monitor", "username: 'x;y'", ".username")]
+    [InlineData("excludedDatabases: [hr_private]", "excludedDatabases: ['drop table']", ".excludedDatabases")]
+    [InlineData("gateway: https://agent.trailox.io", "gateway: http://agent.trailox.io", "gateway")]
+    [InlineData("version: 1", "version: 2", "version")]
+    [InlineData("probeIntervalMinutes: 30", "probeIntervalMinutes: 0", "probeIntervalMinutes")]
+    public void Every_field_that_reaches_sql_or_the_network_is_validated(string from, string to, string expectedInProblem)
+    {
+        var yaml = Good.Replace(from, to);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml, WithPassword()));
+        Assert.Contains(ex.Problems, p => p.Contains(expectedInProblem));
+    }
+
+    [Fact]
+    public void A_missing_password_source_is_reported_not_defaulted()
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Good, new FakeSecrets()));
+        Assert.Contains(ex.Problems, p => p.Contains("CH_PW is not set"));
+
+        var both = Good.Replace("password_env: CH_PW", "password_env: CH_PW\n    password_file: /x");
+        var ex2 = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(both, WithPassword()));
+        Assert.Contains(ex2.Problems, p => p.Contains("exactly one of"));
+    }
+
+    [Fact]
+    public void Duplicate_aliases_and_unknown_keys_are_handled()
+    {
+        var dup = Good + "\n  - alias: prod-cluster\n    engine: clickhouse\n    host: other\n    password_env: CH_PW\n    unknownKey: ignored\n";
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(dup, WithPassword()));
+        Assert.Contains(ex.Problems, p => p.Contains("duplicated"));
+    }
+}
