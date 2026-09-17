@@ -45,8 +45,12 @@ One agent can read any number of endpoints across them.
 
 5. `docker compose up -d`. Your endpoints appear under **Database sources** within a minute.
 
-Kubernetes: [`deploy/kubernetes/agent.yaml`](deploy/kubernetes/agent.yaml), or the Helm chart in
-[`charts/trailox-agent`](charts/trailox-agent).
+Kubernetes: [`deploy/kubernetes/agent.yaml`](deploy/kubernetes/agent.yaml), or the Helm chart:
+
+    helm install trailox-agent oci://ghcr.io/trailox-security/charts/trailox-agent --version <version> -f values.yaml
+
+The image is `ghcr.io/trailox-security/trailox-agent`, tagged with each release version and with
+`1` for the latest 1.x release.
 
 ## Configuration
 
@@ -152,7 +156,7 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
   private-CA aware through the standard environment variables.
 - Images are signed with Sigstore cosign and carry SPDX and CycloneDX SBOM attestations:
 
-      cosign verify public.ecr.aws/trailox/trailox-agent:1 \
+      cosign verify ghcr.io/trailox-security/trailox-agent:1 \
         --certificate-identity-regexp '^https://github.com/Trailox-Security/trailox-agent/' \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com
 

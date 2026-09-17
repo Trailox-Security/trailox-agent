@@ -1,6 +1,6 @@
 # Trailox Agent Helm values.
 image:
-  repository: public.ecr.aws/trailox/trailox-agent
+  repository: ghcr.io/trailox-security/trailox-agent
   tag: "1"
   pullPolicy: IfNotPresent
 

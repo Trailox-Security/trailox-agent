@@ -28,7 +28,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: agent
-          image: public.ecr.aws/trailox/trailox-agent:1
+          image: ghcr.io/trailox-security/trailox-agent:1
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

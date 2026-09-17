@@ -10,7 +10,7 @@
 
 services:
   trailox-agent:
-    image: public.ecr.aws/trailox/trailox-agent:1
+    image: ghcr.io/trailox-security/trailox-agent:1
     restart: unless-stopped
 
     # ---- hardening: the container runs as an unprivileged user on a read-only filesystem ----
