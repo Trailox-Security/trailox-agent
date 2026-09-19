@@ -258,7 +258,8 @@ numbers, booleans, strings or null; timestamps as ISO 8601 text with microsecond
 | `catalog_users` | `pg_user` (name, id and privilege flags only) | | yes |
 | `catalog_grants` | `svv_relation_privileges` | | yes |
 
-`excludedDatabases` filters `database_name` on the statement, text, detail and unload streams.
+`excludedDatabases` filters `database_name` on the statement, text and unload streams. The
+detail stream and the catalog streams are not filtered.
 With `storeRawQueryText` false, the `query_text` stream is read without its `text` column.
 
 ```sql

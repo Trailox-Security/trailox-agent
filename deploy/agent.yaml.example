@@ -46,7 +46,7 @@ endpoints:
   #     database: dev                                  # the database to sign in to
   #   collectSessionLog: true                          # sign-ins from sys_connection_log
   #   storeRawQueryText: true                          # false = sys_query_text is never shipped
-  #   excludedDatabases: []                            # databases whose statements are never shipped
+  #   excludedDatabases: []                            # statements, text and UNLOADs never shipped (detail and catalog are)
 
   # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
   # stays here; register only the public half on the user.

@@ -26,13 +26,18 @@ One agent can read any number of endpoints across them.
 - Once a day, a catalog snapshot: tables, columns, users and grants.
 - **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
   so it never leaves the database.
-- Statements touching databases in `excludedDatabases` are filtered out in the `SELECT` itself
-  (on Databricks and Snowflake those databases are also left out of the catalog snapshot).
+- `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
+  engine:
+  - **ClickHouse:** statements that touch those databases. The catalog snapshot still lists them.
+  - **Amazon Redshift:** statements, their text and `UNLOAD` records. The per-step detail
+    (`sys_query_detail`) and the catalog snapshot still include them.
+  - **Snowflake** and **Databricks:** the catalog snapshot only. Statements that touch those
+    databases are still shipped.
 - Never: table data, credentials, or anything outside the audit and catalog views listed below.
 
 ## Quick start (docker compose)
 
-1. In Trailox, open **Settings → Agents → Enrol an agent**. Copy the key; it is shown once.
+1. In Trailox, open **Settings → Trailox Agents → Enrol an agent**. Copy the key; it is shown once.
 2. On the same page, generate the setup script for your database and run it. It creates a
    read-only monitoring account (see the per-engine notes below).
 3. Save [`deploy/agent.yaml.example`](deploy/agent.yaml.example) as `agent.yaml` next to
@@ -72,7 +77,7 @@ be committed.
 | `options` | Engine-specific extras (see below) |
 | `collectSessionLog` | Also ship login and session events (default `true`) |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
-| `excludedDatabases` | Databases whose statements are never shipped |
+| `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
 
 Environment: `TRAILOX_AGENT_KEY` (or `TRAILOX_AGENT_KEY_FILE`), `TRAILOX_CONFIG`,
 `TRAILOX_LOG_LEVEL`, and the standard `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`.
