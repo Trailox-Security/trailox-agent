@@ -83,6 +83,18 @@ public sealed class DbxStatements
         return null;
     }
 
+    /// <summary>A result page that could not be fetched, naming the storage HOST.</summary>
+    /// <remarks>
+    /// Never the URL: its query string is a signature that grants the page to whoever holds it,
+    /// for fifteen minutes. The host is all an allow-list needs.
+    /// </remarks>
+    internal static string StorageFailure(string url, int chunkIndex, string reason)
+    {
+        var host = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : "(unreadable link)";
+        return $"result page {chunkIndex} could not be fetched from the workspace's result storage at {host} ({reason}). "
+             + $"If outbound traffic is restricted where the agent runs, allow HTTPS to {host}.";
+    }
+
     /// <summary>
     /// The rows of every page in order, one JSON array each, streamed: a page is parsed element
     /// by element as it downloads and is never held whole. Pages after the first are addressed by
@@ -97,15 +109,30 @@ public sealed class DbxStatements
                 : await ChunkLinksAsync(result.StatementId, chunk, ct);
             foreach (var link in links.Where(l => l.ChunkIndex == chunk))
             {
-                using var response = await _links.GetAsync(link.Url, HttpCompletionOption.ResponseHeadersRead, ct);
-                if (!response.IsSuccessStatusCode)
+                // A strict outbound policy shows up HERE, not on the workspace: result pages are
+                // presigned links on the workspace's result storage, a second host. The error names
+                // that host so the allow-list can be fixed from the log.
+                HttpResponseMessage response;
+                try
                 {
-                    throw new DbxException((int)response.StatusCode, $"result page {link.ChunkIndex} could not be fetched from storage");
+                    response = await _links.GetAsync(link.Url, HttpCompletionOption.ResponseHeadersRead, ct);
                 }
-                await using var stream = await response.Content.ReadAsStreamAsync(ct);
-                await foreach (var row in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(stream, cancellationToken: ct))
+                catch (Exception ex) when (ex is HttpRequestException || (ex is TaskCanceledException && !ct.IsCancellationRequested))
                 {
-                    yield return row;
+                    throw new SourceException(StorageFailure(link.Url, link.ChunkIndex, ex.Message));
+                }
+
+                using (response)
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new DbxException((int)response.StatusCode, StorageFailure(link.Url, link.ChunkIndex, "the request was refused"));
+                    }
+                    await using var stream = await response.Content.ReadAsStreamAsync(ct);
+                    await foreach (var row in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(stream, cancellationToken: ct))
+                    {
+                        yield return row;
+                    }
                 }
             }
         }

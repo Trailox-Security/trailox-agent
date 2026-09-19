@@ -21,6 +21,23 @@ public class DatabricksEngineTests
         StoreRawQueryText = text, ExcludedDatabases = excluded.ToList(),
     };
 
+    /// <summary>
+    /// A blocked result page must say which host to allow, and must never repeat the signed link:
+    /// its query string grants the page to whoever reads the log.
+    /// </summary>
+    [Fact]
+    public void A_result_page_that_cannot_be_fetched_names_the_storage_host_and_not_the_link()
+    {
+        var message = DbxStatements.StorageFailure(
+            "https://us-west-2.storage.cloud.databricks.com/results/page-3?X-Amz-Signature=abc123&X-Amz-Expires=900",
+            3, "Connection refused");
+
+        Assert.Contains("result page 3", message);
+        Assert.Contains("allow HTTPS to us-west-2.storage.cloud.databricks.com", message);
+        Assert.DoesNotContain("X-Amz-Signature", message);
+        Assert.DoesNotContain("/results/page-3", message);
+    }
+
     [Fact]
     public void Registry_knows_databricks()
     {
