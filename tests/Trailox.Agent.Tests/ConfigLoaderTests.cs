@@ -56,6 +56,40 @@ public class ConfigLoaderTests
         Assert.Contains("endpoints: at least one endpoint is required", ex.Problems);
     }
 
+    /// <summary>
+    /// A block uncommented one line too far - its heading comment along with it - is how agent.yaml
+    /// usually breaks by hand. 1.3.1 died on it with "Unhandled exception" and a stack trace.
+    /// </summary>
+    [Fact]
+    public void A_yaml_syntax_error_is_a_problem_that_says_where_not_a_crash()
+    {
+        var yaml = Good + "\n  An Amazon Redshift cluster, uncommented by mistake:\n";
+
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml, WithPassword()));
+
+        var problem = Assert.Single(ex.Problems);
+        Assert.StartsWith("line 17, column 3: ", problem);
+        Assert.DoesNotContain("Idx", problem);
+    }
+
+    [Fact]
+    public void A_value_of_the_wrong_type_says_where_it_is()
+    {
+        var yaml = Good.Replace("port: 8443", "port: eighty");
+
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml, WithPassword()));
+
+        Assert.StartsWith("line 9, column ", Assert.Single(ex.Problems));
+    }
+
+    [Fact]
+    public void An_unreadable_agent_yaml_is_a_config_failure_not_a_crash()
+    {
+        Assert.True(Program.IsConfigFailure(new UnauthorizedAccessException("Access to the path '/etc/trailox/agent.yaml' is denied.")));
+        Assert.True(Program.IsConfigFailure(new FileNotFoundException("agent.yaml")));
+        Assert.False(Program.IsConfigFailure(new InvalidOperationException()));
+    }
+
     [Fact]
     public void An_empty_excluded_databases_key_is_an_empty_list()
     {

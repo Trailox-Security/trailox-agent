@@ -48,7 +48,7 @@ public static class Program
                     Console.WriteLine($"ok: {cfg.Endpoints.Count} endpoint(s), gateway {cfg.Gateway}, {fp}");
                     return 0;
                 }
-                catch (Exception ex) when (ex is ConfigException or IOException)
+                catch (Exception ex) when (IsConfigFailure(ex))
                 {
                     Console.Error.WriteLine(ex.Message);
                     return ExitConfigInvalid;
@@ -71,7 +71,7 @@ public static class Program
         {
             (config, fingerprint) = ConfigLoader.Load(ConfigPath, new EnvironmentSecretReader());
         }
-        catch (Exception ex) when (ex is ConfigException or IOException)
+        catch (Exception ex) when (IsConfigFailure(ex))
         {
             Console.Error.WriteLine(ex.Message);
             return ExitConfigInvalid;
@@ -140,6 +140,14 @@ public static class Program
         logging.AddFilter("System.Net.Http", LogLevel.Warning);
         logging.AddFilter("Microsoft", LogLevel.Warning);
     }
+
+    /// <summary>
+    /// A problem with agent.yaml itself: invalid, missing, or unreadable - an agent.yaml the
+    /// container's user may not read (it runs as 10001) fails with UnauthorizedAccessException, which
+    /// is not an IOException. Each is reported in one message and exits 2, never as a stack trace.
+    /// </summary>
+    internal static bool IsConfigFailure(Exception ex) =>
+        ex is ConfigException or IOException or UnauthorizedAccessException;
 
     private static string? ReadAgentKey()
     {

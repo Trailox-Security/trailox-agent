@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Trailox.Agent.Engines;
+using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -32,7 +33,7 @@ public static class ConfigLoader
     /// <summary>Parses, validates and resolves credentials. Throws <see cref="ConfigException"/> listing every problem.</summary>
     public static (AgentConfig Config, string Fingerprint) Parse(string yamlText, ISecretReader secrets)
     {
-        var config = Yaml.Deserialize<AgentConfig>(yamlText) ?? new AgentConfig();
+        var config = Deserialize(yamlText);
 
         // A list key with nothing but comments under it - `endpoints:` with every example commented
         // out, which is how an agent.yaml starts - reads as null and overrides the empty default.
@@ -51,6 +52,27 @@ public static class ConfigLoader
             throw new ConfigException(problems);
         }
         return (config, "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(yamlText))).ToLowerInvariant());
+    }
+
+    /// <summary>
+    /// The file as YAML. A syntax error, or a value of the wrong type, becomes a problem that says
+    /// where it is: the file is edited by hand, and a block uncommented one line too far used to end
+    /// in "Unhandled exception" and a stack trace.
+    /// </summary>
+    private static AgentConfig Deserialize(string yamlText)
+    {
+        try
+        {
+            return Yaml.Deserialize<AgentConfig>(yamlText) ?? new AgentConfig();
+        }
+        catch (YamlException ex)
+        {
+            // A wrong-typed value arrives wrapped ("Exception during deserialization"); its inner
+            // message is the one that says what is wrong.
+            var what = ex.InnerException?.Message ?? ex.Message;
+            var where = ex.Start.Line > 0 ? $"line {ex.Start.Line}, column {ex.Start.Column}: " : "";
+            throw new ConfigException(new[] { where + what });
+        }
     }
 
     /// <summary>Every problem, in order. Resolves each endpoint's password as a side effect.</summary>
