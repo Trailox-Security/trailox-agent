@@ -33,6 +33,18 @@ public static class ConfigLoader
     public static (AgentConfig Config, string Fingerprint) Parse(string yamlText, ISecretReader secrets)
     {
         var config = Yaml.Deserialize<AgentConfig>(yamlText) ?? new AgentConfig();
+
+        // A list key with nothing but comments under it - `endpoints:` with every example commented
+        // out, which is how an agent.yaml starts - reads as null and overrides the empty default.
+        // Treat it as empty, so the answer is "add an endpoint" rather than a NullReferenceException.
+        config.Endpoints ??= new List<EndpointConfig>();
+        config.Endpoints.RemoveAll(e => e is null);
+        foreach (var e in config.Endpoints)
+        {
+            e.ExcludedDatabases ??= new List<string>();
+            e.Options ??= new Dictionary<string, string>();
+        }
+
         var problems = Validate(config, secrets);
         if (problems.Count > 0)
         {

@@ -36,6 +36,36 @@ public class ConfigLoaderTests
 
     private static FakeSecrets WithPassword() => new() { Env = { ["CH_PW"] = "s3cret" } };
 
+    /// <summary>
+    /// Every example commented out is how an agent.yaml starts. YAML reads the bare key as null;
+    /// 1.3.0 died on it with a NullReferenceException instead of saying what to do.
+    /// </summary>
+    [Fact]
+    public void Endpoints_with_only_comments_under_them_is_a_clear_problem_not_a_crash()
+    {
+        const string yaml = """
+            version: 1
+            gateway: https://agent.trailox.io
+            endpoints:
+              # - alias: prod-cluster
+              #   engine: clickhouse
+            """;
+
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml, new FakeSecrets()));
+
+        Assert.Contains("endpoints: at least one endpoint is required", ex.Problems);
+    }
+
+    [Fact]
+    public void An_empty_excluded_databases_key_is_an_empty_list()
+    {
+        var yaml = Good.Replace("excludedDatabases: [hr_private]", "excludedDatabases:");
+
+        var (config, _) = ConfigLoader.Parse(yaml, WithPassword());
+
+        Assert.Empty(config.Endpoints[0].ExcludedDatabases);
+    }
+
     [Fact]
     public void A_good_config_parses_resolves_the_password_and_fingerprints_the_text()
     {
