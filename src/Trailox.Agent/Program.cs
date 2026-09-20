@@ -87,26 +87,13 @@ public static class Program
         var builder = Host.CreateApplicationBuilder(args);
         ConfigureLogging(builder.Logging);
 
-        // One named HttpClient per engine, plus the gateway's. Timeouts are generous on purpose:
-        // a window on a busy server can take minutes to stream.
-        foreach (var engine in EngineRegistry.All)
-        {
-            builder.Services.AddHttpClient(engine.Name, c => c.Timeout = TimeSpan.FromMinutes(30));
-        }
-        builder.Services.AddHttpClient("gateway", c => c.Timeout = TimeSpan.FromMinutes(30))
-            .ConfigurePrimaryHttpMessageHandler(GatewayHttp.NewHandler);
-        // Snowflake serves every result partition after the first gzip-compressed.
-        builder.Services.AddHttpClient(new Engines.Snowflake.SnowflakeEngine().Name)
-            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
-        // Databricks hands result pages out as presigned storage links that take NO Authorization
-        // header; they are fetched through a client that never carries one.
-        builder.Services.AddHttpClient(Engines.Databricks.DatabricksEngine.LinksClientName, c => c.Timeout = TimeSpan.FromMinutes(30));
+        AddHttpClients(builder.Services);
 
         builder.Services.AddSingleton(config);
         builder.Services.AddSingleton(new ErrorRing());
         builder.Services.AddSingleton(new HealthFile(HealthPath));
         builder.Services.AddSingleton(sp =>
-            new GatewayClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("gateway"), new Uri(config.Gateway), key, Version));
+            new GatewayClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(GatewayClientName), new Uri(config.Gateway), key, Version));
         builder.Services.AddSingleton<IReadOnlyList<EndpointSession>>(sp =>
         {
             var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -126,6 +113,32 @@ public static class Program
         using var host = builder.Build();
         await host.RunAsync();
         return Environment.ExitCode;
+    }
+
+    public const string GatewayClientName = "gateway";
+
+    /// <summary>
+    /// One named HttpClient per engine, plus the gateway's. Timeouts are generous on purpose: a window
+    /// on a busy server can take minutes to stream.
+    /// </summary>
+    internal static void AddHttpClients(IServiceCollection services)
+    {
+        foreach (var engine in EngineRegistry.All)
+        {
+            services.AddHttpClient(engine.Name, c => c.Timeout = TimeSpan.FromMinutes(30));
+        }
+        services.AddHttpClient(GatewayClientName, c => c.Timeout = TimeSpan.FromMinutes(30))
+            .ConfigurePrimaryHttpMessageHandler(GatewayHttp.NewHandler);
+        // Snowflake serves every result partition after the first gzip-compressed.
+        services.AddHttpClient(new Engines.Snowflake.SnowflakeEngine().Name)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AutomaticDecompression = System.Net.DecompressionMethods.All,
+                PooledConnectionLifetime = HttpConnections.Lifetime,
+            });
+        // Databricks hands result pages out as presigned storage links that take NO Authorization
+        // header; they are fetched through a client that never carries one.
+        services.AddHttpClient(Engines.Databricks.DatabricksEngine.LinksClientName, c => c.Timeout = TimeSpan.FromMinutes(30));
     }
 
     private static void ConfigureLogging(ILoggingBuilder logging)

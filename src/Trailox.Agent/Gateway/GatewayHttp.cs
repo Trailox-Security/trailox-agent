@@ -17,21 +17,9 @@ internal static class GatewayHttp
 {
     internal static readonly TimeSpan IdleConnectionLifetime = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// A connection in constant use is retired after this long, so a change of address behind the
-    /// gateway is picked up in the middle of a long backfill. A request already in flight finishes on
-    /// its connection; only reuse stops.
-    /// </summary>
-    /// <remarks>
-    /// The HTTP client factory sets this, to the same two minutes, on the handler it builds itself - and
-    /// not on one it is handed. Supplying a handler to set the idle timeout therefore drops it unless it
-    /// is set here as well, which is what 1.3.3 did.
-    /// </remarks>
-    internal static readonly TimeSpan ConnectionLifetime = TimeSpan.FromMinutes(2);
-
     internal static SocketsHttpHandler NewHandler() => new()
     {
         PooledConnectionIdleTimeout = IdleConnectionLifetime,
-        PooledConnectionLifetime = ConnectionLifetime,
+        PooledConnectionLifetime = HttpConnections.Lifetime,
     };
 }
