@@ -93,7 +93,8 @@ public static class Program
         {
             builder.Services.AddHttpClient(engine.Name, c => c.Timeout = TimeSpan.FromMinutes(30));
         }
-        builder.Services.AddHttpClient("gateway", c => c.Timeout = TimeSpan.FromMinutes(30));
+        builder.Services.AddHttpClient("gateway", c => c.Timeout = TimeSpan.FromMinutes(30))
+            .ConfigurePrimaryHttpMessageHandler(GatewayHttp.NewHandler);
         // Snowflake serves every result partition after the first gzip-compressed.
         builder.Services.AddHttpClient(new Engines.Snowflake.SnowflakeEngine().Name)
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AutomaticDecompression = System.Net.DecompressionMethods.All });
