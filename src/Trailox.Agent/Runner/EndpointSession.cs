@@ -26,7 +26,36 @@ public sealed class EndpointSession
         _probeInterval = probeInterval;
     }
 
-    public bool NeedsProbe => ProbeError != null || DateTime.UtcNow - _probedAtUtc > _probeInterval;
+    /// <summary>
+    /// Whether this source is turned on in Trailox, as of the last check-in. Null until the server has
+    /// said: the first probe has to happen before then, because a probe is how a source registers.
+    /// </summary>
+    public bool? EnabledOnServer { get; private set; }
+
+    /// <summary>
+    /// A source turned off in Trailox is left alone: a probe runs statements, and on Databricks and
+    /// Snowflake that wakes a warehouse on the customer's bill. It matters most when the probe is failing,
+    /// because a failed probe is otherwise retried on every check-in.
+    /// </summary>
+    public bool NeedsProbe => EnabledOnServer != false && (ProbeError != null || DateTime.UtcNow - _probedAtUtc > _probeInterval);
+
+    /// <summary>What a check-in said about this source. Says it in the log once, on the change.</summary>
+    public void HeardFromServer(bool enabled, ILogger logger)
+    {
+        if (EnabledOnServer == enabled)
+        {
+            return;
+        }
+        if (!enabled)
+        {
+            logger.LogInformation("endpoint {Alias} is turned off in Trailox: it will not be probed, and no windows will be sent for it, until it is turned on again", Config.Alias);
+        }
+        else if (EnabledOnServer == false)
+        {
+            logger.LogInformation("endpoint {Alias} is turned on again in Trailox", Config.Alias);
+        }
+        EnabledOnServer = enabled;
+    }
 
     /// <summary>
     /// Asks the server what it is and what it holds. Fails soft into <see cref="ProbeError"/>:

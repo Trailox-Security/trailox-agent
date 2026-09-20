@@ -119,6 +119,7 @@ public sealed class AgentLoop : BackgroundService
             return Cycle.Stop;
         }
 
+        ApplyAssignments(_sessions, response, _logger);
         LogAssignments(response);
         var byId = MapAssignments(response);
 
@@ -140,6 +141,35 @@ public sealed class AgentLoop : BackgroundService
 
         // Right after a batch: back at once for the next windows. Idle: the gateway's cadence.
         return response.Tasks.Count > 0 ? Cycle.MoreWork : Cycle.Idle;
+    }
+
+    /// <summary>
+    /// Whether the server says this source is turned on - or null when this answer does not say.
+    /// </summary>
+    /// <remarks>
+    /// Only an answer about a REGISTERED source carries the customer's setting: "ok", "disabled", and
+    /// "unreachable" (registered, and its last probe failed - which is the state a turned-off source with
+    /// a failing probe is reported in, so the state alone is not enough). "conflict" and "invalid" carry
+    /// the field at its default, false. Reading that as "turned off" would stop probing a source nobody
+    /// turned off, and a source that is not probed can never register. Anything unrecognised is null
+    /// too: not knowing means carrying on as before.
+    /// </remarks>
+    internal static bool? EnabledAccordingTo(EndpointAssignment assignment) =>
+        assignment.State is "ok" or "disabled" or "unreachable" ? assignment.Enabled : null;
+
+    /// <summary>Tells each source what this check-in said about it.</summary>
+    internal static void ApplyAssignments(IReadOnlyList<EndpointSession> sessions, CheckinResponse response, ILogger logger)
+    {
+        foreach (var assignment in response.Endpoints)
+        {
+            var enabled = EnabledAccordingTo(assignment);
+            if (enabled == null)
+            {
+                continue;
+            }
+            sessions.FirstOrDefault(s => string.Equals(s.Config.Alias, assignment.Alias, StringComparison.Ordinal))
+                ?.HeardFromServer(enabled.Value, logger);
+        }
     }
 
     private Dictionary<int, EndpointSession> MapAssignments(CheckinResponse response)
@@ -168,7 +198,9 @@ public sealed class AgentLoop : BackgroundService
 
     private void LogAssignments(CheckinResponse response)
     {
-        foreach (var a in response.Endpoints.Where(a => a.State != "ok"))
+        // A source the customer turned off is not a problem to warn about on every check-in; its session
+        // said so once, when it changed.
+        foreach (var a in response.Endpoints.Where(a => a.State != "ok" && EnabledAccordingTo(a) != false))
         {
             _logger.LogWarning("endpoint {Alias}: {State}{Message}", a.Alias, a.State, string.IsNullOrEmpty(a.Message) ? "" : " - " + a.Message);
         }

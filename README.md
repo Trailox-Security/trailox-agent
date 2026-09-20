@@ -66,7 +66,7 @@ be committed.
 | Key | Meaning |
 |---|---|
 | `gateway` | `https://agent.trailox.io` unless Trailox tells you otherwise |
-| `probeIntervalMinutes` | How often each endpoint is re-probed (default 60) |
+| `probeIntervalMinutes` | How often each endpoint is re-probed (default 60). An endpoint whose probe failed is re-probed at every check-in until it succeeds |
 | `endpoints[].alias` | Short name for the source in Trailox (`[A-Za-z0-9_-]{1,64}`), unique per account |
 | `endpoints[].engine` | `clickhouse`, `databricks`, `redshift` or `snowflake` |
 | `endpoints[].kind` | `cloud` or `onprem`; informational |
@@ -85,6 +85,13 @@ Environment: `TRAILOX_AGENT_KEY` (or `TRAILOX_AGENT_KEY_FILE`), `TRAILOX_CONFIG`
 Commands: `run` (default), `validate-config`, `healthcheck` (exit 0 when the loop ran in the last
 5 minutes), `version`. Exit codes: 2 config invalid, 3 agent key rejected, 4 agent version too old.
 Anything else (database or network unavailable) is retried in place with backoff.
+
+**Turning a source off.** A source you turn off in Trailox is left alone by the agent too: from
+1.3.3 it is not probed, and nothing is read from it, until you turn it on again. The log says so
+once, when it changes. Earlier versions went on probing it, and on Databricks and Snowflake a probe
+runs statements, which can start a warehouse. The agent learns that a source is off from the answer
+to a check-in, so after a restart every endpoint in `agent.yaml` is probed once before that answer
+arrives. To keep the agent away from a database altogether, remove its block from `agent.yaml`.
 
 ## Databases
 

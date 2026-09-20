@@ -30,7 +30,7 @@ In one sentence: **Trailox tells the agent what to read, the agent reads it with
 
 ## 2. Check-in: `POST /v1/agent/checkin`
 
-Sent at start-up, then every `checkinSeconds` (set by Trailox, default 60), and immediately after
+Sent at start-up, then every `checkinSeconds` (set by Trailox in each answer), and immediately after
 the last task of a batch completes. It reports what the agent is configured to read and what it
 found there, and receives the tasks to run.
 
@@ -74,7 +74,7 @@ The report never contains `host`, `port`, credentials or any row data.
 {
   "protocolVersion": 1,
   "minAgentVersion": "1.0.0",
-  "checkinSeconds": 60,
+  "checkinSeconds": 45,
   "endpoints": [
     { "alias": "prod-cluster", "endpointId": 31, "enabled": true, "state": "ok" },
     { "alias": "old-alias", "endpointId": null, "enabled": false, "state": "conflict",
@@ -92,6 +92,11 @@ The report never contains `host`, `port`, credentials or any row data.
 
 - An endpoint in any state other than `ok`, or with `enabled: false`, receives no tasks. The
   `message` explains why and is logged.
+- `enabled` is the switch you set in Trailox, and it says so only in an answer about a registered
+  endpoint: state `ok`, `disabled`, or `unreachable` (registered, and its last probe failed). From
+  1.3.3 the agent stops probing an endpoint such an answer reports as `enabled: false`, and probes
+  it again once one reports `true`. In any other state (`conflict`, `invalid`) the field does not
+  carry your setting, and the agent goes on probing: a probe is how an endpoint registers.
 - A task that was issued but not completed is sent again on the next check-in, so a restarted
   agent resumes where it stopped. Uploading the same task twice is harmless.
 - Windows are half-open, `(startMicros, endMicros]`, in microseconds since the Unix epoch (UTC).
