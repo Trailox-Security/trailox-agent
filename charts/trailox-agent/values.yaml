@@ -30,6 +30,8 @@ config:
       collectSessionLog: true
       storeRawQueryText: true
       excludedDatabases: []
+      # pollMinutes: 10        # 1.4.0: used when Trailox first registers the source (1-1440)
+      # backfillDays: 30       # 1.4.0: used when Trailox first registers the source (0-365)
 
 # Extra environment (proxy, private CA, log level).
 env: []

@@ -94,6 +94,8 @@ public sealed class EndpointSession
         ExcludedDatabases = Config.ExcludedDatabases,
         Caps = Caps,
         ProbeError = ProbeError,
+        PollMinutes = Config.PollMinutes,
+        BackfillDays = Config.BackfillDays,
     };
 
     internal static string Trim(string message) => message.Length > 600 ? message[..600] : message;

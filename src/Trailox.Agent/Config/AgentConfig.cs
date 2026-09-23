@@ -61,6 +61,21 @@ public sealed class EndpointConfig
     public bool StoreRawQueryText { get; set; } = true;
     public List<string> ExcludedDatabases { get; set; } = new();
 
+    /// <summary>
+    /// How often Trailox collects this database, in minutes (1-1440). Null: Trailox's default for the engine.
+    /// </summary>
+    /// <remarks>
+    /// Used when Trailox first registers the source. After that the source's own setting in Trailox
+    /// decides, and Trailox warns when this says something else - change it there. (1.4.0)
+    /// </remarks>
+    public int? PollMinutes { get; set; }
+
+    /// <summary>
+    /// How far back the first collection reads, in days (0-365). Null: 30. Used when Trailox first
+    /// registers the source; a later change is ignored, because history already collected is not re-read. (1.4.0)
+    /// </summary>
+    public int? BackfillDays { get; set; }
+
     /// <summary>Anything an engine needs beyond the common fields, validated by that engine.</summary>
     public Dictionary<string, string> Options { get; set; } = new();
 

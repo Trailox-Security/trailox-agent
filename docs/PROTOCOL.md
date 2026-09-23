@@ -51,6 +51,8 @@ found there, and receives the tasks to run.
       "collectSessionLog": true,
       "storeRawQueryText": true,
       "excludedDatabases": ["hr_private"],
+      "pollMinutes": 10,                    // agent.yaml's, when it sets one (1.4.0); omitted otherwise
+      "backfillDays": 30,                   // agent.yaml's, when it sets one (1.4.0); omitted otherwise
       "caps": {                             // what the probe (section 6) found
         "version": "25.3.2.1",
         "columns": ["is_internal", "authenticated_user", "hostname",
@@ -92,6 +94,12 @@ The report never contains `host`, `port`, credentials or any row data.
 
 - An endpoint in any state other than `ok`, or with `enabled: false`, receives no tasks. The
   `message` explains why and is logged.
+- An `ok` answer may carry a `message` too: something to act on about a healthy source. Today it is
+  sent when a Snowflake source polls faster than its setup script sized the warehouse's daily credit
+  cap for. From 1.4.0 the agent logs it once per distinct message; earlier agents do not show it.
+- `pollMinutes` and `backfillDays` are used when Trailox first registers the source. After that the
+  source's settings in Trailox decide; the agent keeps reporting what agent.yaml says, and Trailox
+  shows a warning when the two differ.
 - `enabled` is the switch you set in Trailox, and it says so only in an answer about a registered
   endpoint: state `ok`, `disabled`, or `unreachable` (registered, and its last probe failed). From
   1.3.3 the agent stops probing an endpoint such an answer reports as `enabled: false`, and probes

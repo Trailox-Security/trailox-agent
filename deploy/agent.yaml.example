@@ -4,6 +4,9 @@ version: 1
 probeIntervalMinutes: 60           # how often each endpoint is re-probed (server version, columns, oldest row)
 gateway: https://agent.trailox.io
 
+# pollMinutes and backfillDays (1.4.0 or later) are optional in every block. Trailox uses them when it
+# first registers the source; after that the source's settings in Trailox decide, and Trailox warns
+# when this file says something else - change the poll interval there.
 endpoints:
   - alias: prod-cluster            # letters, digits, - and _ ; becomes part of every identity on this source
     engine: clickhouse
@@ -18,6 +21,8 @@ endpoints:
     collectSessionLog: true
     storeRawQueryText: true        # false = the SQL text never leaves your network
     excludedDatabases: []          # databases whose statements are never shipped, e.g. ["hr_private"]
+    # pollMinutes: 10              # how often Trailox collects it, 1-1440 minutes
+    # backfillDays: 30             # how far back its first collection reads, 0-365 days
 
   # A Databricks workspace, read through its SQL Statement Execution API as a service
   # principal. The agent holds the principal's OAuth secret; Trailox never sees it.
@@ -31,6 +36,8 @@ endpoints:
   #   collectSessionLog: true                          # sign-ins from system.access.audit
   #   storeRawQueryText: true                          # statement_text is <REDACTED> unless the principal is in databricks_pii_access
   #   excludedDatabases: []                            # Unity Catalog CATALOGS never inventoried (system/samples always excluded)
+  #   pollMinutes: 60                                  # each poll runs statements on the SQL warehouse
+  #   backfillDays: 30                                 # how far back its first collection reads, 0-365 days
 
   # An Amazon Redshift cluster or Serverless workgroup, over the Postgres wire protocol from
   # inside your VPC, as a database user with the sys:monitor role.
@@ -47,6 +54,8 @@ endpoints:
   #   collectSessionLog: true                          # sign-ins from sys_connection_log
   #   storeRawQueryText: true                          # false = sys_query_text is never shipped
   #   excludedDatabases: []                            # statements, text and UNLOADs never shipped (detail and catalog are)
+  #   pollMinutes: 180                                 # Serverless bills at least 60 seconds per poll
+  #   backfillDays: 30                                 # how far back its first collection reads, 0-365 days
 
   # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
   # stays here; register only the public half on the user.
@@ -62,3 +71,7 @@ endpoints:
   #   collectSessionLog: true                          # sign-ins from LOGIN_HISTORY and SESSIONS
   #   storeRawQueryText: true                          # false = QUERY_TEXT and BIND_VALUES are never shipped
   #   excludedDatabases: []                            # databases never inventoried (SNOWFLAKE always excluded)
+  #   pollMinutes: 60                                  # IMPORTANT: a shorter poll needs a larger daily credit cap
+  #                                                    #   than the setup script sets (60 min: 6 credits; 30: 12;
+  #                                                    #   15: 24; 10: 36; 5: 72), or Snowflake suspends the warehouse
+  #   backfillDays: 30                                 # how far back its first collection reads, 0-365 days

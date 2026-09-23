@@ -70,6 +70,12 @@ public sealed class EndpointReport
     public List<string> ExcludedDatabases { get; set; } = new();
     public EndpointCaps Caps { get; set; } = new();
     public string? ProbeError { get; set; }
+
+    /// <summary>agent.yaml's pollMinutes, or null - then not sent. Trailox uses it when it first registers the source. (1.4.0)</summary>
+    public int? PollMinutes { get; set; }
+
+    /// <summary>agent.yaml's backfillDays, or null - then not sent. The same rule as <see cref="PollMinutes"/>. (1.4.0)</summary>
+    public int? BackfillDays { get; set; }
 }
 
 public sealed class EndpointCaps

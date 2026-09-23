@@ -78,6 +78,8 @@ be committed.
 | `collectSessionLog` | Also ship login and session events (default `true`) |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
 | `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
+| `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
+| `backfillDays` | How far back the first collection reads, 0-365 days (default 30). **Used only when Trailox first registers the source**; changing it later re-reads nothing. From 1.4.0 |
 
 Environment: `TRAILOX_AGENT_KEY` (or `TRAILOX_AGENT_KEY_FILE`), `TRAILOX_CONFIG`,
 `TRAILOX_LOG_LEVEL`, and the standard `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`.

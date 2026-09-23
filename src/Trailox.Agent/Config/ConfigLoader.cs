@@ -119,6 +119,16 @@ public static class ConfigLoader
                     problems.Add($"{where}.excludedDatabases: '{db}' is not a plain database name");
                 }
             }
+            // The ranges Trailox accepts for a source it connects to directly, so a value that passes here
+            // is one Trailox will use.
+            if (e.PollMinutes is < 1 or > 1440)
+            {
+                problems.Add($"{where}.pollMinutes: {e.PollMinutes} must be between 1 and 1440 minutes");
+            }
+            if (e.BackfillDays is < 0 or > 365)
+            {
+                problems.Add($"{where}.backfillDays: {e.BackfillDays} must be between 0 and 365 days");
+            }
 
             var engine = EngineRegistry.Find(e.Engine);
             if (engine == null)

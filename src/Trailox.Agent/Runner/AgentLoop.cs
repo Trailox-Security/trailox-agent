@@ -196,17 +196,36 @@ public sealed class AgentLoop : BackgroundService
         LastErrors = _errors.Snapshot(),
     };
 
-    private void LogAssignments(CheckinResponse response)
+    /// <summary>Notes about healthy sources already written, so each is written once, not every check-in.</summary>
+    private readonly HashSet<string> _notesLogged = new(StringComparer.Ordinal);
+
+    private void LogAssignments(CheckinResponse response) => LogAssignments(response, _logger, _notesLogged);
+
+    /// <summary>What this check-in said about each source that needs saying.</summary>
+    /// <remarks>
+    /// A source that is not ok is reported on every check-in, as it always was. A message about a source
+    /// that IS ok is new in 1.4.0 - today, that a Snowflake source polling faster than its setup script
+    /// planned for needs a larger daily credit cap - and it is written once per distinct message: the
+    /// answer repeats it at every check-in. Agents before 1.4.0 never showed it at all.
+    /// </remarks>
+    internal static void LogAssignments(CheckinResponse response, ILogger logger, ISet<string> notesLogged)
     {
         // A source the customer turned off is not a problem to warn about on every check-in; its session
         // said so once, when it changed.
         foreach (var a in response.Endpoints.Where(a => a.State != "ok" && EnabledAccordingTo(a) != false))
         {
-            _logger.LogWarning("endpoint {Alias}: {State}{Message}", a.Alias, a.State, string.IsNullOrEmpty(a.Message) ? "" : " - " + a.Message);
+            logger.LogWarning("endpoint {Alias}: {State}{Message}", a.Alias, a.State, string.IsNullOrEmpty(a.Message) ? "" : " - " + a.Message);
+        }
+        foreach (var a in response.Endpoints.Where(a => a.State == "ok" && !string.IsNullOrEmpty(a.Message)))
+        {
+            if (notesLogged.Add(a.Alias + "\n" + a.Message))
+            {
+                logger.LogWarning("endpoint {Alias}: {Message}", a.Alias, a.Message);
+            }
         }
         if (response.Tasks.Count > 0)
         {
-            _logger.LogInformation("check-in: {Tasks} task(s) to run", response.Tasks.Count);
+            logger.LogInformation("check-in: {Tasks} task(s) to run", response.Tasks.Count);
         }
     }
 
