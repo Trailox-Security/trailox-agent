@@ -1,5 +1,9 @@
 # Trailox Agent configuration. No secret belongs in this file: passwords are referenced by
 # environment variable (password_env) or by file (password_file), so it can be committed.
+#
+# Any other value can come from the agent's environment instead (1.5.0 or later): ${NAME},
+# ${NAME:-default}, or ${NAME:-} to leave the key to its default - e.g. host: ${CH_HOST} or
+# port: ${CH_PORT:-8443}. Inside [...] or {...} quote it: excludedDatabases: ["${CH_EXCLUDED}"].
 version: 1
 probeIntervalMinutes: 60           # how often each endpoint is re-probed (server version, columns, oldest row)
 gateway: https://agent.trailox.io

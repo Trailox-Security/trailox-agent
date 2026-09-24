@@ -37,6 +37,10 @@ spec:
             capabilities:
               drop: ["ALL"]
           envFrom:
+            {{- /* Extra sources first: the last source wins a duplicate key, so existingSecret always does. */}}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             - secretRef:
                 name: {{ .Values.existingSecret }}
           {{- with .Values.env }}

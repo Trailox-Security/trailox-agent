@@ -40,6 +40,7 @@ spec:
           #   - { name: HTTPS_PROXY, value: "http://proxy.internal:3128" }
           #   - { name: NO_PROXY,    value: "clickhouse.internal,10.0.0.0/8" }
           #   - { name: SSL_CERT_FILE, value: "/etc/trailox/ca/corp-ca.pem" }
+          #   - { name: CH_HOST, valueFrom: { configMapKeyRef: { name: db-endpoints, key: ch_host } } }   # agent.yaml: host: ${CH_HOST} (1.5.0 or later)
           volumeMounts:
             - { name: config, mountPath: /etc/trailox, readOnly: true }
             - { name: tmp,    mountPath: /tmp }

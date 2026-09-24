@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Trailox.Agent.Engines;
 using YamlDotNet.Core;
@@ -26,14 +27,14 @@ public static class ConfigLoader
         .IgnoreUnmatchedProperties()
         .Build();
 
-    /// <summary>Reads the file and parses it. The fingerprint is of the file's bytes, for the check-in.</summary>
+    /// <summary>Reads the file and parses it. The fingerprint is for the check-in; see <see cref="Fingerprint"/>.</summary>
     public static (AgentConfig Config, string Fingerprint) Load(string path, ISecretReader secrets) =>
         Parse(File.ReadAllText(path), secrets);
 
     /// <summary>Parses, validates and resolves credentials. Throws <see cref="ConfigException"/> listing every problem.</summary>
     public static (AgentConfig Config, string Fingerprint) Parse(string yamlText, ISecretReader secrets)
     {
-        var config = Deserialize(yamlText);
+        var (config, uses) = Deserialize(yamlText, secrets);
 
         // A list key with nothing but comments under it - `endpoints:` with every example commented
         // out, which is how an agent.yaml starts - reads as null and overrides the empty default.
@@ -51,19 +52,26 @@ public static class ConfigLoader
         {
             throw new ConfigException(problems);
         }
-        return (config, "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(yamlText))).ToLowerInvariant());
+        return (config, Fingerprint(yamlText, uses));
     }
 
     /// <summary>
-    /// The file as YAML. A syntax error, or a value of the wrong type, becomes a problem that says
-    /// where it is: the file is edited by hand, and a block uncommented one line too far used to end
-    /// in "Unhandled exception" and a stack trace.
+    /// The file as YAML, every <c>${NAME}</c> in its values read from the environment
+    /// (<see cref="EnvironmentValues"/>). A syntax error, a value of the wrong type, or a reference that
+    /// cannot be resolved becomes a problem that says where it is: the file is edited by hand, and a block
+    /// uncommented one line too far used to end in "Unhandled exception" and a stack trace.
     /// </summary>
-    private static AgentConfig Deserialize(string yamlText)
+    private static (AgentConfig Config, IReadOnlyList<EnvironmentValues.Use> Uses) Deserialize(string yamlText, ISecretReader secrets)
     {
         try
         {
-            return Yaml.Deserialize<AgentConfig>(yamlText) ?? new AgentConfig();
+            var expanded = EnvironmentValues.Expand(yamlText, secrets.FromEnvironment);
+            if (expanded.Problems.Count > 0)
+            {
+                // Before deserializing: what would follow from a value that is not there is only noise.
+                throw new ConfigException(expanded.Problems);
+            }
+            return (Yaml.Deserialize<AgentConfig>(new EventReplay(expanded.Events)) ?? new AgentConfig(), expanded.Uses);
         }
         catch (YamlException ex)
         {
@@ -73,6 +81,17 @@ public static class ConfigLoader
             var where = ex.Start.Line > 0 ? $"line {ex.Start.Line}, column {ex.Start.Column}: " : "";
             throw new ConfigException(new[] { where + what });
         }
+    }
+
+    /// <summary>
+    /// Of the file's text: unchanged from 1.4 for a file without <c>${NAME}</c>, so an upgrade does not look
+    /// like a config change. With references, of the values they resolved to as well, because the same file
+    /// then describes a different config in a different environment. No credential is among them.
+    /// </summary>
+    private static string Fingerprint(string yamlText, IReadOnlyList<EnvironmentValues.Use> uses)
+    {
+        var hashed = uses.Count == 0 ? yamlText : yamlText + "\n" + JsonSerializer.Serialize(uses);
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(hashed))).ToLowerInvariant();
     }
 
     /// <summary>Every problem, in order. Resolves each endpoint's password as a side effect.</summary>
@@ -153,6 +172,18 @@ public static class ConfigLoader
         if (hasEnv == hasFile)
         {
             problems.Add($"{where}: exactly one of password_env or password_file is required");
+            return;
+        }
+        // Never expanded: they already say where the credential is, and ${CH_PW} would make the password
+        // itself the name - then printed in the problem below.
+        if (hasEnv && e.PasswordEnv!.Contains("${"))
+        {
+            problems.Add($"{where}.password_env: password_env takes the variable's name, e.g. password_env: TRAILOX_CH_PROD_PASSWORD; ${{...}} is not expanded here");
+            return;
+        }
+        if (hasFile && e.PasswordFile!.Contains("${"))
+        {
+            problems.Add($"{where}.password_file: password_file takes a path, e.g. password_file: /run/secrets/ch_prod; ${{...}} is not expanded here");
             return;
         }
         try

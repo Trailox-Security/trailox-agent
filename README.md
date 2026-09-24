@@ -61,7 +61,8 @@ The image is `ghcr.io/trailox-security/trailox-agent`, tagged with each release 
 
 `agent.yaml` (default path `/etc/trailox/agent.yaml`, override with `TRAILOX_CONFIG`). **It never
 contains a secret**: credentials are referenced by environment variable or file, so the file can
-be committed.
+be committed. Any other value can be written in the file or taken from the environment; see
+[Values from the environment](#values-from-the-environment).
 
 | Key | Meaning |
 |---|---|
@@ -81,8 +82,73 @@ be committed.
 | `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
 | `backfillDays` | How far back the first collection reads, 0-365 days (default 30). **Used only when Trailox first registers the source**; changing it later re-reads nothing. From 1.4.0 |
 
+### Values from the environment
+
+From 1.5.0 any value in `agent.yaml` can come from the agent's environment instead of the file, so a
+Helm chart or a compose file can supply it. A value written in the file works as before.
+
+| Written | Result |
+|---|---|
+| `${NAME}` | The variable's value. When it is not set or empty the agent does not start (exit 2), and names the line, the key and the variable |
+| `${NAME:-default}` | The variable's value, or `default` when it is not set or empty |
+| `${NAME:-}` | The variable's value; when it is not set or empty the key is left out, so its default applies (a list item is dropped) |
+| `$${` | A literal `${` |
+
+    endpoints:
+      - alias: prod-cluster
+        engine: clickhouse
+        host: ${CH_HOST}
+        port: ${CH_PORT:-8443}
+        clusterName: ${CH_CLUSTER:-}
+        username: trailox_monitor
+        password_env: TRAILOX_CH_PROD_PASSWORD
+        excludedDatabases: ["${CH_EXCLUDED}"]
+
+- A reference can be the whole value or part of one (`ch-${ENV}.internal`), in any value: numbers,
+  `true`/`false`, list items and `options`. Keys and comments are never read, so a commented-out block
+  may name variables that are not set.
+- Inside `[...]` or `{...}` quote it, as above: there an unquoted `{` is YAML syntax.
+- `NAME` is letters, digits and `_`, not starting with a digit. Anything else after `${`, such as
+  `${NAME:?error}` or a default that contains `${`, is a config problem.
+- The variable's content is taken as text: YAML in it is not read, and `${...}` in it is not expanded
+  again. Trailing newlines are removed, since a value from a file-backed ConfigMap or Secret ends in one;
+  any other control character is a config problem.
+- Credentials still come only through `password_env` and `password_file`, which are never expanded. The
+  agent key's variable, and every variable a `password_env` names, cannot be used as a value: values are
+  reported to Trailox and can appear in error messages.
+- Tools that expand `${...}` themselves need it escaped to pass it on: `$${...}` in a Terraform
+  template or in a compose file that inlines `agent.yaml`, and a quoted delimiter (`<<'EOF'`) for a
+  shell heredoc. Helm does not expand it.
+- The environment is read at start: restart the agent after changing a variable.
+- Agents before 1.5.0 read `${...}` literally and stop with a config problem.
+
+With the Helm chart, put the references in `config` and the variables under `env` (a value, or
+`valueFrom` a ConfigMap or Secret), or list whole ConfigMaps under `extraEnvFrom`, where each key
+becomes a variable of exactly that name:
+
+    config:
+      version: 1
+      gateway: https://agent.trailox.io
+      endpoints:
+        - alias: prod-cluster
+          engine: clickhouse
+          host: ${CH_HOST}
+          port: ${CH_PORT:-8443}
+          password_env: TRAILOX_CH_PROD_PASSWORD
+    env:
+      - name: CH_HOST
+        valueFrom:
+          configMapKeyRef: { name: db-endpoints, key: ch_host }
+    # or a ConfigMap whose keys are the variables themselves (CH_HOST, CH_PORT, ...):
+    # extraEnvFrom:
+    #   - configMapRef: { name: trailox-agent-settings }
+
+After changing a ConfigMap or Secret that the variables come from, `kubectl rollout restart
+deploy/<release>`.
+
 Environment: `TRAILOX_AGENT_KEY` (or `TRAILOX_AGENT_KEY_FILE`), `TRAILOX_CONFIG`,
-`TRAILOX_LOG_LEVEL`, and the standard `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`.
+`TRAILOX_LOG_LEVEL`, the standard `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and any
+variable `agent.yaml` refers to as `${NAME}`.
 
 Commands: `run` (default), `validate-config`, `healthcheck` (exit 0 when the loop ran in the last
 5 minutes), `version`. Exit codes: 2 config invalid, 3 agent key rejected, 4 agent version too old.

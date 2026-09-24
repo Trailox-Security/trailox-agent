@@ -5,6 +5,7 @@ namespace Trailox.Agent.Config;
 /// <summary>
 /// agent.yaml as written by the customer. No secret ever appears in it: credentials are
 /// referenced by environment variable or by file, so the YAML can be committed and shared.
+/// Any other value may also come from the environment as <c>${NAME}</c> (1.5.0, <see cref="EnvironmentValues"/>).
 /// Validation lives in <see cref="ConfigLoader"/> and, per engine, in the engine itself.
 /// </summary>
 public sealed class AgentConfig

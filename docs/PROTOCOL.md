@@ -40,7 +40,8 @@ found there, and receives the tasks to run.
   "agentVersion": "1.3.0",
   "host": "db-jump-01",                     // the container's hostname, informational
   "startedAtUtc": "2026-09-15T10:00:00Z",
-  "configFingerprint": "sha256:...",        // hash of agent.yaml, to show when the config changed
+  "configFingerprint": "sha256:...",        // hash of agent.yaml, and from 1.5.0 of the values its ${...}
+                                            // references resolved to, to show when the config changed
   "endpoints": [
     {
       "alias": "prod-cluster",

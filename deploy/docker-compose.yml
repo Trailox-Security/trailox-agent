@@ -27,6 +27,7 @@ services:
       TRAILOX_CH_PROD_PASSWORD: ${TRAILOX_CH_PROD_PASSWORD}     # referenced by password_env in agent.yaml
       # TRAILOX_DBX_SECRET: ${TRAILOX_DBX_SECRET}                # a Databricks service principal's OAuth secret
       # TRAILOX_RS_PASSWORD: ${TRAILOX_RS_PASSWORD}              # a Redshift monitoring user's password
+      # CH_HOST: clickhouse.internal                            # a value agent.yaml refers to as ${CH_HOST} (1.5.0 or later)
       # HTTPS_PROXY: http://proxy.internal:3128
       # NO_PROXY: clickhouse.internal,10.0.0.0/8
       # SSL_CERT_FILE: /etc/trailox/corp-ca.pem                # mount it read-only below

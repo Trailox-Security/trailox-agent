@@ -14,6 +14,12 @@ image:
 existingSecret: trailox-agent
 
 # agent.yaml, rendered into a ConfigMap. No secret belongs here.
+# Any value can come from the agent's environment instead (agent 1.5.0 or later): ${NAME}, ${NAME:-default},
+# or ${NAME:-} to leave the key to its default - e.g. host: ${CH_HOST}, port: ${CH_PORT:-8443}. Set the
+# variables under env (a value, or valueFrom) or in a ConfigMap listed in extraEnvFrom. Inside [...] or {...}
+# quote the reference: excludedDatabases: ["${CH_EXCLUDED}"]. Credentials still come only through
+# password_env / password_file. The environment is read when the pod starts: after changing a ConfigMap or
+# Secret it comes from, run kubectl rollout restart deploy/<release>.
 config:
   version: 1
   gateway: https://agent.trailox.io
@@ -33,7 +39,7 @@ config:
       # pollMinutes: 10        # 1.4.0: used when Trailox first registers the source (1-1440)
       # backfillDays: 30       # 1.4.0: used when Trailox first registers the source (0-365)
 
-# Extra environment (proxy, private CA, log level).
+# Extra environment (proxy, private CA, log level, and the variables config refers to as ${NAME}).
 env: []
 #  - name: HTTPS_PROXY
 #    value: http://proxy.internal:3128
@@ -41,6 +47,16 @@ env: []
 #    value: clickhouse.internal,10.0.0.0/8
 #  - name: SSL_CERT_FILE
 #    value: /etc/trailox/ca/corp-ca.pem
+#  - name: CH_HOST                     # config: host: ${CH_HOST}
+#    valueFrom:
+#      configMapKeyRef: { name: db-endpoints, key: ch_host }
+
+# Whole ConfigMaps (or Secrets) as environment, for the variables config refers to as ${NAME} (agent 1.5.0
+# or later). Each key becomes a variable of exactly that name: a key CH_HOST serves ${CH_HOST}. They come
+# before existingSecret, so a key here never replaces the agent key or a password.
+extraEnvFrom: []
+#  - configMapRef:
+#      name: trailox-agent-settings
 
 # Mount a private CA bundle from an existing ConfigMap (key: corp-ca.pem) at /etc/trailox/ca.
 caConfigMap: ""
