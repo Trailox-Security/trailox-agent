@@ -1,7 +1,10 @@
 # Trailox Agent Helm values.
 image:
   repository: ghcr.io/trailox-security/trailox-agent
-  tag: "1"
+  # Empty: the agent version this chart was released with, so upgrading the chart upgrades the agent on
+  # every node. Set it to run another version. "1" follows the latest 1.x release, but a node that already
+  # has "1" keeps the copy it pulled while pullPolicy is IfNotPresent.
+  tag: ""
   pullPolicy: IfNotPresent
 
 # The agent key (shown once at enrolment) and every database password come from ONE existing

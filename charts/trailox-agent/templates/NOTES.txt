@@ -1,4 +1,4 @@
-Trailox Agent {{ .Values.image.tag }} deployed as {{ include "trailox-agent.fullname" . }}.
+Trailox Agent {{ include "trailox-agent.imageTag" . }} deployed as {{ include "trailox-agent.fullname" . }}.
 
 The agent reads the Secret "{{ .Values.existingSecret }}" for TRAILOX_AGENT_KEY and the database
 passwords named by password_env in your config. It connects OUT to {{ .Values.config.gateway }}

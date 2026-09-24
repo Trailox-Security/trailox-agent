@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ include "trailox-agent.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

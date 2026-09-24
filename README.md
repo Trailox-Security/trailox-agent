@@ -55,7 +55,10 @@ Kubernetes: [`deploy/kubernetes/agent.yaml`](deploy/kubernetes/agent.yaml), or t
     helm install trailox-agent oci://ghcr.io/trailox-security/charts/trailox-agent --version <version> -f values.yaml
 
 The image is `ghcr.io/trailox-security/trailox-agent`, tagged with each release version and with
-`1` for the latest 1.x release.
+`1` for the latest 1.x release. The chart runs the agent version it was released with, so
+`helm upgrade --version <new>` upgrades the agent; set `image.tag` to run another. `1` moves with each
+release, but a machine that has already pulled it keeps that copy: with compose, upgrade with
+`docker compose pull && docker compose up -d`.
 
 ## Configuration
 
