@@ -1,6 +1,10 @@
+using System.Collections;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
 namespace Trailox.Agent.Config;
 
@@ -8,7 +12,8 @@ namespace Trailox.Agent.Config;
 /// <c>${NAME}</c> in agent.yaml (1.5.0): a value, or part of one, taken from the agent's environment, so a
 /// Helm chart or a compose file can supply what the file leaves open. <c>${NAME:-default}</c> falls back to
 /// the default when NAME is not set or empty, <c>${NAME:-}</c> then leaves the key out, and <c>$${</c> is a
-/// literal <c>${</c>.
+/// literal <c>${</c>. Every value the agent reads passes here too (1.5.2): a key written with no value is a
+/// problem, and a value keeps no trailing line break and holds no other control character.
 /// </summary>
 /// <remarks>
 /// Values only: never keys, never comments, and never password_env or password_file, which already say
@@ -19,6 +24,17 @@ internal static class EnvironmentValues
 {
     /// <summary>The agent key's variable. It, and every variable a password_env names, is never read as a value.</summary>
     public const string AgentKeyVariable = "TRAILOX_AGENT_KEY";
+
+    private const string NoValue = "no value - write one, or remove the line to use the default";
+    private const string NoItem = "an item with no value - write one, or remove it";
+    private const string ControlCharacter = "holds a control character - remove it";
+
+    /// <summary>
+    /// The keys that hold one value, from the classes agent.yaml is read into - never a list or a map, which
+    /// may be left empty. A key in neither set is one the agent does not know, and stays ignored.
+    /// </summary>
+    private static readonly HashSet<string> TopLevelValues = ValueKeys(typeof(AgentConfig));
+    private static readonly HashSet<string> EndpointValues = ValueKeys(typeof(EndpointConfig));
 
     /// <summary>Their values name where a credential is: never expanded, and <see cref="ConfigLoader"/> says so.</summary>
     private static readonly HashSet<string> CredentialKeys = new(StringComparer.Ordinal) { "password_env", "password_file" };
@@ -76,15 +92,47 @@ internal static class EnvironmentValues
         var uses = new List<Use>();
         for (var i = 0; i < events.Count; i++)
         {
-            if (places[i] is not { } place || events[i] is not Scalar scalar || !scalar.Value.Contains("${") || credentialNames.Contains(i))
+            if (places[i] is not { } place || events[i] is not Scalar scalar)
+            {
+                continue;
+            }
+            var read = IsReadValue(place);
+            if (HasNoValue(scalar))
+            {
+                // YamlDotNet reads `tls:` as null and a null true/false as false - TLS off - and a null name
+                // crashed the checks (1.5.2).
+                if (read)
+                {
+                    problems.Add((i, place.InSequence ? NoItem : NoValue));
+                }
+                continue;
+            }
+            var expand = scalar.Value.Contains("${") && !credentialNames.Contains(i);
+            if (!expand && !read)
             {
                 continue;
             }
             var found = new List<string>();
-            var value = Substitute(scalar, environment, refused, found, uses);
+            var value = expand ? Substitute(scalar, environment, refused, found, uses) : scalar.Value;
+            // One rule for a value written here and one from the environment: trailing line breaks go - a YAML
+            // `|` block adds one, and .NET's $ matches just before it, so "hr_private\n" passed its check and
+            // then excluded nothing - and any other control character is refused, without printing the value.
+            value = value.TrimEnd('\r', '\n');
+            if (found.Count == 0 && value.Any(char.IsControl))
+            {
+                found.Add(ControlCharacter);
+            }
             if (found.Count > 0)
             {
                 problems.AddRange(found.Select(what => (i, what)));
+            }
+            else if (!expand)
+            {
+                if (value.Length != scalar.Value.Length)
+                {
+                    // Only its trailing line breaks went, so its style stays.
+                    replaced[i] = new Scalar(scalar.Anchor, scalar.Tag, value, scalar.Style, scalar.IsPlainImplicit, scalar.IsQuotedImplicit, scalar.Start, scalar.End);
+                }
             }
             else if (value.Length > 0)
             {
@@ -177,6 +225,26 @@ internal static class EnvironmentValues
             return value;
         });
     }
+
+    /// <summary>Nothing written: <c>key:</c>, <c>~</c> or <c>null</c> as YAML spells it, or an explicit <c>!!null</c>.</summary>
+    private static bool HasNoValue(Scalar s) =>
+        (!s.Tag.IsEmpty && s.Tag.Value == "tag:yaml.org,2002:null")
+        || (s.Style == ScalarStyle.Plain && s.Tag.IsEmpty && s.Value is "" or "~" or "null" or "Null" or "NULL");
+
+    /// <summary>A value the agent reads: a known key's, an option's, or an item of excludedDatabases.</summary>
+    private static bool IsReadValue(Place p) => p switch
+    {
+        { Endpoint: -1, InSequence: false } => TopLevelValues.Contains(p.Field),
+        { Endpoint: >= 0, InSequence: false } => EndpointValues.Contains(p.Field) || p.Field.StartsWith("options.", StringComparison.Ordinal),
+        { Endpoint: >= 0, InSequence: true } => p.Field == "excludedDatabases",
+        _ => false,
+    };
+
+    private static HashSet<string> ValueKeys(Type type) => type.GetProperties()
+        .Where(p => p.SetMethod is { IsPublic: true } && p.GetCustomAttribute<YamlIgnoreAttribute>() == null)
+        .Where(p => p.PropertyType == typeof(string) || !typeof(IEnumerable).IsAssignableFrom(p.PropertyType))
+        .Select(p => p.GetCustomAttribute<YamlMemberAttribute>()?.Alias ?? CamelCaseNamingConvention.Instance.Apply(p.Name))
+        .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
     /// The value handed on double-quoted: YamlDotNet reads a PLAIN empty, <c>~</c> or <c>null</c> as null, and

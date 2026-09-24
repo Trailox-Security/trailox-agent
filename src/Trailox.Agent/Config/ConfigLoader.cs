@@ -19,8 +19,9 @@ public static class ConfigLoader
     /// <summary>The agent.yaml schema versions this build understands.</summary>
     public static readonly IReadOnlySet<int> SupportedConfigVersions = new HashSet<int> { 1 };
 
-    private static readonly Regex AliasPattern = new("^[A-Za-z0-9_-]{1,64}$", RegexOptions.Compiled);
-    private static readonly Regex DatabasePattern = new("^[A-Za-z0-9_-]{1,255}$", RegexOptions.Compiled);
+    // \z, not $: in .NET $ also matches just before a final newline, so "hr_private\n" passed.
+    private static readonly Regex AliasPattern = new(@"^[A-Za-z0-9_-]{1,64}\z", RegexOptions.Compiled);
+    private static readonly Regex DatabasePattern = new(@"^[A-Za-z0-9_-]{1,255}\z", RegexOptions.Compiled);
 
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)

@@ -17,9 +17,10 @@ public sealed class DatabricksEngine : IEngine
 {
     public const string LinksClientName = "databricks-links";
 
-    private static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]{1,255}$", RegexOptions.Compiled);
-    private static readonly Regex WarehousePattern = new("^[0-9a-f]{16}$", RegexOptions.Compiled);
-    private static readonly Regex ApplicationIdPattern = new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", RegexOptions.Compiled);
+    // \z, not $: in .NET $ also matches just before a final newline.
+    private static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]{1,255}\z", RegexOptions.Compiled);
+    private static readonly Regex WarehousePattern = new(@"^[0-9a-f]{16}\z", RegexOptions.Compiled);
+    private static readonly Regex ApplicationIdPattern = new(@"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z", RegexOptions.Compiled);
 
     public string Name => "databricks";
 

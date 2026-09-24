@@ -85,6 +85,12 @@ be committed. Any other value can be written in the file or taken from the envir
 | `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
 | `backfillDays` | How far back the first collection reads, 0-365 days (default 30). **Used only when Trailox first registers the source**; changing it later re-reads nothing. From 1.4.0 |
 
+A key written with no value (`tls:`, or `~` or `null`) is a config problem: write a value, or remove
+the line to use the default. `endpoints`, `excludedDatabases` and `options` may be left empty. A
+value's trailing line breaks are dropped (a YAML `|` block adds one), and any other control character
+in a value is a config problem. From 1.5.2; earlier agents read a key with no value as `false`, `0`
+or nothing, or stopped with a stack trace.
+
 ### Values from the environment
 
 From 1.5.0 any value in `agent.yaml` can come from the agent's environment instead of the file, so a
@@ -114,8 +120,8 @@ Helm chart or a compose file can supply it. A value written in the file works as
 - `NAME` is letters, digits and `_`, not starting with a digit. Anything else after `${`, such as
   `${NAME:?error}` or a default that contains `${`, is a config problem.
 - The variable's content is taken as text: YAML in it is not read, and `${...}` in it is not expanded
-  again. Trailing newlines are removed, since a value from a file-backed ConfigMap or Secret ends in one;
-  any other control character is a config problem.
+  again. Like any value, it loses its trailing line breaks (a value from a file-backed ConfigMap or
+  Secret ends in one), and any other control character is a config problem.
 - Credentials still come only through `password_env` and `password_file`, which are never expanded. The
   agent key's variable, and every variable a `password_env` names, cannot be used as a value: values are
   reported to Trailox and can appear in error messages.

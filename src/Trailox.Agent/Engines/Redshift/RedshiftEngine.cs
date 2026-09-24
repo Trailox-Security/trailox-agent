@@ -20,10 +20,11 @@ public sealed class RedshiftEngine : IEngine
     public const string DefaultDatabase = "dev";
     public const string DatabaseOption = "database";
 
-    private static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]{1,255}$", RegexOptions.Compiled);
-    private static readonly Regex ClusterPattern = new("^[A-Za-z0-9_-]{0,64}$", RegexOptions.Compiled);
-    private static readonly Regex UsernamePattern = new("^[a-z_][a-z0-9_]{0,63}$", RegexOptions.Compiled);
-    private static readonly Regex DatabasePattern = new("^[A-Za-z0-9_]{1,64}$", RegexOptions.Compiled);
+    // \z, not $: in .NET $ also matches just before a final newline.
+    private static readonly Regex HostPattern = new(@"^[A-Za-z0-9.\-]{1,255}\z", RegexOptions.Compiled);
+    private static readonly Regex ClusterPattern = new(@"^[A-Za-z0-9_-]{0,64}\z", RegexOptions.Compiled);
+    private static readonly Regex UsernamePattern = new(@"^[a-z_][a-z0-9_]{0,63}\z", RegexOptions.Compiled);
+    private static readonly Regex DatabasePattern = new(@"^[A-Za-z0-9_]{1,64}\z", RegexOptions.Compiled);
 
     public string Name => "redshift";
 

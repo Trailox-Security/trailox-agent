@@ -21,9 +21,10 @@ public sealed class SnowflakeEngine : IEngine
     public const string DefaultWarehouse = "TRAILOX_MONITOR_WH";
     public const string DomainSuffix = ".snowflakecomputing.com";
 
-    private static readonly Regex AccountPattern = new(@"^[A-Za-z0-9_-]{1,255}(\.[A-Za-z0-9_-]{1,64}){0,2}$", RegexOptions.Compiled);
+    // \z, not $: in .NET $ also matches just before a final newline.
+    private static readonly Regex AccountPattern = new(@"^[A-Za-z0-9_-]{1,255}(\.[A-Za-z0-9_-]{1,64}){0,2}\z", RegexOptions.Compiled);
     // Within the Trailox gateway's limits for clusterName and username: no $, at most 64 characters.
-    private static readonly Regex IdentPattern = new(@"^[A-Za-z_][A-Za-z0-9_]{0,63}$", RegexOptions.Compiled);
+    private static readonly Regex IdentPattern = new(@"^[A-Za-z_][A-Za-z0-9_]{0,63}\z", RegexOptions.Compiled);
 
     public string Name => "snowflake";
 
