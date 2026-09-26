@@ -23,7 +23,8 @@ One agent can read any number of endpoints across them.
 
 - The rows of the audit views for the requested windows: statements run, and logins and sessions
   where the database records them. See each engine below for the exact views.
-- Once a day, a catalog snapshot: tables, columns, users and grants.
+- Once a day, a catalog snapshot: tables, columns, users and grants. On Databricks (from 1.6.0)
+  it also includes the names of the workspace's service principals.
 - **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
   so it never leaves the database.
 - `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
@@ -33,7 +34,8 @@ One agent can read any number of endpoints across them.
     (`sys_query_detail`) and the catalog snapshot still include them.
   - **Snowflake** and **Databricks:** the catalog snapshot only. Statements that touch those
     databases are still shipped.
-- Never: table data, credentials, or anything outside the audit and catalog views listed below.
+- Never: table data, credentials, or anything outside the audit and catalog views listed below
+  (and, on Databricks, the service principal directory).
 
 ## Quick start (docker compose)
 
@@ -193,6 +195,10 @@ A Unity Catalog workspace, through the SQL Statement Execution API over HTTPS.
 - **Reads:** `system.query.history`, `system.access.table_lineage`,
   `system.access.column_lineage`, `system.access.audit` (sign-ins), and daily the
   `information_schema` tables, columns and privileges of your catalogs.
+- **Service principal names (from 1.6.0):** Databricks records a service principal by its
+  application id only, so once a day the agent also lists the workspace's service principals
+  (application id, display name, active) from the workspace directory. Read-only, and no grant
+  is needed. See [docs/PROTOCOL.md](docs/PROTOCOL.md) 6b.
 - **Account:** a service principal with an OAuth secret that only the agent holds. It needs
   `USE CATALOG` on `system`; `USE SCHEMA` and `SELECT` on `system.query`, `system.access` and
   `system.information_schema`; `BROWSE` on each catalog to inventory; and `CAN USE` on the SQL

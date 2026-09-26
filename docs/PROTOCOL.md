@@ -224,6 +224,7 @@ sent as one JSON object keyed by the result's column names.
 | `catalog_columns` | `system.information_schema.columns` | | yes |
 | `catalog_table_privileges` | `system.information_schema.table_privileges` | | yes |
 | `catalog_schema_privileges` | `system.information_schema.schema_privileges` | | yes |
+| `catalog_service_principals` | the workspace's service principal directory (from 1.6.0; see below) | | yes |
 
 `excludedDatabases` lists Unity Catalog catalogs; `system`, `samples` and `__databricks_internal`
 are always excluded from the catalog streams. When the probe finds statement text masked as
@@ -252,6 +253,22 @@ SELECT current_date() AS snapshot_date, * FROM system.information_schema.schema_
 ```
 
 `[EXCEPT (statement_text)]` is used when `storeRawQueryText` is false.
+
+`catalog_service_principals` (agent 1.6.0 and later) is not a statement. Databricks records a
+service principal in its system tables by application id only, so to show it by name the agent
+lists the workspace's service principals, as the same principal, with one read-only request per
+page of 100:
+
+```
+GET https://<workspace>/api/2.0/preview/scim/v2/ServicePrincipals?attributes=applicationId,displayName,active&startIndex=<n>&count=100
+```
+
+It needs no grant. Every page is read before the upload starts, and each principal is sent as one
+JSON object of four strings: `snapshot_date` (the listing's UTC date, as `current_date()` in the
+catalog statements), `application_id`, `display_name` and `active` (`"true"` or `"false"`). An
+entry without an application id is skipped. If the workspace refuses the listing,
+the task is reported as failed with the workspace's status (`Databricks answered HTTP 403: ...`),
+and nothing else is affected. Users are not listed: the system tables already name a user by email.
 
 ## 6c. Amazon Redshift (engine `redshift`)
 

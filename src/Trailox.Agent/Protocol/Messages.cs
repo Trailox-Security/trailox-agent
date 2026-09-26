@@ -36,6 +36,10 @@ public static class ProtocolInfo
         public const string CatalogTablePrivileges = "catalog_table_privileges";
         public const string CatalogSchemaPrivileges = "catalog_schema_privileges";
 
+        // Databricks (agent 1.6): the workspace's service principal directory, so that an
+        // automated identity shows by its name rather than its application id.
+        public const string CatalogServicePrincipals = "catalog_service_principals";
+
         // Redshift (agent 1.2): text sequences, plan steps and unloads are joined on the Trailox side.
         public const string QueryText = "query_text";
         public const string QueryDetail = "query_detail";
