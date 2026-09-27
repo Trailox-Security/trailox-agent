@@ -4,8 +4,13 @@
 # non-root default user, and a CA bundle. The container runs read-only with every capability
 # dropped (see deploy/docker-compose.yml); the only writable path is a tmpfs at /tmp, used for
 # the liveness file.
+#
+# Published for linux/amd64 and linux/arm64 under the same tags. The build stage runs on the
+# BUILD machine's platform whatever the target: the publish output is portable (no runtime
+# identifier, no app host), so the same files serve both, and only the runtime base below is
+# per platform. An arm64 image therefore needs no emulated build.
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG VERSION=0.1.0
 WORKDIR /src
 COPY src/Trailox.Agent/Trailox.Agent.csproj src/Trailox.Agent/

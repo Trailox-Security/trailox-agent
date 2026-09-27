@@ -62,6 +62,9 @@ The image is `ghcr.io/trailox-security/trailox-agent`, tagged with each release 
 release, but a machine that has already pulled it keeps that copy: with compose, upgrade with
 `docker compose pull && docker compose up -d`.
 
+Every tag serves `linux/amd64` and `linux/arm64` (for example AWS Graviton): Docker and Kubernetes pull
+the one that matches the machine, so the same command and chart work on both.
+
 ## Configuration
 
 `agent.yaml` (default path `/etc/trailox/agent.yaml`, override with `TRAILOX_CONFIG`). **It never
@@ -249,7 +252,9 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 - Runs as UID 10001, read-only root filesystem, all capabilities dropped, `no-new-privileges`.
 - Listens on nothing. Outbound HTTPS to Trailox and connections to your databases only; proxy and
   private-CA aware through the standard environment variables.
-- Images are signed with Sigstore cosign and carry SPDX and CycloneDX SBOM attestations:
+- Images are signed with Sigstore cosign and carry SPDX and CycloneDX SBOM attestations. The
+  multi-platform index a tag points to is signed, and so is each platform's image; each platform's
+  image carries its own SBOMs, and the index carries both:
 
       cosign verify ghcr.io/trailox-security/trailox-agent:1 \
         --certificate-identity-regexp '^https://github.com/Trailox-Security/trailox-agent/' \
@@ -262,6 +267,7 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 
     dotnet test
     docker build -t trailox-agent:dev .
+    docker buildx build --platform linux/arm64 -t trailox-agent:dev-arm64 .   # another platform
 
 ## Protocol
 

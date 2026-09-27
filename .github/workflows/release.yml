@@ -2,6 +2,10 @@
 # chart to the GitHub Container Registry (ghcr.io/trailox-security). Supply-chain controls:
 # cosign keyless signature (Sigstore, bound to this workflow's identity) and SPDX + CycloneDX
 # SBOMs attached as attestations. No stored credentials: the workflow's own token pushes.
+#
+# One tag serves linux/amd64 and linux/arm64: Docker and Kubernetes pull the platform they run
+# on. Both are tested and started on their own hardware (GitHub's arm64 runners) before a tag,
+# and the published images are started again after it.
 name: release
 
 on:
@@ -17,6 +21,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/trailox-security/trailox-agent
   CHARTS: oci://ghcr.io/trailox-security/charts
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   # Nothing that looks like a credential may land in the repository, in any commit.
@@ -30,7 +35,10 @@ jobs:
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 detect --source /repo --redact -v
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -41,8 +49,32 @@ jobs:
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=results.trx"
       - run: dotnet run --project src/Trailox.Agent -c Release --no-build -- version
 
+  # Every push: build the image for each platform on that platform's runner and start it, so a
+  # platform that does not build or start is found before a tag moves `1`.
+  image-check:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and start
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker buildx build --platform "$PLATFORM" --build-arg VERSION=0.0.0-check --load -t trailox-agent:check .
+          test "$(docker image inspect trailox-agent:check --format '{{.Os}}/{{.Architecture}}')" = "$PLATFORM"
+          out="$(docker run --rm trailox-agent:check version)"
+          echo "$PLATFORM: $out"
+          test "$out" = "0.0.0-check"
+
   image:
-    needs: [secret-scan, test]
+    needs: [secret-scan, test, image-check]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -61,12 +93,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # No QEMU: the build stage runs on this runner's platform (see the Dockerfile) and the
+      # runtime stage only copies files, so the arm64 image is assembled, never emulated.
       - uses: docker/setup-buildx-action@v3
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: ${{ env.PLATFORMS }}
           push: true
           build-args: VERSION=${{ steps.v.outputs.version }}
           tags: |
@@ -79,27 +114,49 @@ jobs:
           provenance: true
           sbom: false
 
-      - name: SBOM (SPDX)
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-      - name: SBOM (CycloneDX)
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
-          format: cyclonedx-json
-          output-file: sbom.cdx.json
+      # The build's digest is the multi-platform index (what a tag resolves to); each platform's
+      # image (what a node pulls) has its own.
+      - name: Platform digests
+        id: platforms
+        env:
+          INDEX: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          raw="$(docker buildx imagetools inspect "$INDEX" --raw)"
+          for arch in amd64 arm64; do
+            digest="$(jq -r --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest' <<<"$raw")"
+            test -n "$digest"
+            echo "$arch=$digest" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: anchore/sbom-action/download-syft@v0
+        id: syft
+      - name: SBOMs (SPDX and CycloneDX), one per platform
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          AMD64: ${{ env.IMAGE }}@${{ steps.platforms.outputs.amd64 }}
+          ARM64: ${{ env.IMAGE }}@${{ steps.platforms.outputs.arm64 }}
+        run: |
+          "$SYFT" "registry:$AMD64" -o spdx-json=sbom.amd64.spdx.json -o cyclonedx-json=sbom.amd64.cdx.json
+          "$SYFT" "registry:$ARM64" -o spdx-json=sbom.arm64.spdx.json -o cyclonedx-json=sbom.arm64.cdx.json
 
       - uses: sigstore/cosign-installer@v3
       - name: Sign and attest
         env:
-          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          INDEX: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          AMD64: ${{ env.IMAGE }}@${{ steps.platforms.outputs.amd64 }}
+          ARM64: ${{ env.IMAGE }}@${{ steps.platforms.outputs.arm64 }}
         run: |
-          cosign sign --yes "$REF"
-          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$REF"
-          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
+          cosign sign --yes "$INDEX" "$AMD64" "$ARM64"
+          # Each platform's SBOMs on its own image, and on the index too, where
+          # `cosign verify-attestation <tag>` looks - as it did when there was one platform.
+          for arch in amd64 arm64; do
+            ref="$AMD64"
+            if [ "$arch" = arm64 ]; then ref="$ARM64"; fi
+            for target in "$ref" "$INDEX"; do
+              cosign attest --yes --type spdxjson --predicate "sbom.$arch.spdx.json" "$target"
+              cosign attest --yes --type cyclonedx --predicate "sbom.$arch.cdx.json" "$target"
+            done
+          done
 
       # The chart lives in its own package (charts/trailox-agent), never in the image's.
       - name: Package and push the Helm chart (OCI)
@@ -112,3 +169,18 @@ jobs:
         with:
           name: sbom
           path: sbom.*.json
+
+  # After a release: pull the published version on each platform's own runner and start it.
+  published:
+    needs: image
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Start the published image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          out="$(docker run --rm "$IMAGE:$version" version)"
+          echo "$(uname -m): $out"
+          test "$out" = "$version"
