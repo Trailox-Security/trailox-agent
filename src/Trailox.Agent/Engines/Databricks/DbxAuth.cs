@@ -40,27 +40,59 @@ public sealed class DbxAuth
             {
                 return _token;
             }
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"https://{_host}/oidc/v1/token")
+            string body;
+            string? contentType;
+            try
             {
-                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                using var request = new HttpRequestMessage(HttpMethod.Post, $"https://{_host}/oidc/v1/token")
                 {
-                    ["grant_type"] = "client_credentials",
-                    ["scope"] = "all-apis",
-                }),
-            };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", _basic);
-            using var response = await _http.SendAsync(request, ct);
-            var body = await response.Content.ReadAsStringAsync(ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new DbxException((int)response.StatusCode,
-                    "the workspace refused the service principal's credentials (check username = application id, the OAuth secret, and that the principal has Databricks SQL access): " + Trim(body));
+                    Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                    {
+                        ["grant_type"] = "client_credentials",
+                        ["scope"] = "all-apis",
+                    }),
+                };
+                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", _basic);
+                using var response = await _http.SendAsync(request, ct);
+                body = await response.Content.ReadAsStringAsync(ct);
+                contentType = response.Content.Headers.ContentType?.MediaType;
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new DbxException((int)response.StatusCode,
+                        "the workspace refused the service principal's credentials (check username = application id, the OAuth secret, and that the principal has Databricks SQL access): " + Trim(body));
+                }
             }
-            using var doc = JsonDocument.Parse(body);
-            _token = doc.RootElement.GetProperty("access_token").GetString() ?? throw new DbxException(200, "token response without access_token");
-            var seconds = doc.RootElement.TryGetProperty("expires_in", out var e) && e.TryGetInt32(out var n) ? n : 3600;
-            _expiresAtUtc = DateTime.UtcNow.AddSeconds(seconds);
-            return _token;
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                throw new SourceException("the workspace did not answer the token request in time (" + ex.Message + ")");
+            }
+
+            // 🔴 NOT A WORD OF THIS BODY GOES INTO A MESSAGE: a successful answer is a credential. An
+            //    answer that is not JSON - a proxy's page answered with 200, say - is described instead.
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(body);
+            }
+            catch (JsonException)
+            {
+                throw new SourceException($"the workspace answered the token request with something that is not JSON ({contentType ?? "no content type"}, {body.Length} characters)");
+            }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                var token = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("access_token", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString()
+                    : null;
+                if (string.IsNullOrEmpty(token))
+                {
+                    throw new DbxException(200, "token response without access_token");
+                }
+                var seconds = root.TryGetProperty("expires_in", out var e) && e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out var n) ? n : 3600;
+                _token = token;
+                _expiresAtUtc = DateTime.UtcNow.AddSeconds(seconds);
+                return _token;
+            }
         }
         finally
         {

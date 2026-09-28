@@ -150,7 +150,17 @@ public sealed class ChSource : IEngineSource
     private async Task<RowStream> StreamAsync(string sql, CancellationToken ct)
     {
         var request = Request(sql);
-        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // A server that did not start answering in time: the task's failure, named as such. Only
+            // the caller's own cancellation, the agent stopping, is left as it is.
+            throw new SourceException("ClickHouse did not answer in time (" + ex.Message + ")");
+        }
         try
         {
             await ThrowOnError(response, ct);

@@ -53,7 +53,7 @@ public sealed class SfStatements
         var (status, root) = await SendAsync(HttpMethod.Post, $"{Statements}?requestId={Guid.NewGuid()}", body, ct);
         while (status == HttpStatusCode.Accepted)
         {
-            var handle = root.GetProperty("statementHandle").GetString() ?? "";
+            var handle = Get(root, "statementHandle").GetString() ?? "";
             await Task.Delay(PollInterval, ct);
             (status, root) = await SendAsync(HttpMethod.Get, $"{Statements}/{handle}", null, ct);
         }
@@ -95,22 +95,36 @@ public sealed class SfStatements
     /// One request, with the documented transient answers (429, 503, 504) retried with backoff.
     /// Anything else that is not 200/202 becomes an <see cref="SfException"/> with Snowflake's message.
     /// </summary>
+    /// <remarks>
+    /// Every way a request can fail ends as an <see cref="SfException"/>: a request that ran out of
+    /// time, or an answer that is not JSON - a proxy's page answered with 200, say - is named as
+    /// such. Only the caller's own cancellation, the agent stopping, is left as it is.
+    /// </remarks>
     private async Task<(HttpStatusCode Status, JsonElement Root)> SendAsync(HttpMethod method, string pathAndQuery, string? body, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
-            using var request = new HttpRequestMessage(method, $"https://{_host}{pathAndQuery}");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _auth.Token());
-            request.Headers.Add("X-Snowflake-Authorization-Token-Type", "KEYPAIR_JWT");
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            request.Headers.UserAgent.ParseAdd("trailox-agent");
-            if (body != null)
+            string payload;
+            HttpStatusCode status;
+            try
             {
-                request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+                using var request = new HttpRequestMessage(method, $"https://{_host}{pathAndQuery}");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _auth.Token());
+                request.Headers.Add("X-Snowflake-Authorization-Token-Type", "KEYPAIR_JWT");
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Headers.UserAgent.ParseAdd("trailox-agent");
+                if (body != null)
+                {
+                    request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+                }
+                using var response = await _http.SendAsync(request, ct);
+                payload = await response.Content.ReadAsStringAsync(ct);
+                status = response.StatusCode;
             }
-            using var response = await _http.SendAsync(request, ct);
-            var payload = await response.Content.ReadAsStringAsync(ct);
-            var status = response.StatusCode;
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                throw new SfException(0, "the SQL API did not answer in time (" + ex.Message + ")");
+            }
 
             if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
                 && attempt < MaxRetries)
@@ -122,10 +136,28 @@ public sealed class SfStatements
             {
                 throw new SfException((int)status, ErrorText(payload));
             }
-            using var doc = JsonDocument.Parse(payload);
-            return (status, doc.RootElement.Clone());
+            try
+            {
+                using var doc = JsonDocument.Parse(payload);
+                return (status, doc.RootElement.Clone());
+            }
+            catch (JsonException)
+            {
+                throw new SfException(0, "the SQL API answered with something that is not JSON: " + Trim(payload));
+            }
         }
     }
+
+    private static string Trim(string payload) => payload.Length > 600 ? payload[..600] : payload;
+
+    /// <summary>
+    /// A field the answer must have. Missing, it ends as an <see cref="SfException"/> that names it,
+    /// where the plain lookup would say only that some key was not there.
+    /// </summary>
+    private static JsonElement Get(JsonElement holder, string name) =>
+        holder.ValueKind == JsonValueKind.Object && holder.TryGetProperty(name, out var value)
+            ? value
+            : throw new SfException(0, $"the SQL API answered without '{name}'");
 
     /// <summary>Snowflake's code and message when the body is its JSON error; otherwise the start of the body.</summary>
     internal static string ErrorText(string payload)
@@ -149,9 +181,9 @@ public sealed class SfStatements
 
     internal static SfResult Parse(JsonElement root)
     {
-        var meta = root.GetProperty("resultSetMetaData");
-        var columns = meta.GetProperty("rowType").EnumerateArray()
-            .Select(c => c.GetProperty("name").GetString() ?? "")
+        var meta = Get(root, "resultSetMetaData");
+        var columns = Get(meta, "rowType").EnumerateArray()
+            .Select(c => Get(c, "name").GetString() ?? "")
             .ToList();
         var partitions = meta.TryGetProperty("partitionInfo", out var p) && p.ValueKind == JsonValueKind.Array ? p.GetArrayLength() : 1;
         var totalRows = meta.TryGetProperty("numRows", out var n) && n.TryGetInt64(out var rows) ? rows : 0;

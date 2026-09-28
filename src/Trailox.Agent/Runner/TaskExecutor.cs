@@ -24,6 +24,12 @@ public sealed class TaskExecutor
     }
 
     /// <summary>Returns false only when the agent must stop (the key was rejected).</summary>
+    /// <remarks>
+    /// 🔴 EVERY FAILURE OF A TASK ENDS HERE, AS THAT TASK'S FAILURE - except the agent stopping.
+    ///    A failure that escaped this method abandoned the rest of the check-in's tasks, for every
+    ///    endpoint, was logged as a failed check-in, and left the task unanswered, so it was handed
+    ///    back - and failed the same way - at every check-in.
+    /// </remarks>
     public async Task<bool> ExecuteAsync(AgentTask task, EndpointSession session, CancellationToken ct)
     {
         var alias = session.Config.Alias;
@@ -71,7 +77,34 @@ public sealed class TaskExecutor
             }
             return true;
         }
+        catch (Exception ex) when (!IsShutdown(ex, ct))
+        {
+            // Anything the engines do not name themselves: an answer in a form nobody expected, a
+            // request that ran out of time, a fault of the agent's own. Reported like a database
+            // failure, with the error's type so it can be told apart.
+            var timedOut = ex is OperationCanceledException;
+            var reason = timedOut
+                ? "did not finish in time (" + ex.Message + ")"
+                : $"failed unexpectedly ({ex.GetType().Name}: {ex.Message})";
+            _errors.Add(alias, $"{task.Stream} {Describe(task)}: {reason}");
+            if (timedOut)
+            {
+                _logger.LogWarning("endpoint {Alias}: {Stream} {Window} {Reason}", alias, task.Stream, Describe(task), EndpointSession.Trim(reason));
+            }
+            else
+            {
+                _logger.LogWarning(ex, "endpoint {Alias}: {Stream} {Window} {Reason}", alias, task.Stream, Describe(task), EndpointSession.Trim(reason));
+            }
+            await ReportFailureAsync(task, alias, reason, ct);
+            return true;
+        }
     }
+
+    /// <summary>
+    /// The agent stopping: a cancellation of its own token. Any other cancellation is a request that
+    /// ran out of time, which is a failure of the task.
+    /// </summary>
+    internal static bool IsShutdown(Exception ex, CancellationToken ct) => ex is OperationCanceledException && ct.IsCancellationRequested;
 
     private async Task ReportFailureAsync(AgentTask task, string alias, string message, CancellationToken ct)
     {
@@ -79,9 +112,11 @@ public sealed class TaskExecutor
         {
             await _gateway.FailChunkAsync(task.ChunkId, EndpointSession.Trim(message), ct);
         }
-        catch (GatewayException ex) when (!ex.IsUnauthorized)
+        catch (Exception ex) when (!IsShutdown(ex, ct) && ex is not GatewayException { IsUnauthorized: true })
         {
-            _logger.LogInformation("endpoint {Alias}: could not report the failure of chunk {Chunk} ({Message}); it will be re-planned", alias, task.ChunkId, ex.Message);
+            // Refused, not answered in time, or the gateway unreachable: the task is not lost.
+            // Unanswered, it is handed back at a later check-in. A rejected key still stops the agent.
+            _logger.LogInformation("endpoint {Alias}: could not report the failure of chunk {Chunk} ({Message}); it will be handed back at a later check-in", alias, task.ChunkId, EndpointSession.Trim(ex.Message));
         }
     }
 
