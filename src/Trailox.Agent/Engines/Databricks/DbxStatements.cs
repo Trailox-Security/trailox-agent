@@ -50,11 +50,12 @@ public sealed class DbxStatements
             format = "JSON_ARRAY",
         });
         var root = await SendAsync(HttpMethod.Post, Statements, body, ct);
-        var statementId = root.GetProperty("statement_id").GetString() ?? "";
+        var statementId = Get(root, "statement_id").GetString() ?? "";
 
         while (true)
         {
-            var state = root.GetProperty("status").GetProperty("state").GetString();
+            var status = Get(root, "status");
+            var state = Get(status, "state").GetString();
             switch (state)
             {
                 case "SUCCEEDED":
@@ -65,7 +66,7 @@ public sealed class DbxStatements
                     root = await SendAsync(HttpMethod.Get, Statements + statementId, null, ct);
                     continue;
                 default:
-                    var message = root.GetProperty("status").TryGetProperty("error", out var err) && err.TryGetProperty("message", out var m)
+                    var message = status.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.Object && err.TryGetProperty("message", out var m)
                         ? m.GetString() : null;
                     throw new DbxException(200, $"statement {statementId} ended {state}: {message ?? "(no message)"}");
             }
@@ -144,33 +145,66 @@ public sealed class DbxStatements
         return ParseLinks(root);
     }
 
+    /// <remarks>
+    /// Every way a request can fail ends as a <see cref="SourceException"/>, as in DbxDirectory: a
+    /// request that ran out of time, or an answer that is not JSON - a proxy's page answered with
+    /// 200, say - is named as such. Only the caller's own cancellation, the agent stopping, is left
+    /// as it is.
+    /// </remarks>
     private async Task<JsonElement> SendAsync(HttpMethod method, string path, string? body, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(method, $"https://{_host}{path}");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await _auth.TokenAsync(ct));
-        if (body != null)
+        string payload;
+        try
         {
-            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var request = new HttpRequestMessage(method, $"https://{_host}{path}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await _auth.TokenAsync(ct));
+            if (body != null)
+            {
+                request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+            }
+            using var response = await _api.SendAsync(request, ct);
+            payload = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                // An expired token answers with the bare text "Invalid Token", not JSON: the status
+                // is checked before anything is parsed.
+                throw new DbxException((int)response.StatusCode, Trim(payload));
+            }
         }
-        using var response = await _api.SendAsync(request, ct);
-        var payload = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
         {
-            // An expired token answers with the bare text "Invalid Token", not JSON: the status
-            // is checked before anything is parsed.
-            throw new DbxException((int)response.StatusCode, payload.Length > 600 ? payload[..600] : payload);
+            throw new SourceException("the workspace did not answer a SQL statement request in time (" + ex.Message + ")");
         }
-        using var doc = JsonDocument.Parse(payload);
-        return doc.RootElement.Clone();
+
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            return doc.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            throw new SourceException("the workspace answered a SQL statement request with something that is not JSON: " + Trim(payload));
+        }
     }
+
+    private static string Trim(string payload) => payload.Length > 600 ? payload[..600] : payload;
+
+    /// <summary>
+    /// A field the answer must have. Missing, it ends as a <see cref="SourceException"/> that names
+    /// it, where the plain lookup would say only that some key was not there.
+    /// </summary>
+    private static JsonElement Get(JsonElement holder, string name) =>
+        holder.ValueKind == JsonValueKind.Object && holder.TryGetProperty(name, out var value)
+            ? value
+            : throw new SourceException($"the workspace answered a SQL statement request without '{name}'");
 
     internal static DbxResult Parse(JsonElement root, string statementId)
     {
         var columns = new List<string>();
-        var manifest = root.GetProperty("manifest");
-        foreach (var column in manifest.GetProperty("schema").GetProperty("columns").EnumerateArray())
+        var manifest = Get(root, "manifest");
+        foreach (var column in Get(Get(manifest, "schema"), "columns").EnumerateArray())
         {
-            columns.Add(column.GetProperty("name").GetString() ?? "");
+            columns.Add(Get(column, "name").GetString() ?? "");
         }
         var totalRows = manifest.TryGetProperty("total_row_count", out var t) && t.TryGetInt64(out var n) ? n : 0;
         var totalChunks = manifest.TryGetProperty("total_chunk_count", out var c) && c.TryGetInt32(out var k) ? k : 0;
@@ -186,9 +220,9 @@ public sealed class DbxStatements
             foreach (var link in external.EnumerateArray())
             {
                 links.Add(new DbxChunkLink(
-                    link.GetProperty("chunk_index").GetInt32(),
+                    Get(link, "chunk_index").GetInt32(),
                     link.TryGetProperty("row_count", out var rc) ? rc.GetInt64() : 0,
-                    link.GetProperty("external_link").GetString() ?? ""));
+                    Get(link, "external_link").GetString() ?? ""));
             }
         }
         return links;

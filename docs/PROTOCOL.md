@@ -132,8 +132,10 @@ retried locally, because Trailox re-issues the window.
 
 ## 5. Reporting a failed task: `POST /v1/agent/chunks/{chunkId}/failed`
 
-`{ "message": "..." }`. Sent when the `SELECT` itself fails, for example a missing grant or an
-unreachable database. The window is re-issued on a later check-in.
+`{ "message": "..." }`. Sent when a task fails for any reason but the agent stopping: the `SELECT`
+fails (a missing grant, an unreachable database), the database does not answer in time, or it answers
+with something the agent cannot read. The window is re-issued on a later check-in. When this report
+cannot be delivered, the task stays unanswered and is handed back at a later check-in.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
