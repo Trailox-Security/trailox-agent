@@ -49,6 +49,45 @@ jobs:
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=results.trx"
       - run: dotnet run --project src/Trailox.Agent -c Release --no-build -- version
 
+  # Known-vulnerable NuGet packages, direct and transitive. High and Critical advisories fail
+  # the run and so block a release; Moderate and Low are listed but do not.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet restore
+      - name: dotnet list package --vulnerable --include-transitive
+        run: |
+          dotnet list package --vulnerable --include-transitive
+          dotnet list package --vulnerable --include-transitive --format json > audit.json
+          python3 - <<'EOF'
+          import json, sys
+
+          report = json.load(open("audit.json"))
+          problems = report.get("problems", []) + [p for project in report.get("projects", []) for p in project.get("problems", [])]
+          errors = [p for p in problems if p.get("level") == "error"]
+          for problem in problems:
+              print(f"::{'error' if problem in errors else 'warning'}::{problem.get('text')}")
+          if errors or "projects" not in report:
+              sys.exit("dotnet list package did not produce a complete report")
+          findings = set()
+          for project in report["projects"]:
+              name = project["path"].replace("\\", "/").split("/")[-1]
+              for framework in project.get("frameworks", []):
+                  for package in framework.get("topLevelPackages", []) + framework.get("transitivePackages", []):
+                      for advisory in package.get("vulnerabilities", []):
+                          findings.add((advisory["severity"], package["id"], package["resolvedVersion"], advisory["advisoryurl"], name))
+          blocking = sorted(f for f in findings if f[0] in ("High", "Critical"))
+          for severity, package, version, url, project in blocking:
+              print(f"::error::{severity}: {package} {version} in {project} - {url}")
+          if blocking:
+              sys.exit(1)
+          print(f"No High or Critical advisories ({len(findings)} Moderate/Low finding(s) in the list above).")
+          EOF
+
   # Every push: build the image for each platform on that platform's runner and start it, so a
   # platform that does not build or start is found before a tag moves `1`.
   image-check:
@@ -74,7 +113,7 @@ jobs:
           test "$out" = "0.0.0-check"
 
   image:
-    needs: [secret-scan, test, image-check]
+    needs: [secret-scan, test, dependency-audit, image-check]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
