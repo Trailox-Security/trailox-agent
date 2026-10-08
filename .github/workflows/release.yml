@@ -49,8 +49,9 @@ jobs:
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=results.trx"
       - run: dotnet run --project src/Trailox.Agent -c Release --no-build -- version
 
-  # Known-vulnerable NuGet packages, direct and transitive. High and Critical advisories fail
-  # the run and so block a release; Moderate and Low are listed but do not.
+  # Known-vulnerable NuGet packages, direct and transitive, in the agent that ships in the image
+  # (the test project is not audited here). High and Critical advisories fail the run and so
+  # block a release; Moderate and Low are listed but do not.
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
@@ -58,11 +59,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - run: dotnet restore
+      - run: dotnet restore src/Trailox.Agent
       - name: dotnet list package --vulnerable --include-transitive
         run: |
-          dotnet list package --vulnerable --include-transitive
-          dotnet list package --vulnerable --include-transitive --format json > audit.json
+          dotnet list src/Trailox.Agent package --vulnerable --include-transitive
+          dotnet list src/Trailox.Agent package --vulnerable --include-transitive --format json > audit.json
           python3 - <<'EOF'
           import json, sys
 
