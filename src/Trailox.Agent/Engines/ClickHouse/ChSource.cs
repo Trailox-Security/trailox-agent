@@ -67,6 +67,12 @@ public sealed class ChSource : IEngineSource
             _usersAuthTypeIsArray = false;
             return await StreamAsync(RawSelects.ForTask(_endpoint, _presentColumns, task, usersAuthTypeIsArray: false)!, ct);
         }
+        catch (ChException ex) when (task.Stream == ProtocolInfo.Streams.CatalogSettings && ex.IsAccessDenied)
+        {
+            // The settings grant arrived with agent 1.7, and a customer who ran an older setup script has not given it.
+            // The same message is reported; only the agent's own error list leaves it out.
+            throw new SourceException(ex.Message) { MissingOptionalGrant = true };
+        }
     }
 
     // ---- transport ----
@@ -182,4 +188,8 @@ public sealed class ChException : SourceException
     {
         StatusCode = statusCode;
     }
+
+    /// <summary>ClickHouse's answer to a missing privilege: "Code: 497 ... (ACCESS_DENIED)".</summary>
+    public bool IsAccessDenied =>
+        Message.Contains("Code: 497.", StringComparison.Ordinal) || Message.Contains("(ACCESS_DENIED)", StringComparison.Ordinal);
 }

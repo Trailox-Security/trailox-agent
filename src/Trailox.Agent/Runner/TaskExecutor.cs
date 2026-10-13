@@ -47,6 +47,14 @@ public sealed class TaskExecutor
             _logger.LogInformation("endpoint {Alias}: {Stream} {Window} -> {Rows} rows accepted", alias, task.Stream, Describe(task), accepted.RowsAccepted);
             return true;
         }
+        catch (SourceException ex) when (ex.MissingOptionalGrant)
+        {
+            // A grant the customer may withhold (agent 1.7: catalog_settings). It is not an agent fault, and
+            // listed here it would show again with every day's catalog.
+            _logger.LogInformation("endpoint {Alias}: {Stream} not readable without its optional grant; reported to Trailox", alias, task.Stream);
+            await ReportFailureAsync(task, alias, ex.Message, ct);
+            return true;
+        }
         catch (Exception ex) when (ex is SourceException or HttpRequestException)
         {
             // The database refused the statement or was unreachable mid-task. Report it; the

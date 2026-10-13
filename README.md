@@ -182,8 +182,10 @@ arrives. To keep the agent away from a database altogether, remove its block fro
 Self-managed or ClickHouse Cloud, over the HTTP interface (usually 8443 with TLS).
 
 - **Reads:** `system.query_log`, `system.session_log`, and daily `system.tables`,
-  `system.users`, `system.grants`. Every request carries `log_comment=trailox-agent`, and the
-  agent excludes its own reads.
+  `system.users`, `system.grants`, and (from 1.7) the `readonly`, `allow_ddl` and profile rows of
+  `system.settings_profile_elements`, so Trailox can tell which users a readonly setting stops
+  from writing. Every request carries `log_comment=trailox-agent`, and the agent excludes its own
+  reads.
 - **Account:** a `readonly = 2` user with `SELECT` on those system tables; the Agents page
   prints the script.
 - **agent.yaml:** `host`/`port`/`tls` = the HTTP endpoint; `clusterName` = the cluster to

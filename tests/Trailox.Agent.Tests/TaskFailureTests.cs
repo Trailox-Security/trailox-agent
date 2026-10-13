@@ -103,6 +103,37 @@ public class TaskFailureTests
         Assert.Contains("HttpClient.Timeout of 1800 seconds", failed.Body);
     }
 
+    /// <summary>
+    /// Agent 1.7: a stream whose grant the customer may withhold (catalog_settings) is reported as the task's failure,
+    /// and is NOT listed among the agent's errors.
+    /// </summary>
+    [Fact]
+    public async Task A_missing_optional_grant_is_reported_to_trailox_and_not_listed_as_an_agent_error()
+    {
+        var (executor, gateway, errors) = Runner();
+        const string refused = "ClickHouse answered HTTP 500: Code: 497. DB::Exception: trailox_monitor: Not enough privileges. (ACCESS_DENIED)";
+        var session = Session(new ScriptedSource((_, _) => throw new SourceException(refused) { MissingOptionalGrant = true }));
+        var task = new AgentTask { ChunkId = "chunk-s", EndpointId = 7, Stream = ProtocolInfo.Streams.CatalogSettings };
+
+        Assert.True(await executor.ExecuteAsync(task, session, CancellationToken.None));
+
+        var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-s/failed", StringComparison.Ordinal));
+        Assert.Contains("Code: 497", failed.Body);
+        Assert.Empty(errors.Snapshot());
+    }
+
+    /// <summary>Any other refusal still is an agent error, as before.</summary>
+    [Fact]
+    public async Task Any_other_source_failure_is_still_listed_as_an_agent_error()
+    {
+        var (executor, _, errors) = Runner();
+        var session = Session(new ScriptedSource((_, _) => throw new SourceException("ClickHouse answered HTTP 500: Code: 497. (ACCESS_DENIED)")));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-a"), session, CancellationToken.None));
+
+        Assert.Single(errors.Snapshot());
+    }
+
     /// <summary>The agent stopping cancels its own token: not the task's failure, and nothing is reported.</summary>
     [Fact]
     public async Task The_agent_stopping_is_not_a_failure_of_the_task()
