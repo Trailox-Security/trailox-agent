@@ -206,6 +206,14 @@ SELECT today() AS snapshot_date, name, [toString(auth_type)] AS auth_types,
 SELECT today() AS snapshot_date, user_name, role_name, toString(access_type) AS access_type,
        database, table, column, is_partial_revoke, grant_option
 FROM system.grants FORMAT JSONEachRow
+
+-- catalog_settings (daily; agent 1.7 and newer). Needs SELECT ON system.settings_profile_elements
+-- (or SHOW SETTINGS PROFILES). A refusal is reported as the task's failure, not as an agent error.
+SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index,
+       setting_name, value, toString(writability) AS writability, inherit_profile
+FROM system.settings_profile_elements
+WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL
+FORMAT JSONEachRow
 ```
 
 ## 6b. Databricks (engine `databricks`)

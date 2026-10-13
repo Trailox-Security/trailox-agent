@@ -112,6 +112,21 @@ public static class RawSelects
         "SELECT today() AS snapshot_date, user_name, role_name, toString(access_type) AS access_type, database, table, column, " +
         "is_partial_revoke, grant_option\nFROM system.grants\nFORMAT JSONEachRow";
 
+    /// <summary>
+    /// The settings that decide whether a user is read-only (agent 1.7): readonly, allow_ddl, and every element that
+    /// names a profile, so Trailox can follow a user's chain of profiles. Only these rows - a profile can hold any value
+    /// a customer put in it, and nothing else is used. `index` is returned as element_index.
+    /// </summary>
+    /// <remarks>
+    /// Needs its own grant, which older setup scripts did not ask for: SELECT ON system.settings_profile_elements (or
+    /// SHOW SETTINGS PROFILES on a server with select_from_system_db_requires_grant = false). A refusal is reported as
+    /// the task's failure but kept off the agent's own error list (TaskExecutor, MissingOptionalGrant).
+    /// </remarks>
+    public const string CatalogSettings =
+        "SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index, setting_name, value, " +
+        "toString(writability) AS writability, inherit_profile\nFROM system.settings_profile_elements\n" +
+        "WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL\nFORMAT JSONEachRow";
+
     // ---- probe (once per endpoint per probe interval) ----
 
     public const string ProbeVersion = "SELECT version()";
@@ -137,6 +152,7 @@ public static class RawSelects
             ProtocolInfo.Streams.CatalogTables => CatalogTables,
             ProtocolInfo.Streams.CatalogUsers => usersAuthTypeIsArray ? CatalogUsersArray : CatalogUsersScalar,
             ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
+            ProtocolInfo.Streams.CatalogSettings => CatalogSettings,
             _ => null,
         };
 }

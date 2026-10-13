@@ -65,4 +65,11 @@ public class SourceException : Exception
     public SourceException(string message) : base(message)
     {
     }
+
+    /// <summary>
+    /// The database refused a stream whose grant the customer may choose not to give (agent 1.7: catalog_settings).
+    /// Reported as the task's failure, but not listed among the agent's errors: a grant the customer chose not to
+    /// give is not a fault of the agent, and it would be listed again with every day's catalog.
+    /// </summary>
+    public bool MissingOptionalGrant { get; init; }
 }

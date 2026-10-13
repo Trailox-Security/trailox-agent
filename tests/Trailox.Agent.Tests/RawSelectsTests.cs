@@ -88,12 +88,29 @@ public class RawSelectsTests
     [Fact]
     public void Every_protocol_stream_maps_to_a_select_and_unknown_ones_to_null()
     {
-        foreach (var stream in new[] { ProtocolInfo.Streams.Events, ProtocolInfo.Streams.Sessions, ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants })
+        foreach (var stream in new[] { ProtocolInfo.Streams.Events, ProtocolInfo.Streams.Sessions, ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants, ProtocolInfo.Streams.CatalogSettings })
         {
             Assert.NotNull(RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = stream, StartMicros = 1, EndMicros = 2 }));
         }
         Assert.Null(RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = "audit" }));
         Assert.Contains("[toString(auth_type)]", RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = ProtocolInfo.Streams.CatalogUsers }, usersAuthTypeIsArray: false));
+    }
+
+    /// <summary>
+    /// Agent 1.7: only the settings rows a readonly verdict needs, with `index` returned as element_index -
+    /// the column names are part of what the agent sends.
+    /// </summary>
+    [Fact]
+    public void The_settings_select_reads_only_the_rows_a_readonly_verdict_needs()
+    {
+        var sql = RawSelects.CatalogSettings;
+
+        Assert.StartsWith("SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index, setting_name, value, "
+                          + "toString(writability) AS writability, inherit_profile", sql);
+        Assert.Contains("FROM system.settings_profile_elements", sql);
+        Assert.Contains("WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL", sql);
+        Assert.EndsWith("FORMAT JSONEachRow", sql);
+        Assert.Equal(sql, RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = ProtocolInfo.Streams.CatalogSettings }));
     }
 
     /// <summary>No statement the agent can ever send modifies anything.</summary>
@@ -103,7 +120,7 @@ public class RawSelectsTests
         var all = new[]
         {
             RawSelects.Events(Endpoint(), AllColumns, 1, 2), RawSelects.Sessions(Endpoint(), 1, 2), RawSelects.CatalogTables,
-            RawSelects.CatalogUsersArray, RawSelects.CatalogUsersScalar, RawSelects.CatalogGrants, RawSelects.ProbeVersion,
+            RawSelects.CatalogUsersArray, RawSelects.CatalogUsersScalar, RawSelects.CatalogGrants, RawSelects.CatalogSettings, RawSelects.ProbeVersion,
             RawSelects.ProbeColumns, RawSelects.ProbeSessionLog, RawSelects.ProbeEarliestEvent(Endpoint()), RawSelects.ProbeEarliestSession(Endpoint()),
         };
         foreach (var sql in all)

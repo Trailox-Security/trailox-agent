@@ -28,6 +28,10 @@ public static class ProtocolInfo
         public const string CatalogUsers = "catalog_users";
         public const string CatalogGrants = "catalog_grants";
 
+        // ClickHouse (agent 1.7): the user settings that make a user read-only, so Trailox can tell which
+        // users a readonly setting stops from writing.
+        public const string CatalogSettings = "catalog_settings";
+
         // Databricks (agent 1.1): statements and lineage are joined on the Trailox side; the
         // catalog is four information_schema views, one stream each.
         public const string LineageTables = "lineage_tables";
