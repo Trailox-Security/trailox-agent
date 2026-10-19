@@ -43,7 +43,7 @@ public sealed class TaskExecutor
                 return true;
             }
 
-            var accepted = await _gateway.UploadChunkAsync(task.ChunkId, rows.Body, ct);
+            var accepted = await _gateway.UploadChunkAsync(task.ChunkId, rows.Body, ct, rows.KeepAlive);
             _logger.LogInformation("endpoint {Alias}: {Stream} {Window} -> {Rows} rows accepted", alias, task.Stream, Describe(task), accepted.RowsAccepted);
             return true;
         }
