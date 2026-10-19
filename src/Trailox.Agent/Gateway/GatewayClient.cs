@@ -57,11 +57,11 @@ public sealed class GatewayClient
         return await response.Content.ReadFromJsonAsync<ChunkAccepted>(ProtocolInfo.Json, ct) ?? new ChunkAccepted();
     }
 
-    public async Task FailChunkAsync(string chunkId, string message, CancellationToken ct)
+    public async Task FailChunkAsync(string chunkId, string message, CancellationToken ct, string? reason = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(CheckinTimeout);
-        using var response = await _http.PostAsJsonAsync($"v1/agent/chunks/{chunkId}/failed", new ChunkFailed { Message = message }, ProtocolInfo.Json, timeout.Token);
+        using var response = await _http.PostAsJsonAsync($"v1/agent/chunks/{chunkId}/failed", new ChunkFailed { Message = message, Reason = reason }, ProtocolInfo.Json, timeout.Token);
         await ThrowOnError(response, ct);
     }
 

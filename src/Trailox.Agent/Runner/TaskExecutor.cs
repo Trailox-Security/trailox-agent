@@ -47,6 +47,14 @@ public sealed class TaskExecutor
             _logger.LogInformation("endpoint {Alias}: {Stream} {Window} -> {Rows} rows accepted", alias, task.Stream, Describe(task), accepted.RowsAccepted);
             return true;
         }
+        catch (SourceException ex) when (ex.NotYetPublished)
+        {
+            // The source is behind (agent 1.8: Atlas publishes log files minutes late). Not an agent fault:
+            // Trailox plans the same window again at a later poll.
+            _logger.LogInformation("endpoint {Alias}: {Stream} {Window} not yet published at the source; Trailox will ask again", alias, task.Stream, Describe(task));
+            await ReportFailureAsync(task, alias, ex.Message, ct, ChunkFailed.NotYetPublished);
+            return true;
+        }
         catch (SourceException ex) when (ex.MissingOptionalGrant)
         {
             // A grant the customer may withhold (agent 1.7: catalog_settings). It is not an agent fault, and
@@ -114,11 +122,11 @@ public sealed class TaskExecutor
     /// </summary>
     internal static bool IsShutdown(Exception ex, CancellationToken ct) => ex is OperationCanceledException && ct.IsCancellationRequested;
 
-    private async Task ReportFailureAsync(AgentTask task, string alias, string message, CancellationToken ct)
+    private async Task ReportFailureAsync(AgentTask task, string alias, string message, CancellationToken ct, string? reason = null)
     {
         try
         {
-            await _gateway.FailChunkAsync(task.ChunkId, EndpointSession.Trim(message), ct);
+            await _gateway.FailChunkAsync(task.ChunkId, EndpointSession.Trim(message), ct, reason);
         }
         catch (Exception ex) when (!IsShutdown(ex, ct) && ex is not GatewayException { IsUnauthorized: true })
         {

@@ -38,6 +38,7 @@ public sealed class AgentLoop : BackgroundService
         _executor = executor;
         _errors = errors;
         _health = health;
+        TaskHeartbeat.Attach(health);
         _lifetime = lifetime;
         _logger = logger;
     }

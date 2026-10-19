@@ -64,6 +64,9 @@ extraEnvFrom: []
 # Mount a private CA bundle from an existing ConfigMap (key: corp-ca.pem) at /etc/trailox/ca.
 caConfigMap: ""
 
+# MongoDB Atlas sources (agent 1.8.0): reading a busy cluster's audit log is CPU work. At 100,000
+# operations a second the agent has about 1.6x to spare at 500m and about 3x at 1 CPU, measured. Give it
+# limits.cpu: 1 for MongoDB; memory stays at 512Mi.
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits:   { cpu: 500m, memory: 512Mi }
