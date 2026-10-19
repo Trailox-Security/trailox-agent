@@ -16,14 +16,30 @@ public sealed partial class MongoLogProcessor
     {
         var shape = f.HasShape ? _shape.Hash : 0UL;
         _key.Clear();
-        Key(atype); Key(f.User); Key(f.Db); Key(f.IsSystemUser ? "1"u8 : "0"u8); Key(f.Ip); Key(DirectIp(ref f)); Key(f.Uuid);
-        Key(command); Key(f.Ns); KeyNumber((long)shape); KeyNumber(f.Result);
+        Key(atype);
+        Key(f.User);
+        Key(f.Db);
+        Key(f.IsSystemUser ? "1"u8 : "0"u8);
+        Key(f.Ip);
+        Key(DirectIp(ref f));
+        Key(f.Uuid);
+        Key(command);
+        Key(f.Ns);
+        KeyNumber((long)shape);
+        KeyNumber(f.Result);
         var group = _aggregator!.Group(ts, MinuteAggregator.KeyOf(_key.WrittenSpan), out var created);
         if (created)
         {
             var l = group.Labels;
-            l[0] = Text(atype); l[1] = Text(f.User); l[2] = Text(f.Db); l[3] = f.IsSystemUser ? "1" : "0"; l[4] = Text(f.Ip);
-            l[5] = Text(DirectIp(ref f)); l[6] = UuidText(f.Uuid); l[7] = Text(command); l[8] = Text(f.Ns);
+            l[0] = Text(atype);
+            l[1] = Text(f.User);
+            l[2] = Text(f.Db);
+            l[3] = f.IsSystemUser ? "1" : "0";
+            l[4] = Text(f.Ip);
+            l[5] = Text(DirectIp(ref f));
+            l[6] = UuidText(f.Uuid);
+            l[7] = Text(command);
+            l[8] = Text(f.Ns);
             group.ShapeHash = shape;
             group.Shape = f.HasShape ? ShapeText(shape) : "";
             group.Result = f.Result;
@@ -101,12 +117,23 @@ public sealed partial class MongoLogProcessor
         var ip = IpOf(f.Remote);
         var userConnection = !f.IsFromUserConnectionSet || f.IsFromUserConnection;
         _key.Clear();
-        Key(conn); Key(ip); Key(f.CommandName); Key(f.Ns); KeyNumber((long)shape); KeyNumber(f.ErrCode); Key(userConnection ? "1"u8 : "0"u8);
+        Key(conn);
+        Key(ip);
+        Key(f.CommandName);
+        Key(f.Ns);
+        KeyNumber((long)shape);
+        KeyNumber(f.ErrCode);
+        Key(userConnection ? "1"u8 : "0"u8);
         var group = _aggregator!.Group(ts, MinuteAggregator.KeyOf(_key.WrittenSpan), out var created);
         if (created)
         {
             var l = group.Labels;
-            l[0] = Text(conn); l[1] = Text(ip); l[2] = Text(f.App); l[3] = Text(f.CommandName); l[4] = Text(f.Ns); l[5] = Text(f.QueryShapeHash);
+            l[0] = Text(conn);
+            l[1] = Text(ip);
+            l[2] = Text(f.App);
+            l[3] = Text(f.CommandName);
+            l[4] = Text(f.Ns);
+            l[5] = Text(f.QueryShapeHash);
             group.ShapeHash = shape;
             group.Shape = f.HasShape ? ShapeText(shape) : "";
             group.ErrCode = f.ErrCode;
@@ -163,13 +190,27 @@ public sealed partial class MongoLogProcessor
         var ip = IpOf(f.Client);
         var reason = ReasonOf(f.Error);
         _key.Clear();
-        Key(f.User); Key(f.Db); Key(ip); Key(f.App); Key(f.Driver); Key(f.Mechanism); KeyNumber(f.Result); Key(reason); Key(conn);
+        Key(f.User);
+        Key(f.Db);
+        Key(ip);
+        Key(f.App);
+        Key(f.Driver);
+        Key(f.Mechanism);
+        KeyNumber(f.Result);
+        Key(reason);
+        Key(conn);
         var group = _aggregator!.Group(ts, MinuteAggregator.KeyOf(_key.WrittenSpan), out var created);
         if (created)
         {
             var l = group.Labels;
-            l[0] = Text(f.User); l[1] = Text(f.Db); l[2] = Text(ip); l[3] = Text(f.App); l[4] = Text(f.Driver);
-            l[5] = Text(f.Mechanism); l[6] = Text(reason); l[7] = Text(conn);
+            l[0] = Text(f.User);
+            l[1] = Text(f.Db);
+            l[2] = Text(ip);
+            l[3] = Text(f.App);
+            l[4] = Text(f.Driver);
+            l[5] = Text(f.Mechanism);
+            l[6] = Text(reason);
+            l[7] = Text(conn);
             group.Result = f.Result;
         }
         group.Add(ts);

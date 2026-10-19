@@ -254,9 +254,15 @@ public sealed partial class MongoLogProcessor
         Counts.Kept++;
         switch (id)
         {
-            case 51803: AddSlow(ts, ref f); break;
-            case 5286307: AddFailure(ts, ref f); break;
-            default: WriteConnection(ts, id, ref f); break;
+            case 51803:
+                AddSlow(ts, ref f);
+                break;
+            case 5286307:
+                AddFailure(ts, ref f);
+                break;
+            default:
+                WriteConnection(ts, id, ref f);
+                break;
         }
     }
 
@@ -293,38 +299,119 @@ public sealed partial class MongoLogProcessor
             {
                 case JsonTokenType.Number:
                     var v = Long(ref r);
-                    if (name.SequenceEqual("nreturned"u8)) { f.Nreturned = v; f.HasMetrics = true; }
-                    else if (name.SequenceEqual("docsExamined"u8)) { f.DocsExamined = v; f.HasMetrics = true; }
-                    else if (name.SequenceEqual("keysExamined"u8)) { f.KeysExamined = v; f.HasMetrics = true; }
-                    else if (name.SequenceEqual("reslen"u8)) { f.Reslen = v; f.HasMetrics = true; }
-                    else if (name.SequenceEqual("durationMillis"u8)) { f.DurationMs = v; f.HasMetrics = true; }
-                    else if (name.SequenceEqual("errCode"u8)) { f.ErrCode = v; }
-                    else if (name.SequenceEqual("connectionId"u8)) { f.ConnectionId = v; }
-                    else if (name.SequenceEqual("pid"u8)) { f.Pid = v; }
-                    else if (name.SequenceEqual("result"u8)) { f.Result = v; }
+                    if (name.SequenceEqual("nreturned"u8))
+                    {
+                        f.Nreturned = v;
+                        f.HasMetrics = true;
+                    }
+                    else if (name.SequenceEqual("docsExamined"u8))
+                    {
+                        f.DocsExamined = v;
+                        f.HasMetrics = true;
+                    }
+                    else if (name.SequenceEqual("keysExamined"u8))
+                    {
+                        f.KeysExamined = v;
+                        f.HasMetrics = true;
+                    }
+                    else if (name.SequenceEqual("reslen"u8))
+                    {
+                        f.Reslen = v;
+                        f.HasMetrics = true;
+                    }
+                    else if (name.SequenceEqual("durationMillis"u8))
+                    {
+                        f.DurationMs = v;
+                        f.HasMetrics = true;
+                    }
+                    else if (name.SequenceEqual("errCode"u8))
+                    {
+                        f.ErrCode = v;
+                    }
+                    else if (name.SequenceEqual("connectionId"u8))
+                    {
+                        f.ConnectionId = v;
+                    }
+                    else if (name.SequenceEqual("pid"u8))
+                    {
+                        f.Pid = v;
+                    }
+                    else if (name.SequenceEqual("result"u8))
+                    {
+                        f.Result = v;
+                    }
                     break;
                 case JsonTokenType.String:
-                    if (name.SequenceEqual("ns"u8)) { f.Ns = Str(ref r); }
-                    else if (name.SequenceEqual("appName"u8)) { f.App = Str(ref r); }
-                    else if (name.SequenceEqual("remote"u8)) { f.Remote = Str(ref r); }
-                    else if (name.SequenceEqual("client"u8)) { f.Client = Str(ref r); }
-                    else if (name.SequenceEqual("user"u8)) { f.User = Str(ref r); }
-                    else if (name.SequenceEqual("db"u8)) { f.Db = Str(ref r); }
-                    else if (name.SequenceEqual("mechanism"u8)) { f.Mechanism = Str(ref r); }
-                    else if (name.SequenceEqual("host"u8)) { f.Host = Str(ref r); }
-                    else if (name.SequenceEqual("error"u8)) { f.Error = Str(ref r); }
-                    else if (name.SequenceEqual("queryShapeHash"u8)) { f.QueryShapeHash = Str(ref r); }
+                    if (name.SequenceEqual("ns"u8))
+                    {
+                        f.Ns = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("appName"u8))
+                    {
+                        f.App = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("remote"u8))
+                    {
+                        f.Remote = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("client"u8))
+                    {
+                        f.Client = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("user"u8))
+                    {
+                        f.User = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("db"u8))
+                    {
+                        f.Db = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("mechanism"u8))
+                    {
+                        f.Mechanism = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("host"u8))
+                    {
+                        f.Host = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("error"u8))
+                    {
+                        f.Error = Str(ref r);
+                    }
+                    else if (name.SequenceEqual("queryShapeHash"u8))
+                    {
+                        f.QueryShapeHash = Str(ref r);
+                    }
                     break;
                 case JsonTokenType.True:
                 case JsonTokenType.False:
-                    if (name.SequenceEqual("isClusterMember"u8)) { f.IsClusterMember = r.TokenType == JsonTokenType.True; }
-                    else if (name.SequenceEqual("isFromUserConnection"u8)) { f.IsFromUserConnection = r.TokenType == JsonTokenType.True; f.IsFromUserConnectionSet = true; }
+                    if (name.SequenceEqual("isClusterMember"u8))
+                    {
+                        f.IsClusterMember = r.TokenType == JsonTokenType.True;
+                    }
+                    else if (name.SequenceEqual("isFromUserConnection"u8))
+                    {
+                        f.IsFromUserConnection = r.TokenType == JsonTokenType.True;
+                        f.IsFromUserConnectionSet = true;
+                    }
                     break;
                 case JsonTokenType.StartObject:
-                    if (name.SequenceEqual("command"u8)) { Command(ref r, ref f, fromSlowLog: true); }
-                    else if (name.SequenceEqual("doc"u8)) { ClientDoc(ref r, ref f); }
-                    else if (name.SequenceEqual("uuid"u8)) { f.Uuid = Nested(ref r, "uuid"u8, "$uuid"u8); }
-                    else { r.Skip(); }
+                    if (name.SequenceEqual("command"u8))
+                    {
+                        Command(ref r, ref f, fromSlowLog: true);
+                    }
+                    else if (name.SequenceEqual("doc"u8))
+                    {
+                        ClientDoc(ref r, ref f);
+                    }
+                    else if (name.SequenceEqual("uuid"u8))
+                    {
+                        f.Uuid = Nested(ref r, "uuid"u8, "$uuid"u8);
+                    }
+                    else
+                    {
+                        r.Skip();
+                    }
                     break;
                 default:
                     r.Skip();
@@ -415,9 +502,18 @@ public sealed partial class MongoLogProcessor
         {
             var name = r.ValueSpan;
             r.Read();
-            if (r.TokenType == JsonTokenType.String && name.SequenceEqual("ip"u8)) { ip = Str(ref r); }
-            else if (r.TokenType == JsonTokenType.True && name.SequenceEqual("isSystemUser"u8)) { isSystemUser = true; }
-            else { r.Skip(); }
+            if (r.TokenType == JsonTokenType.String && name.SequenceEqual("ip"u8))
+            {
+                ip = Str(ref r);
+            }
+            else if (r.TokenType == JsonTokenType.True && name.SequenceEqual("isSystemUser"u8))
+            {
+                isSystemUser = true;
+            }
+            else
+            {
+                r.Skip();
+            }
         }
         return ip;
     }
@@ -462,10 +558,22 @@ public sealed partial class MongoLogProcessor
         {
             var name = r.ValueSpan;
             r.Read();
-            if (r.TokenType == JsonTokenType.StartObject && name.SequenceEqual("args"u8)) { Command(ref r, ref f, fromSlowLog: false); }
-            else if (r.TokenType == JsonTokenType.String && name.SequenceEqual("command"u8)) { f.CommandName = Str(ref r); }
-            else if (r.TokenType == JsonTokenType.String && name.SequenceEqual("ns"u8)) { f.Ns = Str(ref r); }
-            else { r.Skip(); }
+            if (r.TokenType == JsonTokenType.StartObject && name.SequenceEqual("args"u8))
+            {
+                Command(ref r, ref f, fromSlowLog: false);
+            }
+            else if (r.TokenType == JsonTokenType.String && name.SequenceEqual("command"u8))
+            {
+                f.CommandName = Str(ref r);
+            }
+            else if (r.TokenType == JsonTokenType.String && name.SequenceEqual("ns"u8))
+            {
+                f.Ns = Str(ref r);
+            }
+            else
+            {
+                r.Skip();
+            }
         }
     }
 
@@ -567,9 +675,18 @@ public sealed partial class MongoLogProcessor
                 {
                     var key = r.ValueSpan;
                     r.Read();
-                    if (r.TokenType == JsonTokenType.String && key.SequenceEqual("name"u8)) { f.Driver = Str(ref r); }
-                    else if (r.TokenType == JsonTokenType.String && key.SequenceEqual("version"u8)) { f.DriverVersion = Str(ref r); }
-                    else { r.Skip(); }
+                    if (r.TokenType == JsonTokenType.String && key.SequenceEqual("name"u8))
+                    {
+                        f.Driver = Str(ref r);
+                    }
+                    else if (r.TokenType == JsonTokenType.String && key.SequenceEqual("version"u8))
+                    {
+                        f.DriverVersion = Str(ref r);
+                    }
+                    else
+                    {
+                        r.Skip();
+                    }
                 }
             }
             else
@@ -585,9 +702,18 @@ public sealed partial class MongoLogProcessor
         {
             var key = r.ValueSpan;
             r.Read();
-            if (r.TokenType == JsonTokenType.String && key.SequenceEqual("user"u8)) { f.User = Str(ref r); }
-            else if (r.TokenType == JsonTokenType.String && key.SequenceEqual("db"u8)) { f.Db = Str(ref r); }
-            else { r.Skip(); }
+            if (r.TokenType == JsonTokenType.String && key.SequenceEqual("user"u8))
+            {
+                f.User = Str(ref r);
+            }
+            else if (r.TokenType == JsonTokenType.String && key.SequenceEqual("db"u8))
+            {
+                f.Db = Str(ref r);
+            }
+            else
+            {
+                r.Skip();
+            }
         }
     }
 
