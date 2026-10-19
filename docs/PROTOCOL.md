@@ -422,7 +422,7 @@ read as an array, and null fields left out. `shape_hash` is XxHash3-64 of the sh
 columns are `__other__`, with the real counts. A line for a minute already shipped in the same task goes into
 that minute's next `part`.
 
-Times are ISO 8601 UTC strings with microseconds. Every column is sent in every row.
+Times are ISO 8601 UTC strings with microseconds. Every column is sent in every row. An audited operation whose line cannot be parsed is still shipped, counted, with `command` = `?unparsed`; a document nested deeper than the shape follows is written `?deep`.
 
 | stream | from | one row is | columns |
 |---|---|---|---|
@@ -430,7 +430,7 @@ Times are ISO 8601 UTC strings with microseconds. Every column is sent in every 
 | `mongo_slow_ops` | server log `51803` | a (minute, part, key) group | `minute`, `part`, `process`, `process_type`, `conn`, `client_ip`, `app_name`, `command`, `ns`, `shape_hash`, `shape`, `shape_version`, `server_shape_hash`, `err_code`, `is_user_connection`, `event_count`, `first_ts`, `last_ts`, `nreturned`, `docs_examined`, `keys_examined`, `reslen`, `duration_ms_sum`, `duration_ms_max` |
 | `mongo_connections` | server log `22943`, `22944`, `5286306`, `4615611` | a line (`event`: `accepted`, `ended`, `signin`, `process_start`) | `ts`, `process`, `event`, `conn_id`, `connection_uuid`, `user`, `auth_db`, `mechanism`, `client_ip`, `client_port`, `app_name`, `driver_name`, `driver_version`, `is_cluster_member`, `pid`, `host` |
 | `mongo_signin_failures` | server log `5286307` | a (minute, part, key) group, one per connection | `minute`, `part`, `process`, `user`, `auth_db`, `client_ip`, `app_name`, `driver_name`, `mechanism`, `result`, `reason`, `conn`, `event_count` |
-| `atlas_events` | project events, except the agent's own (username = its client id) | an event | `event_id`, `created`, `event_type`, `username`, `remote_address`, `target_username`, `database`, `cluster_name`, `raw` |
+| `atlas_events` | project events, except the agent's own log downloads (`MONGODB_LOGS_DOWNLOADED` with its client id as username); every other event done with its service account is shipped | an event | `event_id`, `created`, `event_type`, `username`, `remote_address`, `target_username`, `database`, `cluster_name`, `raw` |
 | `catalog_users` | `databaseUsers` | a database user | `snapshot_date`, `username`, `database_name`, `roles`, `scopes`, `aws_iam_type`, `ldap_auth_type`, `oidc_auth_type`, `x509_type`, `delete_after_date` |
 | `catalog_roles` | `customDBRoles/roles` | a custom role | `snapshot_date`, `role_name`, `actions`, `inherited_roles` |
 | `catalog_access_list` | `accessList` | an entry | `snapshot_date`, `cidr_block`, `ip_address`, `aws_security_group`, `comment`, `delete_after_date` |

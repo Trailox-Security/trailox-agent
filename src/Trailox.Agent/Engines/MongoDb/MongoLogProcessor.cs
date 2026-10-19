@@ -76,6 +76,15 @@ public sealed partial class MongoLogProcessor
 {
     public const int DefaultGroupCap = 20_000;
 
+    /// <summary>The command name of an operation whose audit line could not be parsed: it is still counted, never dropped.</summary>
+    public const string Unparsed = "?unparsed";
+
+    /// <summary>
+    /// Deeper than any line Atlas writes: MongoDB documents nest up to 100 levels, and the log adds a few. At the
+    /// reader's default (64) a deliberately deep query would fail to parse and its operation would go unseen.
+    /// </summary>
+    internal static readonly JsonReaderOptions ReaderOptions = new() { MaxDepth = 256 };
+
     private static readonly byte[][] DdlTypes =
     [
         "createCollection"u8.ToArray(), "dropCollection"u8.ToArray(), "createDatabase"u8.ToArray(), "dropDatabase"u8.ToArray(),
@@ -173,6 +182,7 @@ public sealed partial class MongoLogProcessor
             Counts.OutOfWindow++;
             return;
         }
+        var kept = Counts.Kept;
         try
         {
             if (audit)
@@ -184,11 +194,36 @@ public sealed partial class MongoLogProcessor
                 ProcessServer(line, ts);
             }
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Parsing comes before anything is counted or aggregated, so a bad line is counted once, here.
+            // 🔴 ONE LINE NEVER FAILS A TASK, AND AN OPERATION IS NEVER DROPPED. Any failure on one line is that
+            //    line's: a task that threw here would fail at every retry and its window would never land.
+            //    Parsing comes before anything is counted, so the line is counted once, here: an audited
+            //    operation that cannot be parsed is still shipped, counted, under the command "?unparsed".
+            if (Counts.Kept != kept)
+            {
+                return;
+            }
+            if (audit && _stream == MongoLogStream.Ops && UnparsedOp(line, ts))
+            {
+                return;
+            }
             Counts.Malformed++;
         }
+    }
+
+    /// <summary>An operation's audit line that would not parse: its type and time are known from the raw bytes, so it is counted.</summary>
+    private bool UnparsedOp(ReadOnlySpan<byte> line, long ts)
+    {
+        var atype = LineScan.QuotedAt(line, LineScan.Value(line, "\"atype\""u8, "atype"u8, _form));
+        if (!atype.SequenceEqual("authCheck"u8) && !IsDdl(atype))
+        {
+            return false;
+        }
+        var f = new LineFields();
+        Counts.Kept++;
+        AddOp(ts, "?unparsed"u8, atype, ref f);
+        return true;
     }
 
     // ---- server log -------------------------------------------------------------------------------
@@ -215,6 +250,7 @@ public sealed partial class MongoLogProcessor
         }
         var f = new LineFields();
         ParseServer(line, ref f);
+        // Counted only once the line has parsed: see Process.
         Counts.Kept++;
         switch (id)
         {
@@ -226,7 +262,7 @@ public sealed partial class MongoLogProcessor
 
     private void ParseServer(ReadOnlySpan<byte> line, ref LineFields f)
     {
-        var r = new Utf8JsonReader(line);
+        var r = new Utf8JsonReader(line, ReaderOptions);
         r.Read();
         while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
         {
@@ -325,7 +361,7 @@ public sealed partial class MongoLogProcessor
 
     private void ParseAudit(ReadOnlySpan<byte> line, ref LineFields f, bool startup)
     {
-        var r = new Utf8JsonReader(line);
+        var r = new Utf8JsonReader(line, ReaderOptions);
         r.Read();
         while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
         {

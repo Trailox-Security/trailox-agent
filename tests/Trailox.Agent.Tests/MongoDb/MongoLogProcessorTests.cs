@@ -270,13 +270,43 @@ public class MongoLogProcessorTests
     }
 
     [Fact]
-    public void A_line_that_is_not_json_is_counted_once_as_malformed()
+    public void An_operation_whose_audit_line_cannot_be_parsed_is_still_counted()
     {
         var (rows, p) = Run(MongoLogStream.Ops, """{ "atype" : "authCheck", "ts" : { "$date" : "2026-10-19T09:00:01.000+00:00" }, "param" : { "args" : { "find" : """);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(MongoLogProcessor.Unparsed, row.GetProperty("command").GetString());
+        Assert.Equal(1, row.GetProperty("event_count").GetInt64());
+        Assert.Equal(1, p.Counts.Kept);
+        Assert.Equal(0, p.Counts.Malformed);
+    }
+
+    [Fact]
+    public void A_line_without_a_readable_time_is_counted_once_as_malformed()
+    {
+        var (rows, p) = Run(MongoLogStream.Ops, """{ "atype" : "authCheck", "ts" : { "$date" : "yesterday" } }""");
 
         Assert.Empty(rows);
         Assert.Equal(1, p.Counts.Malformed);
         Assert.Equal(1, p.Counts.LinesIn);
+    }
+
+    /// <summary>MongoDB documents nest up to 100 levels: a deep query must be shipped, not lost to the parser's depth limit.</summary>
+    [Theory]
+    [InlineData("""{"a":""", "}")]
+    [InlineData("[", "]")]
+    public void A_deliberately_deep_query_is_shipped_with_a_deep_shape(string open, string close)
+    {
+        var filter = string.Concat(Enumerable.Repeat(open, 100)) + "1" + string.Concat(Enumerable.Repeat(close, 100));
+        var line = AuthCheck("2026-10-19T09:00:01.000+00:00").Replace("""{ "customer" : 4957 }""", "{ \"customer\" : " + filter + " }");
+
+        var (rows, p) = Run(MongoLogStream.Ops, line);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("find", row.GetProperty("command").GetString());
+        Assert.Equal("app_orders", row.GetProperty("user").GetString());
+        Assert.Contains("?deep", row.GetProperty("shape").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, p.Counts.Kept);
     }
 
     [Fact]

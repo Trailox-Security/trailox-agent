@@ -25,8 +25,10 @@ public sealed class AtlasCatalog
     /// MONGODB_LOGS_DOWNLOADED event with our client id as its username (about 860 a day for 3 nodes, measured).
     /// </summary>
     /// <remarks>
-    /// Skipped by <c>username</c> only. An event ABOUT the agent's service account done by a person (its access
-    /// list changed, say) carries our id as clientId and the person as username, and it is kept.
+    /// 🔴 ONLY THOSE: the type MONGODB_LOGS_DOWNLOADED with our client id as the username. Any other event done with
+    ///    the agent's service account is shipped, because a stolen or over-privileged secret is exactly what
+    ///    Trailox must show. An event ABOUT the account done by a person (its access list changed, say) carries
+    ///    our id as clientId and the person as username, and is kept too.
     /// </remarks>
     public async Task<ReadOnlyMemory<byte>> EventsAsync(long startMicros, long endMicros, CancellationToken ct)
     {
@@ -42,7 +44,7 @@ public sealed class AtlasCatalog
                 continue;
             }
             var micros = (created - DateTime.UnixEpoch).Ticks / 10;
-            if (micros < startMicros || micros >= endMicros || string.Equals(Str(e, "username"), _ownClientId, StringComparison.Ordinal))
+            if (micros < startMicros || micros >= endMicros || IsOwnDownload(e))
             {
                 continue;
             }
@@ -129,6 +131,10 @@ public sealed class AtlasCatalog
         }
         return rows.WrittenMemory;
     }
+
+    private bool IsOwnDownload(JsonElement e) =>
+        string.Equals(Str(e, "eventTypeName"), "MONGODB_LOGS_DOWNLOADED", StringComparison.Ordinal)
+        && string.Equals(Str(e, "username"), _ownClientId, StringComparison.Ordinal);
 
     private static string Iso(long micros) =>
         DateTime.UnixEpoch.AddTicks(micros * 10).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);

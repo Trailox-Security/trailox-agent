@@ -219,16 +219,19 @@ public class MongoSourceTests
             {"results":[
               {"id":"e1","created":"2026-10-19T09:01:00Z","eventTypeName":"MONGODB_LOGS_DOWNLOADED","username":"@0@","links":[]},
               {"id":"e2","created":"2026-10-19T09:02:00Z","eventTypeName":"SERVICE_ACCOUNT_ACCESS_LIST_ENTRY_ADDED","username":"admin@example.com","clientId":"@1@","remoteAddress":"203.0.113.9","links":[]},
-              {"id":"e3","created":"2026-10-19T09:10:00Z","eventTypeName":"MONGODB_USER_ADDED","username":"admin@example.com","links":[]}
-            ],"totalCount":3}
+              {"id":"e3","created":"2026-10-19T09:10:00Z","eventTypeName":"MONGODB_USER_ADDED","username":"admin@example.com","links":[]},
+              {"id":"e4","created":"2026-10-19T09:03:00Z","eventTypeName":"MONGODB_USER_ADDED","username":"@0@","links":[]}
+            ],"totalCount":4}
             """.Replace("@0@", (ClientId).ToString()).Replace("@1@", (ClientId).ToString());
 
         var rows = await RowsOf((await source.OpenAsync(Window(ProtocolInfo.Streams.AtlasEvents, start, start.AddMinutes(10)), CancellationToken.None))!);
 
-        var row = Assert.Single(rows);
-        Assert.Equal("e2", row.GetProperty("event_id").GetString());
-        Assert.Equal("admin@example.com", row.GetProperty("username").GetString());
-        Assert.DoesNotContain("\"links\"", row.GetProperty("raw").GetString(), StringComparison.Ordinal);
+        // e1 is the agent's own log download; e3 is outside the window. e4 is a change made WITH the agent's
+        // service account, which must be shipped: a stolen or over-privileged secret is what Trailox shows.
+        Assert.Equal(new[] { "e2", "e4" }, rows.Select(r => r.GetProperty("event_id").GetString()));
+        Assert.Equal("admin@example.com", rows[0].GetProperty("username").GetString());
+        Assert.Equal(ClientId, rows[1].GetProperty("username").GetString());
+        Assert.DoesNotContain("\"links\"", rows[0].GetProperty("raw").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]

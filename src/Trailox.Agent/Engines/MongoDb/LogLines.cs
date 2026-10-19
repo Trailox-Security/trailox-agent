@@ -119,7 +119,7 @@ public static class LineScan
     {
         try
         {
-            var r = new Utf8JsonReader(line);
+            var r = new Utf8JsonReader(line, new JsonReaderOptions { MaxDepth = 256 });
             if (!r.Read() || r.TokenType != JsonTokenType.StartObject)
             {
                 return -1;

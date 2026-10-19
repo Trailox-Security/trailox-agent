@@ -156,6 +156,12 @@ public sealed class MongoShape
 
     private Kind WriteArray(ref Utf8JsonReader r, int depth)
     {
+        if (depth >= MaxDepth)
+        {
+            r.Skip();
+            _out.Write("\"?deep\""u8);
+            return Kind.Structured;
+        }
         var start = _out.Length;
         var members = _members[depth];
         members.Clear();
