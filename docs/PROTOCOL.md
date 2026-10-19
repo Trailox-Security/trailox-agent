@@ -126,6 +126,9 @@ X-Trailox-Rows: <number of rows the agent sent, optional>
 body: one JSON object per row, as the database returned it
 ```
 
+A `mongo_ops` body (section 6e) may also contain blank lines, before, between or after rows; a blank line is
+not a row, and a body of blank lines only has no rows.
+
 Reply `200 { "rowsAccepted": n }`. Any other reply is handled as in section 1: the agent
 records the error, reports it in the next check-in's `lastErrors`, and moves on. Nothing is
 retried locally, because Trailox re-issues the window.
@@ -411,6 +414,11 @@ last audit file again: every line outside the window is dropped.
 
 **Completeness:** before shipping a window younger than two hours, the agent checks that each member's server
 log reaches past the window's end. If not, it reports `not_yet_published` (section 5).
+
+**Keep-alive:** a `mongo_ops` upload streams while the audit files are read, and a busy cluster with few
+distinct operations sends few rows, so the body can be quiet for minutes. While it is open, the agent flushes
+the compressor at least every 15 s, so a proxy or firewall on the path never sees an idle connection. When no
+row was sent since the last flush, it first writes a blank line, never inside a row.
 
 **Shape** (version 1): every value replaced by its type (`?string`, `?number`, `?bool`, `?date`, `?objectId`,
 `?binary`, `?uuid`, ...), an array of values by `?array<type>`, consecutive equal documents of an array written

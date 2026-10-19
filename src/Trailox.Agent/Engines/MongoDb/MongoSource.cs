@@ -184,7 +184,8 @@ public sealed class MongoSource : IEngineSource
                 await pipe.Writer.CompleteAsync(ex);
             }
         }, CancellationToken.None);
-        return new RowStream(pipe.Reader.AsStream(), new Producer(cts, producer));
+        // Quiet by design: a busy cluster with few shapes yields few rows while gigabytes of log are read.
+        return new RowStream(pipe.Reader.AsStream(), new Producer(cts, producer)) { KeepAlive = true };
     }
 
     /// <summary>Downloads one log file of one process for the window and feeds every line to the processor.</summary>

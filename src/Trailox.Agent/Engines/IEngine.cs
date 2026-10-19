@@ -46,6 +46,14 @@ public sealed class RowStream : IAsyncDisposable
 
     public Stream Body { get; }
 
+    /// <summary>
+    /// The body can go quiet for minutes while the source works (agent 1.8: MongoDB's audit files, read while
+    /// the rows stream). The upload then writes blank lines (never inside a row) and flushes, so the connection
+    /// is never idle long enough for a proxy or firewall on the path to close it. Set only for a stream whose
+    /// body may contain blank lines (PROTOCOL.md §6e).
+    /// </summary>
+    public bool KeepAlive { get; init; }
+
     public RowStream(Stream body, IDisposable owner)
     {
         Body = body;

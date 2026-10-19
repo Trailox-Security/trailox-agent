@@ -174,6 +174,23 @@ public class MongoSourceTests
     }
 
     [Fact]
+    public async Task Only_the_streamed_ops_upload_asks_for_keep_alive()
+    {
+        var start = new DateTime(2026, 10, 19, 9, 0, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source();
+        atlas.Log = (_, name) => name == "mongodb" ? [ServerLine(start.AddMinutes(12))] : [AuditLine(start.AddSeconds(5), "app_orders")];
+
+        var ops = (await source.OpenAsync(Window(ProtocolInfo.Streams.MongoOps, start, start.AddMinutes(10)), CancellationToken.None))!;
+        var users = (await source.OpenAsync(new AgentTask { ChunkId = "c", Stream = ProtocolInfo.Streams.CatalogUsers }, CancellationToken.None))!;
+
+        // The ops rows stream while gigabytes of audit log are read; every other stream is read whole first.
+        Assert.True(ops.KeepAlive);
+        Assert.False(users.KeepAlive);
+        Assert.Equal(3, (await RowsOf(ops)).Count);
+        Assert.Single(await RowsOf(users));
+    }
+
+    [Fact]
     public async Task A_window_that_cuts_a_minute_is_refused()
     {
         var (source, _) = Source();
