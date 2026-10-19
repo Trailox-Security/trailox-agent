@@ -53,6 +53,16 @@ public static class ProtocolInfo
         // the sessions on the Trailox side.
         public const string AccessHistory = "access_history";
         public const string Logins = "logins";
+
+        // MongoDB Atlas (agent 1.8): per-minute aggregates built from Atlas log files, Atlas project events,
+        // and three catalog snapshots read from the Atlas Admin API.
+        public const string MongoOps = "mongo_ops";
+        public const string MongoSlowOps = "mongo_slow_ops";
+        public const string MongoConnections = "mongo_connections";
+        public const string MongoSigninFailures = "mongo_signin_failures";
+        public const string AtlasEvents = "atlas_events";
+        public const string CatalogRoles = "catalog_roles";
+        public const string CatalogAccessList = "catalog_access_list";
     }
 }
 
@@ -100,6 +110,49 @@ public sealed class EndpointCaps
     /// text and no shapes when this is false.
     /// </summary>
     public bool TextReadable { get; set; } = true;
+
+    /// <summary>MongoDB Atlas only (agent 1.8): what the probe found in the project. Null, and not sent, for every other engine.</summary>
+    public AtlasCaps? Atlas { get; set; }
+}
+
+/// <summary>What the probe of a MongoDB Atlas cluster found. Every field is bounded by the gateway.</summary>
+public sealed class AtlasCaps
+{
+    public string ProjectId { get; set; } = "";
+    public string ClusterName { get; set; } = "";
+
+    /// <summary>The instance size, e.g. M10; M0 and Flex are refused by the probe.</summary>
+    public string Tier { get; set; } = "";
+
+    /// <summary>REPLICASET or SHARDED (clusterType).</summary>
+    public string Topology { get; set; } = "";
+
+    /// <summary>atlas_api or s3: where the agent reads the log files.</summary>
+    public string LogSource { get; set; } = "";
+
+    /// <summary>The processes whose logs the agent reads: the replica set members, or a sharded cluster's mongos.</summary>
+    public List<AtlasProcess> Processes { get; set; } = new();
+
+    /// <summary>The probe's checks, as the source page shows them.</summary>
+    public List<AtlasCheck> Checks { get; set; } = new();
+}
+
+public sealed class AtlasProcess
+{
+    /// <summary>The host as the logs endpoint takes it (userAlias), e.g. cluster1-shard-00-02.abcde.mongodb.net.</summary>
+    public string Host { get; set; } = "";
+
+    /// <summary>typeName: REPLICA_PRIMARY, REPLICA_SECONDARY, SHARD_MONGOS...</summary>
+    public string Type { get; set; } = "";
+}
+
+public sealed class AtlasCheck
+{
+    public string Name { get; set; } = "";
+
+    /// <summary>ok, warn or fail.</summary>
+    public string Status { get; set; } = "";
+    public string Message { get; set; } = "";
 }
 
 public sealed class ErrorReport
@@ -144,7 +197,13 @@ public sealed class ChunkAccepted
 
 public sealed class ChunkFailed
 {
+    /// <summary>The source has not published the whole window yet; Trailox plans it again later (agent 1.8).</summary>
+    public const string NotYetPublished = "not_yet_published";
+
     public string Message { get; set; } = "";
+
+    /// <summary>Why, when the agent knows: <see cref="NotYetPublished"/>. Null, and not sent, otherwise.</summary>
+    public string? Reason { get; set; }
 }
 
 public sealed class GatewayError

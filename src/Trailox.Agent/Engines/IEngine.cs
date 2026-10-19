@@ -72,4 +72,11 @@ public class SourceException : Exception
     /// give is not a fault of the agent, and it would be listed again with every day's catalog.
     /// </summary>
     public bool MissingOptionalGrant { get; init; }
+
+    /// <summary>
+    /// The source has not published the whole window yet (agent 1.8: MongoDB Atlas, whose log files arrive
+    /// minutes late). Reported with reason "not_yet_published", so Trailox plans the window again at a later
+    /// poll; not listed among the agent's errors, because waiting for the source is not a fault.
+    /// </summary>
+    public bool NotYetPublished { get; init; }
 }

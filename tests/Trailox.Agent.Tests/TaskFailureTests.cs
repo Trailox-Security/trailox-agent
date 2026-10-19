@@ -122,6 +122,37 @@ public class TaskFailureTests
         Assert.Empty(errors.Snapshot());
     }
 
+    /// <summary>
+    /// Agent 1.8: a window the source has not published yet (MongoDB Atlas log files arrive minutes late) is reported
+    /// with reason not_yet_published, so Trailox plans it again, and is NOT listed among the agent's errors.
+    /// </summary>
+    [Fact]
+    public async Task A_window_not_yet_published_is_reported_with_its_reason_and_not_listed_as_an_agent_error()
+    {
+        var (executor, gateway, errors) = Runner();
+        var session = Session(new ScriptedSource((_, _) =>
+            throw new SourceException("the log of cluster0-shard-00-00 is published up to 11:48:00Z, before the window's end 11:50Z") { NotYetPublished = true }));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-m"), session, CancellationToken.None));
+
+        var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-m/failed", StringComparison.Ordinal));
+        Assert.Contains("\"reason\":\"not_yet_published\"", failed.Body);
+        Assert.Contains("before the window", failed.Body);
+        Assert.Empty(errors.Snapshot());
+    }
+
+    /// <summary>Other failures carry no reason: the field is left out, as for every agent before 1.8.</summary>
+    [Fact]
+    public async Task Other_failures_send_no_reason()
+    {
+        var (executor, gateway, _) = Runner();
+        var session = Session(new ScriptedSource((_, _) => throw new SourceException("refused")));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-r"), session, CancellationToken.None));
+
+        Assert.DoesNotContain("reason", Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-r/failed", StringComparison.Ordinal)).Body);
+    }
+
     /// <summary>Any other refusal still is an agent error, as before.</summary>
     [Fact]
     public async Task Any_other_source_failure_is_still_listed_as_an_agent_error()

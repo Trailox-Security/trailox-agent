@@ -5,8 +5,8 @@ audit and catalog views** with a read-only account you create, and streams the r
 over HTTPS, **outbound only, on port 443**. Nothing inbound, no IP allow-list, no VPN, and the
 database credentials never leave your network.
 
-Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift** and **Snowflake**.
-One agent can read any number of endpoints across them.
+Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snowflake** and, from
+1.8.0, **MongoDB Atlas**. One agent can read any number of endpoints across them.
 
 ## What the agent does
 
@@ -18,6 +18,10 @@ One agent can read any number of endpoints across them.
   streams the result straight into a gzip upload, and repeats. If it stops, the next start
   re-reads the same window, so a restart repeats work but never loses data.
 - It holds **no logic about what the rows mean**. Classification and analysis happen in Trailox.
+- **MongoDB Atlas is the one exception to "rows as the database returned them":** the agent reads Atlas's
+  log files, replaces every value in every command by its type (`{"customer": 4957}` becomes
+  `{"customer": "?number"}`), and ships one row per minute and group with a count. The values never
+  leave your network. See [MongoDB Atlas](#mongodb-atlas).
 
 ## What leaves your network
 
@@ -77,7 +81,7 @@ be committed. Any other value can be written in the file or taken from the envir
 | `gateway` | `https://agent.trailox.io` unless Trailox tells you otherwise |
 | `probeIntervalMinutes` | How often each endpoint is re-probed (default 60). An endpoint whose probe failed is re-probed at every check-in until it succeeds |
 | `endpoints[].alias` | Short name for the source in Trailox (`[A-Za-z0-9_-]{1,64}`), unique per account |
-| `endpoints[].engine` | `clickhouse`, `databricks`, `redshift` or `snowflake` |
+| `endpoints[].engine` | `clickhouse`, `databricks`, `redshift`, `snowflake` or `mongodb` (1.8.0) |
 | `endpoints[].kind` | `cloud` or `onprem`; informational |
 | `host`, `port`, `tls` | How the **agent** reaches the database. Meaning per engine below; Trailox never learns them |
 | `clusterName` | Engine-specific: the cluster, warehouse or workgroup (see below) |
@@ -87,7 +91,7 @@ be committed. Any other value can be written in the file or taken from the envir
 | `collectSessionLog` | Also ship login and session events (default `true`) |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
 | `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
-| `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
+| `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse and MongoDB, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
 | `backfillDays` | How far back the first collection reads, 0-365 days (default 30). **Used only when Trailox first registers the source**; changing it later re-reads nothing. From 1.4.0 |
 
 A key written with no value (`tls:`, or `~` or `null`) is a config problem: write a value, or remove
@@ -247,6 +251,33 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 - Every read resumes the warehouse (60-second minimum billing), so reads are scheduled hourly by
   default. Enterprise Edition or higher is required for table and column attribution
   (`ACCESS_HISTORY`).
+
+### MongoDB Atlas
+
+A dedicated Atlas cluster (M10 or larger), through the Atlas Administration API over HTTPS. The agent
+never connects to the cluster itself. From 1.8.0.
+
+- **Reads:** each member's server log and audit log files (for a sharded cluster, its `mongos`
+  routers'), the project's events, and daily the database users, custom roles and IP access list.
+  Atlas keeps log files 30 days.
+- **What leaves your network:** per minute and group, a count, the query's **shape** (every value
+  replaced by its type), the user, client address, namespace and result, and the metrics of slow
+  queries; one row per connection and sign-in (user, client address, application and driver); failed
+  sign-ins per minute and connection; project events; the catalog snapshot. Never a value from a
+  command, a document, or the error text of a failed sign-in.
+- **Account:** an Atlas service account with **Project Read Only** and **Project Cluster Log Viewer**
+  on the project. Neither can read a document or change access. If your organization requires an API
+  access list, add the agent's outbound address to the service account's.
+- **agent.yaml:** `host` = the project id (24 hex, Project Settings); `clusterName` = the cluster's name;
+  `username` = the service account's client id; `password_env`/`password_file` = its secret.
+  `port`/`tls` are ignored (HTTPS 443).
+- **Coverage:** with Atlas auditing off, Trailox sees sign-ins, slow queries and project changes. Every
+  operation needs auditing on with "audit authorization successes"; Trailox generates the filter, and
+  you apply it in Atlas.
+- **Your Activity Feed:** Atlas records each log download as an event, about 860 a day for a
+  3-member cluster. Trailox does not ship those events back.
+- **Resources:** reading a busy cluster's audit log is CPU work. Give the agent **1 CPU** for MongoDB
+  sources (`resources.limits.cpu: 1` in the chart); memory stays at 512Mi.
 
 ## Security
 

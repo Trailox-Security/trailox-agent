@@ -132,10 +132,14 @@ retried locally, because Trailox re-issues the window.
 
 ## 5. Reporting a failed task: `POST /v1/agent/chunks/{chunkId}/failed`
 
-`{ "message": "..." }`. Sent when a task fails for any reason but the agent stopping: the `SELECT`
-fails (a missing grant, an unreachable database), the database does not answer in time, or it answers
-with something the agent cannot read. The window is re-issued on a later check-in. When this report
-cannot be delivered, the task stays unanswered and is handed back at a later check-in.
+`{ "message": "...", "reason": "..." }`. Sent when a task fails for any reason but the agent stopping:
+the `SELECT` fails (a missing grant, an unreachable database), the database does not answer in time, or
+it answers with something the agent cannot read. The window is re-issued on a later check-in. When this
+report cannot be delivered, the task stays unanswered and is handed back at a later check-in.
+
+`reason` is sent only when the agent knows it (from 1.8.0): `not_yet_published` means the source has not
+published the whole window yet (MongoDB Atlas log files arrive minutes late). Trailox plans the same
+window again at a later poll, and the agent does not list it among its errors.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
@@ -378,6 +382,63 @@ SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREATED_ON, MO
        TABLE_SCHEMA, GRANTED_TO, GRANTEE_NAME, GRANT_OPTION, GRANTED_BY, DELETED_ON, GRANTED_BY_ROLE_TYPE, OBJECT_INSTANCE
   FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')
 ```
+
+## 6e. MongoDB Atlas (engine `mongodb`, from 1.8.0)
+
+Through the Atlas Administration API (`https://cloud.mongodb.com/api/atlas/v2`) as a service account:
+OAuth client credentials (`POST /api/oauth/token`, HTTP Basic client id and secret,
+`grant_type=client_credentials`) for a one-hour token, reused until two minutes before it expires. Every
+request is a GET; JSON with `Accept: application/vnd.atlas.2023-01-01+json`, log files with
+`application/vnd.atlas.2023-02-01+gzip`. A 429 or 5xx waits for `Retry-After` (else 2, 4, 8, 16 s, with
+jitter) and is retried up to four times.
+
+| call | when |
+|---|---|
+| `GET /groups/{project}/clusters/{clusterName}` | probe; the cluster's tier, topology, version and member hosts |
+| `GET /groups/{project}/processes` | probe and every 15 minutes; only the hosts in the cluster's standard connection string are kept |
+| `GET /groups/{project}/clusters/{host}/logs/{mongodb\|mongos}.gz?startDate&endDate` | each server-log task, per member; the probe, one minute |
+| `GET /groups/{project}/clusters/{host}/logs/{mongodb-audit-log\|mongos-audit-log}.gz?...` | each `mongo_ops` task, per member |
+| `GET /groups/{project}/events?minDate&maxDate` | each `atlas_events` task; the probe, one item |
+| `GET /groups/{project}/databaseUsers`, `/customDBRoles/roles`, `/accessList` | daily catalog; the probe, one item |
+
+**Refused by the probe:** Free (M0), Flex and Serverless clusters, which keep no downloadable logs, and a
+paused cluster.
+
+**Windows** are whole minutes. A task whose start or end is not a whole minute fails. A line belongs to the
+window with `start <= t < end`, by its own time (`t.$date` in the server log, `ts.$date` in the audit log).
+Atlas returns whole published chunks, minutes before and after the asked window, and with auditing off the
+last audit file again: every line outside the window is dropped.
+
+**Completeness:** before shipping a window younger than two hours, the agent checks that each member's server
+log reaches past the window's end. If not, it reports `not_yet_published` (section 5).
+
+**Shape** (version 1): every value replaced by its type (`?string`, `?number`, `?bool`, `?date`, `?objectId`,
+`?binary`, `?uuid`, ...), an array of values by `?array<type>`, consecutive equal documents of an array written
+once, the driver's envelope (`lsid`, `$clusterTime`, `txnNumber`, `$db`, `$readPreference`, `readConcern`,
+`writeConcern`, `maxTimeMS`, `comment`, ...) left out, keys sorted at every depth, an object keyed `"1"`..`"n"`
+read as an array, and null fields left out. `shape_hash` is XxHash3-64 of the shape's UTF-8 text.
+
+**Groups:** at most 20,000 groups a minute per member; past that, a minute's new keys go to one row whose text
+columns are `__other__`, with the real counts. A line for a minute already shipped in the same task goes into
+that minute's next `part`.
+
+Times are ISO 8601 UTC strings with microseconds. Every column is sent in every row.
+
+| stream | from | one row is | columns |
+|---|---|---|---|
+| `mongo_ops` | audit `authCheck`, DDL and user/role types, `startup` | a (minute, part, key) group; a `startup` line on its own | `minute`, `part`, `process`, `process_type`, `atype`, `user`, `auth_db`, `is_system_user`, `client_ip`, `direct_ip`, `connection_uuid`, `command`, `ns`, `shape_hash`, `shape`, `shape_version`, `result`, `event_count`, `first_ts`, `last_ts`, `audit_filter`, `audit_successes` |
+| `mongo_slow_ops` | server log `51803` | a (minute, part, key) group | `minute`, `part`, `process`, `process_type`, `conn`, `client_ip`, `app_name`, `command`, `ns`, `shape_hash`, `shape`, `shape_version`, `server_shape_hash`, `err_code`, `is_user_connection`, `event_count`, `first_ts`, `last_ts`, `nreturned`, `docs_examined`, `keys_examined`, `reslen`, `duration_ms_sum`, `duration_ms_max` |
+| `mongo_connections` | server log `22943`, `22944`, `5286306`, `4615611` | a line (`event`: `accepted`, `ended`, `signin`, `process_start`) | `ts`, `process`, `event`, `conn_id`, `connection_uuid`, `user`, `auth_db`, `mechanism`, `client_ip`, `client_port`, `app_name`, `driver_name`, `driver_version`, `is_cluster_member`, `pid`, `host` |
+| `mongo_signin_failures` | server log `5286307` | a (minute, part, key) group, one per connection | `minute`, `part`, `process`, `user`, `auth_db`, `client_ip`, `app_name`, `driver_name`, `mechanism`, `result`, `reason`, `conn`, `event_count` |
+| `atlas_events` | project events, except the agent's own (username = its client id) | an event | `event_id`, `created`, `event_type`, `username`, `remote_address`, `target_username`, `database`, `cluster_name`, `raw` |
+| `catalog_users` | `databaseUsers` | a database user | `snapshot_date`, `username`, `database_name`, `roles`, `scopes`, `aws_iam_type`, `ldap_auth_type`, `oidc_auth_type`, `x509_type`, `delete_after_date` |
+| `catalog_roles` | `customDBRoles/roles` | a custom role | `snapshot_date`, `role_name`, `actions`, `inherited_roles` |
+| `catalog_access_list` | `accessList` | an entry | `snapshot_date`, `cidr_block`, `ip_address`, `aws_security_group`, `comment`, `delete_after_date` |
+
+`process` is the member's host as the logs endpoint takes it (`userAlias`). `connection_uuid` is the canonical
+UUID string in both `mongo_ops` (from the audit line's base64, read big-endian) and `mongo_connections`. `reason`
+is the error's code name (`UserNotFound`, `AuthenticationFailed`), never its message. `result` on a `__other__`
+row is -1. `roles`, `scopes`, `actions` and `inherited_roles` are JSON text.
 
 ## 7. Configuration
 

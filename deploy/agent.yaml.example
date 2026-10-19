@@ -63,6 +63,15 @@ endpoints:
 
   # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
   # stays here; register only the public half on the user.
+  # - alias: atlas-prod                               # MongoDB Atlas, agent 1.8.0 or later
+  #   engine: mongodb
+  #   kind: cloud
+  #   host: 0123456789abcdef01234567                   # the Atlas project id (Project Settings)
+  #   clusterName: Cluster0                            # the cluster's name in Atlas (M10 or larger)
+  #   username: mdb_sa_id_0123456789abcdef01234567     # the service account's client id
+  #   password_env: TRAILOX_ATLAS_SECRET               # its secret; or password_file
+  #   pollMinutes: 10
+  #   backfillDays: 7                                  # Atlas keeps log files 30 days
   # - alias: snowflake
   #   engine: snowflake
   #   kind: cloud
