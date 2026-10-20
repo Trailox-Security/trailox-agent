@@ -251,7 +251,11 @@ public sealed class AtlasApi
         {
             (401, "invalid_client") => "Atlas rejected the service account's credentials: the client id in username or the secret is wrong, deleted or expired",
             (401, "USER_UNAUTHORIZED") => $"the service account may not read {what}: give it Project Read Only and Project Cluster Log Viewer on this project",
-            (403, _) => $"Atlas refused {what} ({code}): if the organization requires an API access list, add this agent's outbound address to the service account's access list",
+            // Measured 2026-10-20: Atlas checks the service account's own API access list even when the organization
+            // does not require one. The token request still succeeds; every call after it answers this 403, and its
+            // detail (appended below) names the refused address.
+            (403, "IP_ADDRESS_NOT_ON_ACCESS_LIST") => $"Atlas refused {what} from this agent's address: add the agent's outbound address to the service account's API access list",
+            (403, _) => $"Atlas refused {what} ({code})",
             (404, "GROUP_NOT_FOUND") => "Atlas knows no project with the id in host, or the service account is not in it",
             (404, _) => $"Atlas found no {what} ({code})",
             _ => $"Atlas answered {what} with HTTP {status} {code}",

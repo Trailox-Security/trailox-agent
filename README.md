@@ -266,8 +266,9 @@ never connects to the cluster itself. From 1.8.0.
   sign-ins per minute and connection; project events; the catalog snapshot. Never a value from a
   command, a document, or the error text of a failed sign-in.
 - **Account:** an Atlas service account with **Project Read Only** and **Project Cluster Log Viewer**
-  on the project. Neither can read a document or change access. If your organization requires an API
-  access list, add the agent's outbound address to the service account's.
+  on the project. Neither can read a document or change access. If the service account has an API
+  access list, add the agent's outbound address to it: Atlas checks it even when your organization does
+  not require one.
 - **agent.yaml:** `host` = the project id (24 hex, Project Settings); `clusterName` = the cluster's name;
   `username` = the service account's client id; `password_env`/`password_file` = its secret.
   `port`/`tls` are ignored (HTTPS 443).
