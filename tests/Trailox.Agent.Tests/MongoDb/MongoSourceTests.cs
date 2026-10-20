@@ -31,6 +31,13 @@ public class MongoSourceTests
         public int TokenRequests { get; private set; }
         public string Events { get; set; } = """{"results":[],"totalCount":0}""";
 
+        /// <summary>
+        /// A sharded cluster as Atlas runs one with its default embedded config servers (measured on an M30,
+        /// 2026-10-20): every host runs a mongos (SHARD_MONGOS, port 27016) beside its mongod (27017), under the same
+        /// host name, and the standard connection string names the routers.
+        /// </summary>
+        public bool Sharded { get; set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri!.PathAndQuery;
@@ -49,6 +56,17 @@ public class MongoSourceTests
             var prefix = $"/api/atlas/v2/groups/{Project}";
             Assert.StartsWith(prefix, path, StringComparison.Ordinal);
             var rest = path[prefix.Length..];
+            if (Sharded && rest.StartsWith("/clusters/Cluster0", StringComparison.Ordinal) && !rest.Contains("/logs/", StringComparison.Ordinal))
+            {
+                return Json("""{"name":"Cluster0","clusterType":"SHARDED","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27016,@1@:27016,@2@:27016/?ssl=true&authSource=admin"},"providerSettings":{"providerName":"AWS","instanceSizeName":"M30"}}""".Replace("@0@", Hosts[0]).Replace("@1@", Hosts[1]).Replace("@2@", Hosts[2]));
+            }
+            if (Sharded && rest.StartsWith("/processes", StringComparison.Ordinal))
+            {
+                var mongod = new[] { "SHARD_CONFIG_PRIMARY", "REPLICA_PRIMARY", "REPLICA_SECONDARY" };
+                var routers = Hosts.Select(h => """{"userAlias":"@0@","port":27016,"typeName":"SHARD_MONGOS"}""".Replace("@0@", h));
+                var shards = Hosts.Select((h, i) => """{"userAlias":"@0@","port":27017,"typeName":"@1@"}""".Replace("@0@", h).Replace("@1@", mongod[i]));
+                return Json("""{"results":[@0@],"totalCount":6}""".Replace("@0@", string.Join(",", shards.Concat(routers))));
+            }
             if (rest.StartsWith("/clusters/Cluster0", StringComparison.Ordinal) && !rest.Contains("/logs/", StringComparison.Ordinal))
             {
                 return Json("""{"name":"Cluster0","clusterType":"REPLICASET","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27017,@1@:27017,@2@:27017/?ssl=true&authSource=admin&replicaSet=atlas-abcdef-shard-0"},"providerSettings":{"providerName":"@3@","instanceSizeName":"@4@"}}""".Replace("@0@", (Hosts[0]).ToString()).Replace("@1@", (Hosts[1]).ToString()).Replace("@2@", (Hosts[2]).ToString()).Replace("@3@", (ProviderName).ToString()).Replace("@4@", (Tier).ToString()));
@@ -173,6 +191,34 @@ public class MongoSourceTests
         Assert.DoesNotContain(atlas.Paths, p => p.Contains("other.mongodb.net", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// 🔴 A sharded cluster is read from its mongos routers only. On an M30 (2026-10-20) the mongos audit files held each
+    /// client operation once; the shard primaries' mongod audit files held them again, in lines that look exactly like a
+    /// client's. Before 1.8.1 the agent matched processes by host name, which the mongos and the mongod share, so it read
+    /// both and counted each operation about 2.7 times.
+    /// </summary>
+    [Fact]
+    public async Task A_sharded_cluster_is_read_from_its_mongos_routers_only()
+    {
+        var start = new DateTime(2026, 10, 19, 9, 0, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source();
+        atlas.Sharded = true;
+        atlas.Log = (_, name) => name is "mongos" or "mongodb"
+            ? [ServerLine(start.AddMinutes(12))]
+            : [AuditLine(start.AddSeconds(5), "app_orders")];
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        var rows = await RowsOf((await source.OpenAsync(Window(ProtocolInfo.Streams.MongoOps, start, start.AddMinutes(10)), CancellationToken.None))!);
+
+        Assert.Equal(3, caps.Atlas!.Processes.Count);
+        Assert.All(caps.Atlas.Processes, p => Assert.Equal("SHARD_MONGOS", p.Type));
+        // One line in each router's file, each counted once.
+        Assert.Equal(3, rows.Sum(r => r.GetProperty("event_count").GetInt64()));
+        Assert.Equal(3, atlas.Paths.Count(p => p.Contains("/logs/mongos-audit-log", StringComparison.Ordinal)));
+        Assert.DoesNotContain(atlas.Paths, p => p.Contains("/logs/mongodb-audit-log", StringComparison.Ordinal));
+        Assert.DoesNotContain(atlas.Paths, p => p.Contains("/logs/mongodb.gz", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Only_the_streamed_ops_upload_asks_for_keep_alive()
     {
@@ -276,6 +322,10 @@ public class MongoSourceTests
     [InlineData(401, """{"error":"invalid_client","error_description":"The provided credentials are not valid"}""", "rejected the service account's credentials")]
     [InlineData(401, """{"detail":"Current user is not authorized to perform this action.","error":401,"errorCode":"USER_UNAUTHORIZED"}""", "Project Read Only and Project Cluster Log Viewer")]
     [InlineData(404, """{"detail":"No group with ID exists.","error":404,"errorCode":"GROUP_NOT_FOUND"}""", "no project with the id in host")]
+    // Measured 2026-10-20: Atlas checks the service account's own access list even when the organization does not
+    // require one. The answer names the refused address, and the sentence says which list it belongs on.
+    [InlineData(403, """{"detail":"IP address 203.0.113.7 is not allowed to access this resource.","error":403,"errorCode":"IP_ADDRESS_NOT_ON_ACCESS_LIST","parameters":["203.0.113.7"],"reason":"Forbidden"}""", "add the agent's outbound address to the service account's API access list")]
+    [InlineData(403, """{"detail":"IP address 203.0.113.7 is not allowed to access this resource.","error":403,"errorCode":"IP_ADDRESS_NOT_ON_ACCESS_LIST","parameters":["203.0.113.7"],"reason":"Forbidden"}""", "203.0.113.7")]
     public async Task Atlas_errors_say_what_to_fix(int status, string body, string expected)
     {
         var (source, atlas) = Source();

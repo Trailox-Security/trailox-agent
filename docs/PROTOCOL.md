@@ -398,9 +398,9 @@ jitter) and is retried up to four times.
 | call | when |
 |---|---|
 | `GET /groups/{project}/clusters/{clusterName}` | probe; the cluster's tier, topology, version and member hosts |
-| `GET /groups/{project}/processes` | probe and every 15 minutes; only the hosts in the cluster's standard connection string are kept |
-| `GET /groups/{project}/clusters/{host}/logs/{mongodb\|mongos}.gz?startDate&endDate` | each server-log task, per member; the probe, one minute |
-| `GET /groups/{project}/clusters/{host}/logs/{mongodb-audit-log\|mongos-audit-log}.gz?...` | each `mongo_ops` task, per member |
+| `GET /groups/{project}/processes` | probe and every 15 minutes; only the hosts in the cluster's standard connection string are kept, and on a sharded cluster only its `SHARD_MONGOS` processes (from 1.8.1) |
+| `GET /groups/{project}/clusters/{host}/logs/{mongodb\|mongos}.gz?startDate&endDate` | each server-log task, per member (per mongos router on a sharded cluster); the probe, one minute |
+| `GET /groups/{project}/clusters/{host}/logs/{mongodb-audit-log\|mongos-audit-log}.gz?...` | each `mongo_ops` task, per member (per mongos router on a sharded cluster) |
 | `GET /groups/{project}/events?minDate&maxDate` | each `atlas_events` task; the probe, one item |
 | `GET /groups/{project}/databaseUsers`, `/customDBRoles/roles`, `/accessList` | daily catalog; the probe, one item |
 

@@ -270,6 +270,11 @@ public sealed class MongoSource : IEngineSource
     /// 🔴 /processes lists every cluster of the project, Free ones included (measured). The connection string
     ///    names this cluster's replica-set members, or for a sharded cluster its mongos routers, whose files
     ///    count each operation once (D10).
+    /// 🔴 ON A SHARDED CLUSTER, ONLY THE MONGOS PROCESSES. Every host of a sharded cluster runs a mongos
+    ///    (SHARD_MONGOS) beside its mongod, under the same host name (measured on an M30, 2026-10-20), so the
+    ///    connection string's hosts match both. The mongod audit files of the shards hold the operations again,
+    ///    in lines that look exactly like a client's: reading both counted each operation about 2.7 times. A
+    ///    replica set has no SHARD_MONGOS process and keeps its members.
     /// </remarks>
     internal async Task<(string Topology, IReadOnlyList<AtlasProcess> Processes)> ProcessesAsync(CancellationToken ct, bool refresh = false)
     {
@@ -292,6 +297,10 @@ public sealed class MongoSource : IEngineSource
             .OrderBy(p => p.Type == "REPLICA_PRIMARY" ? 0 : 1)
             .ThenBy(p => p.Host, StringComparer.Ordinal)
             .ToList();
+        if (processes.Any(p => p.Type == ShardMongos))
+        {
+            processes = processes.Where(p => p.Type == ShardMongos).ToList();
+        }
         if (processes.Count == 0)
         {
             throw new SourceException($"Atlas lists no process of cluster {_endpoint.ClusterName} (its connection string names {hosts.Count} host(s))");
@@ -360,9 +369,12 @@ public sealed class MongoSource : IEngineSource
         }
     }
 
-    private static string ServerLog(AtlasProcess p) => p.Type == "SHARD_MONGOS" ? "mongos" : "mongodb";
+    /// <summary>The typeName of a sharded cluster's router.</summary>
+    private const string ShardMongos = "SHARD_MONGOS";
 
-    private static string AuditLog(AtlasProcess p) => p.Type == "SHARD_MONGOS" ? "mongos-audit-log" : "mongodb-audit-log";
+    private static string ServerLog(AtlasProcess p) => p.Type == ShardMongos ? "mongos" : "mongodb";
+
+    private static string AuditLog(AtlasProcess p) => p.Type == ShardMongos ? "mongos-audit-log" : "mongodb-audit-log";
 
     private static AtlasCheck Ok(string name, string message) => new() { Name = name, Status = "ok", Message = message };
 
