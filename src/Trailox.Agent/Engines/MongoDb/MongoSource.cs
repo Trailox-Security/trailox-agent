@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Text.Json;
 using Trailox.Agent.Config;
@@ -252,9 +253,19 @@ public sealed class MongoSource : IEngineSource
     /// before its last chunk exists would lose those lines for good, because the next window drops them by their
     /// time: so it is reported as not yet published, and Trailox asks again at a later poll.
     /// </summary>
+    /// <remarks>
+    /// 🔴 A WINDOW BEFORE THE PROCESS EXISTED IS PUBLISHED, AND EMPTY. Its log has no line for that time and never
+    ///    will, so without this the window waited out <see cref="CompletenessGiveUp"/>, and Trailox asked for it
+    ///    again at every poll, with the windows after it (measured on a new M30, 2026-10-21: two hours, one window
+    ///    accepted 9 times). Only when nothing at all is published around the window's end: a node replaced under
+    ///    the same host still has the old process's lines, and those wait as before.
+    /// ⚠ /processes <c>created</c> comes before the process's first log line (measured on an M10, 2026-10-18:
+    ///   created 06:11:04Z, first lines 06:12:46Z and 06:13:09Z), so a window that ends before it has no line.
+    /// </remarks>
     private void RequirePublished(AtlasProcess process, long newestMicros, AgentTask task)
     {
-        if (newestMicros >= task.EndMicros || _utcNow() - FromMicros(task.EndMicros) > CompletenessGiveUp)
+        if (newestMicros >= task.EndMicros || _utcNow() - FromMicros(task.EndMicros) > CompletenessGiveUp
+            || (newestMicros == long.MinValue && process.CreatedUtc is { } created && FromMicros(task.EndMicros) <= created))
         {
             return;
         }
@@ -292,7 +303,7 @@ public sealed class MongoSource : IEngineSource
         }
         var all = await _api.ListAsync("/processes", "the project's processes", ct);
         var processes = all
-            .Select(p => new AtlasProcess { Host = Str(p, "userAlias"), Type = Str(p, "typeName") })
+            .Select(p => new AtlasProcess { Host = Str(p, "userAlias"), Type = Str(p, "typeName"), CreatedUtc = Created(p) })
             .Where(p => p.Host.Length > 0 && hosts.Contains(p.Host))
             .OrderBy(p => p.Type == "REPLICA_PRIMARY" ? 0 : 1)
             .ThenBy(p => p.Host, StringComparer.Ordinal)
@@ -380,6 +391,12 @@ public sealed class MongoSource : IEngineSource
 
     private static string Str(JsonElement e, string name) =>
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    /// <summary>A process's <c>created</c> ("2026-10-21T06:55:48Z"), in UTC; null when Atlas leaves it out or it does not parse.</summary>
+    private static DateTime? Created(JsonElement p) =>
+        DateTime.TryParse(Str(p, "created"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var created)
+            ? created
+            : null;
 
     private string Today() => _utcNow().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
 

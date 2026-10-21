@@ -413,7 +413,10 @@ Atlas returns whole published chunks, minutes before and after the asked window,
 last audit file again: every line outside the window is dropped.
 
 **Completeness:** before shipping a window younger than two hours, the agent checks that each member's server
-log reaches past the window's end. If not, it reports `not_yet_published` (section 5).
+log reaches past the window's end. If not, it reports `not_yet_published` (section 5). A window that ends
+before a member existed (its `created` in `/processes`), and whose log has no line at all near the window's
+end, is complete and empty for that member (from 1.8.2): a backfill that reaches back before a new cluster
+does not wait.
 
 **Keep-alive:** a `mongo_ops` upload streams while the audit files are read, and a busy cluster with few
 distinct operations sends few rows, so the body can be quiet for minutes. While it is open, the agent flushes

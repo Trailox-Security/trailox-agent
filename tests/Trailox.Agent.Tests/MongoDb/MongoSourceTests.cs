@@ -31,6 +31,9 @@ public class MongoSourceTests
         public int TokenRequests { get; private set; }
         public string Events { get; set; } = """{"results":[],"totalCount":0}""";
 
+        /// <summary>The members' <c>created</c> in /processes, as Atlas gives it ("2026-10-21T06:55:48Z"); null leaves it out.</summary>
+        public string? Created { get; set; }
+
         /// <summary>
         /// A sharded cluster as Atlas runs one with its default embedded config servers (measured on an M30,
         /// 2026-10-20): every host runs a mongos (SHARD_MONGOS, port 27016) beside its mongod (27017), under the same
@@ -73,7 +76,8 @@ public class MongoSourceTests
             }
             if (rest.StartsWith("/processes", StringComparison.Ordinal))
             {
-                var mine = Hosts.Select((h, i) => """{"userAlias":"@0@","hostname":"atlas-abcdef-shard-00-0@1@.example.mongodb.net","typeName":"@2@"}""".Replace("@0@", (h).ToString()).Replace("@1@", (i).ToString()).Replace("@2@", ((i == 2 ? "REPLICA_PRIMARY" : "REPLICA_SECONDARY")).ToString()));
+                var created = Created is null ? "" : $",\"created\":\"{Created}\"";
+                var mine = Hosts.Select((h, i) => """{"userAlias":"@0@","hostname":"atlas-abcdef-shard-00-0@1@.example.mongodb.net","typeName":"@2@"@3@}""".Replace("@0@", (h).ToString()).Replace("@1@", (i).ToString()).Replace("@2@", ((i == 2 ? "REPLICA_PRIMARY" : "REPLICA_SECONDARY")).ToString()).Replace("@3@", created));
                 var other = """{"userAlias":"ac-zzzz-shard-00-00.other.mongodb.net","hostname":"atlas-zzzz-shard-00-00.other.mongodb.net","typeName":"REPLICA_PRIMARY"}""";
                 return Json("""{"results":[@0@],"totalCount":4}""".Replace("@0@", (string.Join(",", mine.Append(other))).ToString()));
             }
@@ -259,6 +263,81 @@ public class MongoSourceTests
 
         Assert.True(ex.NotYetPublished);
         Assert.Contains("before the window's end", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 🔴 A window that ends before the process existed is published, and empty. Measured on a new M30 (2026-10-21): its
+    /// source's backfill reached back before the cluster, those windows' logs had no line at all, and each one waited
+    /// two hours as "not yet published" while Trailox asked for it, and the windows after it, at every poll.
+    /// </summary>
+    [Theory]
+    [InlineData(ProtocolInfo.Streams.MongoConnections)]
+    [InlineData(ProtocolInfo.Streams.MongoOps)]
+    public async Task A_window_before_the_process_existed_is_published_and_empty(string stream)
+    {
+        var start = new DateTime(2026, 10, 19, 10, 0, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source(now: start.AddMinutes(60));
+        atlas.Created = "2026-10-19T10:30:00Z";
+        // Atlas answers a time before the process's first line with an empty file.
+        atlas.Log = (_, _) => [];
+
+        var rows = await RowsOf((await source.OpenAsync(Window(stream, start, start.AddMinutes(10)), CancellationToken.None))!);
+
+        Assert.Empty(rows);
+    }
+
+    [Fact]
+    public async Task A_live_process_whose_log_is_late_still_waits_whatever_its_creation()
+    {
+        var start = new DateTime(2026, 10, 19, 11, 40, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source(now: start.AddMinutes(12));
+        atlas.Created = "2026-10-18T06:11:04Z";
+        atlas.Log = (_, _) => [];
+
+        var ex = await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(Window(ProtocolInfo.Streams.MongoOps, start, start.AddMinutes(10)), CancellationToken.None));
+
+        Assert.True(ex.NotYetPublished);
+        Assert.Contains("nothing yet", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A node replaced under the same host: the old process's lines are there, so the window waits for the rest of them.</summary>
+    [Fact]
+    public async Task A_window_before_the_creation_that_has_lines_still_waits_for_its_end()
+    {
+        var start = new DateTime(2026, 10, 19, 10, 0, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source(now: start.AddMinutes(14));
+        atlas.Created = "2026-10-19T10:12:00Z";
+        atlas.Log = (_, _) => [ServerLine(start.AddMinutes(8))];
+
+        var ex = await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(Window(ProtocolInfo.Streams.MongoSlowOps, start, start.AddMinutes(10)), CancellationToken.None));
+
+        Assert.True(ex.NotYetPublished);
+    }
+
+    [Fact]
+    public async Task Without_a_creation_time_an_empty_window_waits_as_before()
+    {
+        var start = new DateTime(2026, 10, 19, 10, 0, 0, DateTimeKind.Utc);
+        var (source, atlas) = Source(now: start.AddMinutes(60));
+        atlas.Log = (_, _) => [];
+
+        var ex = await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(Window(ProtocolInfo.Streams.MongoConnections, start, start.AddMinutes(10)), CancellationToken.None));
+
+        Assert.True(ex.NotYetPublished);
+    }
+
+    [Fact]
+    public async Task The_creation_time_is_not_sent_to_Trailox()
+    {
+        var (source, atlas) = Source();
+        atlas.Created = "2026-10-18T06:11:04Z";
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        var json = JsonSerializer.Serialize(caps, ProtocolInfo.Json);
+
+        Assert.Equal(new DateTime(2026, 10, 18, 6, 11, 4, DateTimeKind.Utc), caps.Atlas!.Processes[0].CreatedUtc);
+        Assert.Equal(DateTimeKind.Utc, caps.Atlas.Processes[0].CreatedUtc!.Value.Kind);
+        Assert.DoesNotContain("created", json, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
