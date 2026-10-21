@@ -144,6 +144,12 @@ public sealed class AtlasProcess
 
     /// <summary>typeName: REPLICA_PRIMARY, REPLICA_SECONDARY, SHARD_MONGOS...</summary>
     public string Type { get; set; } = "";
+
+    /// <summary>
+    /// When Atlas created the process (/processes <c>created</c>), if it says. The agent's own: not sent to Trailox.
+    /// </summary>
+    [JsonIgnore]
+    public DateTime? CreatedUtc { get; set; }
 }
 
 public sealed class AtlasCheck
