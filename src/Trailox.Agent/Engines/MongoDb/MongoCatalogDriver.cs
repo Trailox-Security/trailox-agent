@@ -81,10 +81,19 @@ internal sealed class MongoCatalogDriver : IMongoCatalogReads
         GuardAsync("$collStats", async () =>
         {
             var stage = new BsonDocument("$collStats", new BsonDocument { { "storageStats", new BsonDocument() }, { "count", new BsonDocument() } });
+            // ⚠ ONLY THE FIGURES A ROW USES. storageStats carries the storage engine's own statistics too: measured on
+            //   Cluster1 (2026-10-21), 56,553 bytes an answer, against 159 with this projection, so about 565 MB a day at
+            //   the 10,000-collection cap. Trimmed on the server, before it is sent.
+            var keep = new BsonDocument("$project", new BsonDocument
+            {
+                { "_id", 0 }, { "shard", 1 }, { "count", 1 }, { "storageStats.count", 1 }, { "storageStats.size", 1 },
+                { "storageStats.storageSize", 1 }, { "storageStats.totalIndexSize", 1 }, { "storageStats.nindexes", 1 },
+                { "storageStats.capped", 1 },
+            });
             try
             {
                 var target = _client.GetDatabase(database).GetCollection<BsonDocument>(collection);
-                using var cursor = await target.AggregateAsync(PipelineDefinition<BsonDocument, BsonDocument>.Create(stage), cancellationToken: ct);
+                using var cursor = await target.AggregateAsync(PipelineDefinition<BsonDocument, BsonDocument>.Create(stage, keep), cancellationToken: ct);
                 return (IReadOnlyList<BsonDocument>)await cursor.ToListAsync(ct);
             }
             catch (MongoCommandException ex) when (ex.Code == NamespaceNotFound)
