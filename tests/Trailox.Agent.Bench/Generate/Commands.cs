@@ -33,6 +33,9 @@ internal static class Commands
 
     public static readonly string[] FieldPool = ["customer", "status", "region", "sku", "createdAt", "amount", "email", "note", "tier", "score"];
 
+    // The fields every inserted document carries besides _id.
+    private static readonly HashSet<string> InsertFixed = ["status", "amount", "created", "note"];
+
     public static string Pick(Random rng)
     {
         var at = rng.Next(TotalWeight);
@@ -98,7 +101,15 @@ internal static class Commands
         switch (template)
         {
             case "insert" when audit:
-                s.Append($",\"documents\":[{{\"_id\":{Long(true, rng.NextInt64(1L << 50, 1L << 51))},\"{f1}\":\"{Lit(rng)}\",\"{f2}\":{rng.Next(100000)},\"status\":\"new\",\"amount\":1,\"created\":{{\"$date\":\"2026-10-19T11:37:28.062+00:00\"}},\"note\":\"{Note(rng)}\"}}]");
+                // A document never repeats a field name, as drivers write them: a picked field that is also one
+                // of the fixed ones is written once, as the fixed one.
+                // The random values are drawn either way, so every other line of the corpus stays as it was.
+                var id = Long(true, rng.NextInt64(1L << 50, 1L << 51));
+                var lit = Lit(rng);
+                var number = rng.Next(100000);
+                var first = InsertFixed.Contains(f1) ? "" : $"\"{f1}\":\"{lit}\",";
+                var second = InsertFixed.Contains(f2) || f2 == f1 ? "" : $"\"{f2}\":{number},";
+                s.Append($",\"documents\":[{{\"_id\":{id},{first}{second}\"status\":\"new\",\"amount\":1,\"created\":{{\"$date\":\"2026-10-19T11:37:28.062+00:00\"}},\"note\":\"{Note(rng)}\"}}]");
                 break;
             case "update":
                 s.Append($",\"updates\":[{{\"q\":{{\"_id\":{rng.Next(1000000)}}},\"u\":{{\"$set\":{{\"{f1}\":\"{Lit(rng)}\"}}}},\"upsert\":false}}]");

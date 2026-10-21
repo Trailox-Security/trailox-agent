@@ -1,15 +1,17 @@
 using System.Diagnostics;
 using System.Globalization;
-using Trailox.Agent.Bench.Pipeline;
+using Trailox.Agent.Bench.Engine;
 
 namespace Trailox.Agent.Bench.Measure;
 
 /// <summary>One second of the run.</summary>
-internal readonly record struct Sample(double Seconds, long Lines, double CpuSeconds, long WorkingSet, long ManagedHeap, long CgroupMemory);
+internal readonly record struct Sample(double Seconds, long Lines, double CpuSeconds, long WorkingSet, long ManagedHeap, long CgroupMemory, double NeighbourCpuSeconds);
 
 /// <summary>
 /// Samples the process once a second: lines, CPU, working set, managed heap and, inside a cgroup
-/// (a container, or a systemd scope with limits), the cgroup's own memory and CPU throttling.
+/// (a container, or a systemd scope with limits), the cgroup's own memory and CPU throttling. With a
+/// neighbour cgroup (another process on the same machine, such as an agent running beside the bench), its
+/// CPU use over the same seconds, so a run can say what it competed with.
 /// </summary>
 internal sealed class Meter : IDisposable
 {
@@ -23,10 +25,15 @@ internal sealed class Meter : IDisposable
     private readonly long _allocatedAtStart = GC.GetTotalAllocatedBytes();
     private readonly TimeSpan _cpuAtStart = Environment.CpuUsage.TotalTime;
     private readonly long _linesAtStart = Progress.Lines;
+    private readonly string? _neighbour;
+    private readonly long _neighbourAtStart;
     private TimeSpan _maxPause;
 
-    public Meter()
+    /// <param name="neighbourCgroup">A cgroup v2 directory whose cpu.stat usage_usec is sampled; null for none.</param>
+    public Meter(string? neighbourCgroup = null)
     {
+        _neighbour = neighbourCgroup != null && Directory.Exists(neighbourCgroup) ? neighbourCgroup : null;
+        _neighbourAtStart = NeighbourUsec();
         _throttleAtStart = Throttling();
         _timer = new Timer(_ => Take(), null, 1000, 1000);
     }
@@ -47,7 +54,8 @@ internal sealed class Meter : IDisposable
             (Environment.CpuUsage.TotalTime - _cpuAtStart).TotalSeconds,
             Environment.WorkingSet,
             GC.GetTotalMemory(false),
-            ReadLong("memory.current"));
+            ReadLong("memory.current"),
+            (NeighbourUsec() - _neighbourAtStart) / 1e6);
         lock (_samples)
         {
             _samples.Add(sample);
@@ -93,6 +101,19 @@ internal sealed class Meter : IDisposable
         var afterWarmup = settled.Seconds > 0 && last.Seconds - settled.Seconds >= 10
             ? (object)Round((last.Lines - settled.Lines) / (last.Seconds - settled.Seconds))
             : "n/a (run shorter than 40 s)";
+        // The neighbour's busiest 10 seconds, in cores.
+        var neighbourPeak = 0.0;
+        for (int i = 0, j = 0; j < s.Count; j++)
+        {
+            while (s[j].Seconds - s[i].Seconds > 10)
+            {
+                i++;
+            }
+            if (s[j].Seconds - s[i].Seconds >= 9.5)
+            {
+                neighbourPeak = Math.Max(neighbourPeak, (s[j].NeighbourCpuSeconds - s[i].NeighbourCpuSeconds) / (s[j].Seconds - s[i].Seconds));
+            }
+        }
         var (throttled, throttledUsec) = Throttling();
         return new Dictionary<string, object>
         {
@@ -125,6 +146,10 @@ internal sealed class Meter : IDisposable
             ["serverGc"] = System.Runtime.GCSettings.IsServerGC,
             ["runtime"] = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
             ["os"] = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            ["neighbourCgroup"] = _neighbour ?? "none",
+            ["neighbourCpuCoresUsed"] = _neighbour == null ? 0 : Round(last.NeighbourCpuSeconds / last.Seconds, 3),
+            ["neighbourCpuCoresBusiest10s"] = _neighbour == null ? 0 : Round(neighbourPeak, 3),
+            ["hostLoadAverage"] = ReadHostText("/proc/loadavg") ?? "n/a",
         };
     }
 
@@ -133,6 +158,40 @@ internal sealed class Meter : IDisposable
     private static double Round(double v, int digits = 1) => Math.Round(v, digits);
 
     private static double Mib(long bytes) => Math.Round(bytes / 1048576.0, 1);
+
+    private long NeighbourUsec()
+    {
+        try
+        {
+            if (_neighbour == null)
+            {
+                return 0;
+            }
+            foreach (var line in File.ReadLines(Path.Combine(_neighbour, "cpu.stat")))
+            {
+                if (line.StartsWith("usage_usec ", StringComparison.Ordinal))
+                {
+                    return long.Parse(line.AsSpan(11), CultureInfo.InvariantCulture);
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+        return 0;
+    }
+
+    private static string? ReadHostText(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
 
     private (long, long) Throttling()
     {

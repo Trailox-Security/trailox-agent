@@ -41,6 +41,21 @@ internal sealed class Manifest
     public long BackwardsLines { get; set; }
     public long RawBytes { get; set; }
     public long GzipBytes { get; set; }
+
+    // The same lines per file kind, as the engine reads them: the audit file feeds mongo_ops, and every server
+    // log is read whole by each of the three other streams. In window unless named otherwise.
+    public long ServerLines { get; set; }
+    public long ServerOutOfWindow { get; set; }
+    public long ServerSlowOps { get; set; }
+    public long ServerConnections { get; set; }
+    public long ServerSigninFailures { get; set; }
+    public long AuditLines { get; set; }
+    public long AuditOutOfWindow { get; set; }
+    public long AuditOps { get; set; }
+
+    /// <summary>"api": gzip files as the Admin API serves them. "s3": the export's plain JSON-line objects (S3Export).</summary>
+    public string Form { get; set; } = "api";
+
     public List<string> Files { get; set; } = new();
 
     public void Add(Manifest o)
@@ -48,6 +63,9 @@ internal sealed class Manifest
         Lines += o.Lines; OutOfWindow += o.OutOfWindow; Filtered += o.Filtered; Ops += o.Ops; SlowOps += o.SlowOps;
         Connections += o.Connections; SigninFailures += o.SigninFailures; SlowNreturned += o.SlowNreturned;
         SlowDurationMs += o.SlowDurationMs; BackwardsLines += o.BackwardsLines; RawBytes += o.RawBytes;
+        ServerLines += o.ServerLines; ServerOutOfWindow += o.ServerOutOfWindow; ServerSlowOps += o.ServerSlowOps;
+        ServerConnections += o.ServerConnections; ServerSigninFailures += o.ServerSigninFailures;
+        AuditLines += o.AuditLines; AuditOutOfWindow += o.AuditOutOfWindow; AuditOps += o.AuditOps;
     }
 
     public static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
@@ -281,9 +299,26 @@ internal sealed class CorpusGenerator
             template.Render(file.Buffer, values);
             file.LineDone();
             m.Lines++;
+            var server = ReferenceEquals(file, serverFile);
+            if (server)
+            {
+                m.ServerLines++;
+            }
+            else
+            {
+                m.AuditLines++;
+            }
             if (!InWindow(ts))
             {
                 m.OutOfWindow++;
+                if (server)
+                {
+                    m.ServerOutOfWindow++;
+                }
+                else
+                {
+                    m.AuditOutOfWindow++;
+                }
                 return;
             }
             switch (kind)
@@ -293,6 +328,13 @@ internal sealed class CorpusGenerator
                 case Kind.Connection: m.Connections++; break;
                 case Kind.Failure: m.SigninFailures++; break;
                 default: m.Filtered++; break;
+            }
+            switch (kind)
+            {
+                case Kind.Op when !server: m.AuditOps++; break;
+                case Kind.Slow when server: m.ServerSlowOps++; break;
+                case Kind.Connection when server: m.ServerConnections++; break;
+                case Kind.Failure when server: m.ServerSigninFailures++; break;
             }
         }
     }
