@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- The MongoDB throughput gate (D12): a console program, not a test project and not shipped.
-       It generates gzip mongod/audit log files from real line templates and measures a prototype of
-       the MongoDB engine's streaming pipeline. Runtime settings match the agent's own csproj, so a run
-       inside the agent image at the chart's limits measures what the agent would do. -->
+       It generates gzip mongod/audit log files from real line templates (and their S3-export form) and
+       reads them through the agent's own MongoDB engine classes. Runtime settings match the agent's own
+       csproj, so a run at the chart's limits measures what the agent would do. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
@@ -17,7 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.IO.Hashing" Version="10.0.0" />
+    <ProjectReference Include="..\..\src\Trailox.Agent\Trailox.Agent.csproj" />
   </ItemGroup>
 
   <ItemGroup>

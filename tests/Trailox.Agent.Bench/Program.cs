@@ -2,16 +2,19 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Trailox.Agent.Bench.Engine;
 using Trailox.Agent.Bench.Generate;
 using Trailox.Agent.Bench.Measure;
-using Trailox.Agent.Bench.Pipeline;
+using Trailox.Agent.Engines.MongoDb;
 
 namespace Trailox.Agent.Bench;
 
 /// <summary>
-/// The MongoDB throughput gate (PLAN D12, §6.4). See README.md.
+/// The MongoDB throughput gate (PLAN D12, §6.4), on the agent's own engine classes. See README.md.
 ///   generate --out DIR [--profile typical|hostile] [--ops N] [--window-minutes N] [--nodes N] [--audit true|false] [--seed N]
-///   run --corpus DIR [--seconds N | --passes N] [--rate LINES_PER_SECOND] [--group-cap N] [--readers N] [--report FILE]
+///   s3 --from DIR --out DIR [--seed N]
+///   run --corpus DIR [--seconds N | --passes N] [--rate LINES_PER_SECOND] [--group-cap N] [--verify true|false]
+///       [--neighbour-cgroup DIR] [--report FILE]
 ///   selftest
 /// </summary>
 public static class Program
@@ -20,15 +23,16 @@ public static class Program
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("usage: trailox-agent-bench generate|run|selftest [options]  (see README.md)");
+            Console.Error.WriteLine("usage: trailox-agent-bench generate|s3|run|selftest [options]  (see README.md)");
             return 2;
         }
         var options = Options.Parse(args.Skip(1));
         return args[0] switch
         {
             "generate" => Generate(options),
-            "run" => Run(options),
-            "selftest" => SelfTest(),
+            "s3" => Export(options),
+            "run" => Run(options).GetAwaiter().GetResult(),
+            "selftest" => SelfTest().GetAwaiter().GetResult(),
             _ => Usage(args[0]),
         };
     }
@@ -61,30 +65,40 @@ public static class Program
         return 0;
     }
 
-    private static int Run(Options o)
+    private static int Export(Options o)
+    {
+        var clock = Stopwatch.StartNew();
+        var manifest = S3Export.Write(o.Required("from"), o.Required("out"), o.Int("seed", 1));
+        Console.WriteLine($"exported {manifest.Lines:N0} records into {manifest.Files.Count:N0} objects ({manifest.RawBytes / 1048576.0:N0} MiB, plain JSON lines) " +
+                          $"in {clock.Elapsed.TotalSeconds:N0} s");
+        return 0;
+    }
+
+    private static async Task<int> Run(Options o)
     {
         var corpus = o.Required("corpus");
         var manifest = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(Path.Combine(corpus, "manifest.json")))!;
-        var files = manifest.Files.Select(f => Path.Combine(corpus, f)).ToArray();
         var seconds = o.Int("seconds", 0);
         var passes = o.Int("passes", seconds > 0 ? int.MaxValue : 1);
         var rate = o.Int("rate", 0);
-        var groupCap = o.Int("group-cap", 20_000);
-        var readers = o.Int("readers", Environment.ProcessorCount);
-        var stage = o.Get("stage", "full");
+        var groupCap = o.Int("group-cap", MongoLogProcessor.DefaultGroupCap);
+        var verify = o.Get("verify", "true") == "true";
+        var neighbour = o.Get("neighbour-cgroup", "");
+        var linesPerPass = manifest.AuditLines + 3 * manifest.ServerLines;
 
-        Console.WriteLine($"corpus {manifest.Spec.Profile}, {manifest.Lines:N0} lines/pass, {files.Length} files; readers {readers}, group cap {groupCap:N0}, " +
+        Console.WriteLine($"corpus {manifest.Spec.Profile} ({manifest.Form}), {linesPerPass:N0} lines processed a pass ({manifest.Lines:N0} in its files), " +
+                          $"{manifest.Files.Count} files; engine classes, group cap {groupCap:N0}, " +
                           (rate > 0 ? $"paced at {rate:N0} lines/s" : "as fast as possible") + (seconds > 0 ? $" for {seconds} s" : $" for {passes} pass(es)"));
         var pacer = rate > 0 ? new Pacer(rate) : null;
-        var total = new Counts();
+        var total = new PassResult();
         var failures = new List<string>();
         var done = 0;
         var clock = Stopwatch.StartNew();
-        using var meter = new Meter();
+        using var meter = new Meter(neighbour.Length > 0 ? neighbour : null);
         while (done < passes && (seconds == 0 || clock.Elapsed.TotalSeconds < seconds))
         {
-            var pass = RunPass(manifest, files, groupCap, readers, pacer, capture: false, stage: stage);
-            if (stage == "full")
+            var pass = await EnginePass.RunAsync(manifest, corpus, new PassOptions(groupCap, pacer, Capture: false, Tally: verify), CancellationToken.None);
+            if (verify)
             {
                 failures.AddRange(Verify(manifest, pass).Select(f => $"pass {done + 1}: {f}"));
             }
@@ -95,17 +109,24 @@ public static class Program
         var report = new Dictionary<string, object>
         {
             ["profile"] = manifest.Spec.Profile,
+            ["form"] = manifest.Form,
+            ["pipeline"] = "engine classes (Trailox.Agent.Engines.MongoDb)",
             ["opsPerSecondInCorpus"] = manifest.Spec.OpsPerSecond,
-            ["audit"] = manifest.Spec.Audit,
+            ["windowSeconds"] = (manifest.WindowEndMs - manifest.WindowStartMs) / 1000,
+            ["linesProcessedPerPass"] = linesPerPass,
+            ["linesNeededPerSecond"] = Math.Round(linesPerPass / ((manifest.WindowEndMs - manifest.WindowStartMs) / 1000.0), 0),
             ["passes"] = done,
             ["groupCap"] = groupCap,
-            ["readers"] = readers,
             ["pacedLinesPerSecond"] = rate,
-            ["stage"] = stage,
             ["measured"] = measured,
             ["perPass"] = Describe(total, done),
             ["lostOrMiscounted"] = failures.Count,
-            ["verification"] = stage != "full" ? $"none (stage {stage} stops before the rows)" : failures.Count == 0 ? "every pass: lines in = lines accounted, shipped eventCount = lines aggregated, all equal to the generator's manifest" : string.Join("; ", failures.Take(20)),
+            ["verification"] = !verify
+                ? "none (--verify false: the shipped rows were not tallied)"
+                : failures.Count == 0
+                    ? "every pass, every stream: lines in = the generator's, out of window + filtered + kept = lines in, malformed 0, kept = the generator's, " +
+                      "shipped event_count (rows for mongo_connections) = kept, slow nreturned and durationMillis shipped = the generator's"
+                    : string.Join("; ", failures.Take(20)),
         };
         var json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
         Console.WriteLine(json);
@@ -117,33 +138,8 @@ public static class Program
         return failures.Count == 0 ? 0 : 1;
     }
 
-    private static Counts RunPass(Manifest manifest, string[] files, int groupCap, int readers, Pacer? pacer, bool capture, List<RowSink>? captured = null, string stage = "full")
-    {
-        var results = new Counts[files.Length];
-        Parallel.For(0, files.Length, new ParallelOptions { MaxDegreeOfParallelism = readers }, i =>
-        {
-            var name = Path.GetFileName(files[i]);
-            var processor = new FileProcessor(name[..name.IndexOf('.')], manifest.WindowStartMs, manifest.WindowEndMs, groupCap, pacer, capture) { Stage = stage };
-            processor.Read(files[i]);
-            results[i] = processor.Finish();
-            if (captured != null)
-            {
-                lock (captured)
-                {
-                    captured.AddRange(processor.Sinks);
-                }
-            }
-        });
-        var pass = new Counts();
-        foreach (var r in results)
-        {
-            pass.Add(r);
-        }
-        return pass;
-    }
-
-    /// <summary>Every line accounted for, every aggregated line shipped, all equal to what the generator wrote.</summary>
-    private static List<string> Verify(Manifest m, Counts c)
+    /// <summary>Every line of every stream accounted for, every kept line shipped, all equal to what the generator wrote.</summary>
+    private static List<string> Verify(Manifest m, PassResult pass)
     {
         var problems = new List<string>();
         void Check(string what, long actual, long expected)
@@ -153,96 +149,168 @@ public static class Program
                 problems.Add($"{what} {actual:N0} != {expected:N0}");
             }
         }
-        Check("lines in", c.LinesIn, m.Lines);
-        Check("lines accounted", c.Accounted, c.LinesIn);
-        Check("malformed", c.Malformed, 0);
-        Check("out of window", c.OutOfWindow, m.OutOfWindow);
-        Check("filtered", c.Filtered, m.Filtered);
-        Check("ops", c.Ops, m.Ops);
-        Check("slow ops", c.SlowOps, m.SlowOps);
-        Check("connection lines", c.Connections, m.Connections);
-        Check("failed sign-in lines", c.SigninFailures, m.SigninFailures);
-        Check("mongo_ops eventCount shipped", c.OpsEvents, c.Ops);
-        Check("mongo_slow_ops eventCount shipped", c.SlowEvents, c.SlowOps);
-        Check("mongo_signin_failures eventCount shipped", c.FailureEvents, c.SigninFailures);
-        Check("mongo_connections rows shipped", c.ConnectionRows, c.Connections);
-        Check("slow nreturned shipped", c.SlowNreturned, m.SlowNreturned);
-        Check("slow durationMillis shipped", c.SlowDurationMs, m.SlowDurationMs);
+        foreach (var (stream, r) in pass.Streams)
+        {
+            var name = EnginePass.StreamName(stream);
+            var audit = stream == MongoLogStream.Ops;
+            var expectedKept = stream switch
+            {
+                MongoLogStream.Ops => m.AuditOps,
+                MongoLogStream.SlowOps => m.ServerSlowOps,
+                MongoLogStream.Connections => m.ServerConnections,
+                _ => m.ServerSigninFailures,
+            };
+            Check($"{name} lines in", r.LinesIn, audit ? m.AuditLines : m.ServerLines);
+            Check($"{name} lines accounted", r.OutOfWindow + r.Filtered + r.Malformed + r.Kept, r.LinesIn);
+            Check($"{name} malformed", r.Malformed, 0);
+            Check($"{name} out of window", r.OutOfWindow, audit ? m.AuditOutOfWindow : m.ServerOutOfWindow);
+            Check($"{name} kept", r.Kept, expectedKept);
+            Check(stream == MongoLogStream.Connections ? $"{name} rows shipped" : $"{name} event_count shipped",
+                stream == MongoLogStream.Connections ? r.Rows : r.EventCount, r.Kept);
+        }
+        var slow = pass.Streams[MongoLogStream.SlowOps];
+        Check("slow nreturned shipped", slow.Nreturned, m.SlowNreturned);
+        Check("slow durationMillis shipped", slow.DurationMsSum, m.SlowDurationMs);
         return problems;
     }
 
-    private static Dictionary<string, object> Describe(Counts t, int passes)
+    private static Dictionary<string, object> Describe(PassResult t, int passes)
     {
         long P(long v) => passes == 0 ? 0 : v / passes;
+        var streams = new Dictionary<string, object>();
+        foreach (var (stream, r) in t.Streams)
+        {
+            streams[EnginePass.StreamName(stream)] = new Dictionary<string, object>
+            {
+                ["linesIn"] = P(r.LinesIn),
+                ["outOfWindow"] = P(r.OutOfWindow),
+                ["filtered"] = P(r.Filtered),
+                ["malformed"] = P(r.Malformed),
+                ["kept"] = P(r.Kept),
+                ["rows"] = P(r.Rows),
+                ["eventsPerRow"] = r.Rows == 0 ? 0 : Math.Round((double)(stream == MongoLogStream.Connections ? r.Rows : r.EventCount) / r.Rows, 1),
+                ["linesInOverflowGroup"] = P(r.OverflowLines),
+                ["lateLines"] = P(r.LateLines),
+                ["bytesIn"] = P(r.BytesIn),
+                ["rawBytesOut"] = P(r.RawBytesOut),
+                ["wireBytesOut"] = P(r.WireBytesOut),
+                ["peakRowsHeldMiB"] = Math.Round(r.PeakBufferedBytes / 1048576.0, 1),
+                ["secondsPerPass"] = passes == 0 ? 0 : Math.Round(r.Seconds / passes, 2),
+            };
+        }
         return new Dictionary<string, object>
         {
             ["linesIn"] = P(t.LinesIn),
-            ["outOfWindow"] = P(t.OutOfWindow),
-            ["filtered"] = P(t.Filtered),
-            ["malformed"] = P(t.Malformed),
-            ["ops"] = P(t.Ops),
-            ["slowOps"] = P(t.SlowOps),
-            ["connectionLines"] = P(t.Connections),
-            ["signinFailureLines"] = P(t.SigninFailures),
-            ["mongoOpsRows"] = P(t.OpsRows),
-            ["mongoSlowOpsRows"] = P(t.SlowRows),
-            ["mongoConnectionsRows"] = P(t.ConnectionRows),
-            ["mongoSigninFailuresRows"] = P(t.FailureRows),
-            ["opsPerRow"] = t.OpsRows == 0 ? 0 : Math.Round((double)t.OpsEvents / t.OpsRows, 1),
-            ["linesInOverflowGroup"] = P(t.OverflowLines),
-            ["lateLines"] = P(t.LateLines),
-            ["peakGroupsHeld"] = P(t.PeakGroups),
-            ["gzipBytesIn"] = P(t.GzipBytesIn),
-            ["rawBytesIn"] = P(t.RawBytesIn),
-            ["rawBytesOut"] = P(t.RawBytesOut),
-            ["wireBytesOut"] = P(t.WireBytesOut),
-            ["wireOutPerGzipIn"] = t.GzipBytesIn == 0 ? 0 : Math.Round((double)t.WireBytesOut / t.GzipBytesIn, 4),
+            ["wireBytesOut"] = P(t.Streams.Values.Sum(s => s.WireBytesOut)),
+            ["bytesIn"] = P(t.Streams.Values.Sum(s => s.BytesIn)),
+            ["streams"] = streams,
         };
     }
 
     /// <summary>
-    /// Small corpora, typical and hostile, one pass each with every shipped row kept: the counts
-    /// must match the manifest and no literal value may appear in any row.
+    /// Small corpora, typical and hostile, read through the engine as the API serves them and as the S3 export
+    /// rewrites them, with every shipped row kept: both must match the manifest, both must ship the same rows,
+    /// and no literal value may appear in any row.
     /// </summary>
-    private static int SelfTest()
+    private static async Task<int> SelfTest()
     {
         var failed = false;
         foreach (var profile in new[] { "typical", "hostile" })
         {
             var dir = Path.Combine(Path.GetTempPath(), $"trailox-bench-selftest-{profile}-{Environment.ProcessId}");
+            var s3Dir = dir + "-s3";
             try
             {
                 var spec = new CorpusSpec { Profile = profile, OpsPerSecond = 3000, WindowMinutes = 2, Nodes = 3, MemberSeconds = 30, Seed = 7 };
                 var manifest = new CorpusGenerator(spec, Fixtures).Write(dir);
-                var files = manifest.Files.Select(f => Path.Combine(dir, f)).ToArray();
-                var sinks = new List<RowSink>();
+                var s3 = S3Export.Write(dir, s3Dir, seed: 7);
                 // A small cap, so the hostile corpus exercises the __other__ group.
-                var counts = RunPass(manifest, files, groupCap: 5000, readers: 2, pacer: null, capture: true, captured: sinks);
-                var problems = Verify(manifest, counts);
-                var leaked = sinks.Sum(s => Count(s.Capture!.ToArray(), Encoding.UTF8.GetBytes(Commands.LiteralMarker)));
+                var options = new PassOptions(GroupCap: 5000, Pacer: null, Capture: true, Tally: true);
+                var api = await EnginePass.RunAsync(manifest, dir, options, CancellationToken.None);
+                var exported = await EnginePass.RunAsync(s3, s3Dir, options, CancellationToken.None);
+                var problems = Verify(manifest, api).Select(p => "api: " + p).Concat(Verify(s3, exported).Select(p => "s3: " + p)).ToList();
+                var known = new List<string>();
+                foreach (var stream in EnginePass.Order)
+                {
+                    if (Difference(api.Shipped[stream], exported.Shipped[stream]) is not { } difference)
+                    {
+                        continue;
+                    }
+                    if (stream == MongoLogStream.SlowOps && SlowFindAndModifyAsUpdate(api.Shipped[stream], exported.Shipped[stream]) is { } renamed)
+                    {
+                        known.Add($"{EnginePass.StreamName(stream)}: {renamed:N0} slow findAndModify shipped as update by the S3 form");
+                    }
+                    else
+                    {
+                        problems.Add($"{EnginePass.StreamName(stream)}: the S3 form shipped other rows than the API form: {difference}");
+                    }
+                }
+                var marker = Encoding.UTF8.GetBytes(Commands.LiteralMarker);
+                var leaked = api.Shipped.Values.Concat(exported.Shipped.Values).Sum(rows => Count(rows, marker));
                 if (leaked > 0)
                 {
                     problems.Add($"{leaked} literal value(s) reached the shipped rows");
                 }
-                if (profile == "hostile" && counts.OverflowLines == 0)
+                var overflow = api.Streams.Values.Sum(s => s.OverflowLines);
+                if (profile == "hostile" && overflow == 0)
                 {
                     problems.Add("the hostile corpus never reached the group cap");
                 }
-                Console.WriteLine($"{profile}: {manifest.Lines:N0} lines, {counts.OpsRows + counts.SlowRows:N0} op rows, " +
-                                  $"{counts.OverflowLines:N0} lines over the cap, {counts.LateLines:N0} late lines: " +
-                                  (problems.Count == 0 ? "PASS" : "FAIL " + string.Join("; ", problems)));
+                Console.WriteLine($"{profile}: {manifest.Lines:N0} lines in {manifest.Files.Count} files and {s3.Files.Count} export objects, " +
+                                  $"{api.Streams.Values.Sum(s => s.Rows):N0} rows, {overflow:N0} lines over the cap: " +
+                                  (problems.Count == 0 ? "PASS" : "FAIL " + string.Join("; ", problems)) +
+                                  string.Concat(known.Select(k => " (KNOWN, waits for the S3 reader round: " + k + ")")));
                 failed |= problems.Count > 0;
             }
             finally
             {
-                if (Directory.Exists(dir))
+                foreach (var d in new[] { dir, s3Dir })
                 {
-                    Directory.Delete(dir, recursive: true);
+                    if (Directory.Exists(d))
+                    {
+                        Directory.Delete(d, recursive: true);
+                    }
                 }
             }
         }
         return failed ? 1 : 0;
     }
+
+    /// <summary>
+    /// The one known difference between the forms (2026-10-20): the S3 export's rewritten slow line of a findAndModify
+    /// reads as an update, so its row ships with <c>"command":"update"</c> and is otherwise the same. The number of such
+    /// rows when that is ALL that differs; null when anything else does. It waits for the S3 reader round.
+    /// </summary>
+    private static int? SlowFindAndModifyAsUpdate(byte[] api, byte[] s3)
+    {
+        var left = Rows(api);
+        var right = Rows(s3);
+        var onlyLeft = left.Except(right).Order(StringComparer.Ordinal).ToList();
+        var renamed = right.Except(left)
+            .Select(r => r.Replace("\"command\":\"update\"", "\"command\":\"findAndModify\"", StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal).ToList();
+        return onlyLeft.Count > 0 && left.Count == right.Count && onlyLeft.SequenceEqual(renamed) ? onlyLeft.Count : null;
+    }
+
+    /// <summary>Null when both hold the same rows (in any order); else how they differ, with one row of each side.</summary>
+    private static string? Difference(byte[] a, byte[] b)
+    {
+        var left = Rows(a);
+        var right = Rows(b);
+        if (left.SequenceEqual(right))
+        {
+            return null;
+        }
+        var onlyLeft = left.Except(right).ToList();
+        var onlyRight = right.Except(left).ToList();
+        string Cut(string s) => s.Length > 400 ? s[..400] + "..." : s;
+        return $"{left.Count:N0} rows vs {right.Count:N0}; {onlyLeft.Count:N0} only in the API form" +
+               (onlyLeft.Count > 0 ? $" (e.g. {Cut(onlyLeft[0])})" : "") + $", {onlyRight.Count:N0} only in the S3 form" +
+               (onlyRight.Count > 0 ? $" (e.g. {Cut(onlyRight[0])})" : "");
+    }
+
+    private static List<string> Rows(byte[] ndjson) =>
+        Encoding.UTF8.GetString(ndjson).Split('\n', StringSplitOptions.RemoveEmptyEntries).Order(StringComparer.Ordinal).ToList();
 
     private static int Count(byte[] haystack, byte[] needle)
     {
