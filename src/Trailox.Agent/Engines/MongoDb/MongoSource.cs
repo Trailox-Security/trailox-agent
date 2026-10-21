@@ -10,7 +10,8 @@ namespace Trailox.Agent.Engines.MongoDb;
 /// <summary>
 /// One MongoDB Atlas cluster, read through the Admin API as a service account: the probe checks the
 /// account, the cluster and its tier, and each task downloads the cluster's log files for its window and
-/// ships per-minute rows (agent 1.8). Nothing here connects to the cluster itself.
+/// ships per-minute rows (agent 1.8). Only the optional catalog user (1.9.0) connects to the cluster itself,
+/// for the collection catalog and the probe's catalog check (<see cref="MongoCatalog"/>).
 /// </summary>
 public sealed class MongoSource : IEngineSource
 {
@@ -36,7 +37,16 @@ public sealed class MongoSource : IEngineSource
         _api = new AtlasApi(http, endpoint.Host, endpoint.Username, endpoint.Password, baseUrl);
         _catalog = new AtlasCatalog(_api, endpoint.Username);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        OpenCatalog = srv => MongoCatalogDriver.Open(srv, endpoint.ClusterName, endpoint.CatalogUsername, endpoint.CatalogPassword);
     }
+
+    /// <summary>
+    /// The catalog user's reads on the cluster at a <c>standardSrv</c> connection string: the driver, or a stand-in in
+    /// tests. Each caller disposes what it opened, so no connection outlives its task or probe.
+    /// </summary>
+    internal Func<string, IMongoCatalogReads> OpenCatalog { get; init; }
+
+    private bool HasCatalogUser => _endpoint.CatalogUsername.Length > 0;
 
     public async Task<EndpointCaps> ProbeAsync(CancellationToken ct)
     {
@@ -44,12 +54,13 @@ public sealed class MongoSource : IEngineSource
         await _api.TokenAsync(ct);
         checks.Add(Ok("authenticated", "the service account's token was issued"));
 
-        string version, tier, topology;
+        string version, tier, topology, standardSrv;
         using (var cluster = await ClusterAsync(ct))
         {
             var root = cluster.RootElement;
             version = Str(root, "mongoDBVersion");
             topology = Str(root, "clusterType");
+            standardSrv = StandardSrv(root);
             var provider = root.TryGetProperty("providerSettings", out var p) ? p : default;
             tier = provider.ValueKind == JsonValueKind.Object ? Str(provider, "instanceSizeName") : "";
             var providerName = provider.ValueKind == JsonValueKind.Object ? Str(provider, "providerName") : "";
@@ -78,6 +89,10 @@ public sealed class MongoSource : IEngineSource
 
         checks.Add(await SoftCheckAsync("grants", "/databaseUsers?itemsPerPage=1", "database users and roles read (Project Read Only)", ct));
         checks.Add(await SoftCheckAsync("events", "/events?itemsPerPage=1", "project events read (Project Read Only)", ct));
+        if (HasCatalogUser)
+        {
+            checks.Add(await CatalogCheckAsync(standardSrv, ct));
+        }
 
         return new EndpointCaps
         {
@@ -121,6 +136,10 @@ public sealed class MongoSource : IEngineSource
                 return Buffered(await _catalog.RolesAsync(Today(), ct));
             case ProtocolInfo.Streams.CatalogAccessList:
                 return Buffered(await _catalog.AccessListAsync(Today(), ct));
+            case ProtocolInfo.Streams.CatalogDatabases:
+                return Buffered(await _catalog.DatabasesAsync(Today(), await PrimariesAsync(ct), ct));
+            case ProtocolInfo.Streams.CatalogCollections:
+                return Buffered(await CollectionsAsync(ct));
             default:
                 return null;
         }
@@ -292,6 +311,45 @@ public sealed class MongoSource : IEngineSource
         {
             return (cached.Topology, cached.Processes);
         }
+        var (topology, processes) = await ClusterProcessesAsync(ct);
+        if (processes.Any(p => p.Type == ShardMongos))
+        {
+            processes = processes.Where(p => p.Type == ShardMongos).ToList();
+        }
+        _processes = (_utcNow(), topology, processes);
+        return (topology, processes);
+    }
+
+    /// <summary>
+    /// The ids of the cluster's primaries, whose database measurements catalog_databases reads (1.9.0): REPLICA_PRIMARY,
+    /// and on a sharded cluster each shard's (SHARD_PRIMARY, SHARD_CONFIG_PRIMARY). Never the routers.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 NOT <see cref="ProcessesAsync"/>: on a sharded cluster that keeps only the mongos routers (1.8.1), which hold no
+    ///    data. The shards' mongod processes share the routers' host names, so the same match finds them.
+    /// ⚠ Dedicated config servers run no router and are not in the connection string, so they are not found; they hold
+    ///   only admin and config, which the catalog leaves out anyway. An embedded config shard is found.
+    /// </remarks>
+    internal async Task<IReadOnlyList<string>> PrimariesAsync(CancellationToken ct)
+    {
+        var (_, processes) = await ClusterProcessesAsync(ct);
+        var primaries = processes
+            .Where(p => p.Type.EndsWith("_PRIMARY", StringComparison.Ordinal) && p.Id.Length > 0)
+            .Select(p => p.Id)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        if (primaries.Count == 0)
+        {
+            // An election in progress, most likely: Trailox asks for the day's catalog again later.
+            throw new SourceException($"Atlas lists no primary of cluster {_endpoint.ClusterName} right now");
+        }
+        return primaries;
+    }
+
+    /// <summary>Every process of the cluster, its routers and its mongod processes alike, the primary first.</summary>
+    private async Task<(string Topology, List<AtlasProcess> Processes)> ClusterProcessesAsync(CancellationToken ct)
+    {
         string topology;
         HashSet<string> hosts;
         using (var cluster = await ClusterAsync(ct))
@@ -302,22 +360,68 @@ public sealed class MongoSource : IEngineSource
         }
         var all = await _api.ListAsync("/processes", "the project's processes", ct);
         var processes = all
-            .Select(p => new AtlasProcess { Host = Str(p, "userAlias"), Type = Str(p, "typeName"), CreatedUtc = Created(p) })
+            .Select(p => new AtlasProcess { Host = Str(p, "userAlias"), Type = Str(p, "typeName"), Id = Str(p, "id"), CreatedUtc = Created(p) })
             .Where(p => p.Host.Length > 0 && hosts.Contains(p.Host))
             .OrderBy(p => p.Type == "REPLICA_PRIMARY" ? 0 : 1)
             .ThenBy(p => p.Host, StringComparer.Ordinal)
             .ToList();
-        if (processes.Any(p => p.Type == ShardMongos))
-        {
-            processes = processes.Where(p => p.Type == ShardMongos).ToList();
-        }
         if (processes.Count == 0)
         {
             throw new SourceException($"Atlas lists no process of cluster {_endpoint.ClusterName} (its connection string names {hosts.Count} host(s))");
         }
-        _processes = (_utcNow(), topology, processes);
         return (topology, processes);
     }
+
+    /// <summary>
+    /// catalog_collections (1.9.0), as the catalog user, on the cluster's SRV connection string from the same cluster
+    /// read the probe makes.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 WITHOUT A CATALOG USER THE TASK FAILS AS AN OPTIONAL GRANT, so Trailox still counts the catalog day as swept and the
+    ///    agent does not list it among its errors every day: the customer chose not to add one.
+    /// </remarks>
+    private async Task<ReadOnlyMemory<byte>> CollectionsAsync(CancellationToken ct)
+    {
+        if (!HasCatalogUser)
+        {
+            throw new SourceException("not configured: the collection catalog needs the optional catalog user (catalog_username and its "
+                + "password in agent.yaml); database sizes still come from the Admin API") { MissingOptionalGrant = true };
+        }
+        var snapshotDate = Today();
+        string standardSrv;
+        using (var cluster = await ClusterAsync(ct))
+        {
+            standardSrv = RequireStandardSrv(StandardSrv(cluster.RootElement));
+        }
+        using var reads = OpenCatalog(standardSrv);
+        return await new MongoCatalog(reads).CollectionsAsync(snapshotDate, ct);
+    }
+
+    /// <summary>
+    /// The probe's catalog check (1.9.0): ok, warn when the user holds more than it needs (K4), fail when it cannot
+    /// connect or sign in. Soft: the logs need no catalog user, so a failing check never fails the probe.
+    /// </summary>
+    private async Task<AtlasCheck> CatalogCheckAsync(string standardSrv, CancellationToken ct)
+    {
+        try
+        {
+            using var reads = OpenCatalog(RequireStandardSrv(standardSrv));
+            return await new MongoCatalog(reads).CheckAsync(_endpoint.CatalogUsername, ct);
+        }
+        catch (Exception ex) when (!TaskExecutor.IsShutdown(ex, ct))
+        {
+            // The driver's failures arrive as SourceException, worded; anything else is named by its type.
+            var message = ex is SourceException ? ex.Message : $"the catalog check failed unexpectedly ({ex.GetType().Name}: {ex.Message})";
+            return new AtlasCheck { Name = "catalog", Status = "fail", Message = EndpointSession.Trim(message) };
+        }
+    }
+
+    private static string StandardSrv(JsonElement cluster) =>
+        cluster.TryGetProperty("connectionStrings", out var cs) && cs.ValueKind == JsonValueKind.Object ? Str(cs, "standardSrv") : "";
+
+    private string RequireStandardSrv(string standardSrv) => standardSrv.StartsWith("mongodb+srv://", StringComparison.Ordinal)
+        ? standardSrv
+        : throw new SourceException($"Atlas gives cluster {_endpoint.ClusterName} no SRV connection string (connectionStrings.standardSrv)");
 
     /// <summary>"mongodb://h1:27017,h2:27017/?ssl=true..." → {h1, h2}, lower case.</summary>
     internal static HashSet<string> HostsOf(string standard)

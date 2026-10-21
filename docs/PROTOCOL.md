@@ -394,7 +394,9 @@ OAuth client credentials (`POST /api/oauth/token`, HTTP Basic client id and secr
 `grant_type=client_credentials`) for a one-hour token, reused until two minutes before it expires. Every
 request is a GET; JSON with `Accept: application/vnd.atlas.2023-01-01+json`, log files with
 `application/vnd.atlas.2023-02-01+gzip`. A 429 or 5xx waits for `Retry-After` (else 2, 4, 8, 16 s, with
-jitter) and is retried up to four times.
+jitter) and is retried up to four times. The agent connects to the cluster itself only with the optional
+catalog user (from 1.9.0, below), to list databases and collections and their sizes; it never reads a
+document.
 
 | call | when |
 |---|---|
@@ -404,9 +406,33 @@ jitter) and is retried up to four times.
 | `GET /groups/{project}/clusters/{host}/logs/{mongodb-audit-log\|mongos-audit-log}.gz?...` | each `mongo_ops` task, per member (per mongos router on a sharded cluster) |
 | `GET /groups/{project}/events?minDate&maxDate` | each `atlas_events` task; the probe, one item |
 | `GET /groups/{project}/databaseUsers`, `/customDBRoles/roles`, `/accessList` | daily catalog; the probe, one item |
+| `GET /groups/{project}/processes/{processId}/databases` | each `catalog_databases` task, per primary (from 1.9.0); `processId` is `host:port` as `/processes` gives it, escaped as one path segment |
+| `GET /groups/{project}/processes/{processId}/databases/{database}/measurements?granularity=PT1H&period=P1D` | each `catalog_databases` task, per database of each primary (from 1.9.0) |
 
 **Refused by the probe:** Free (M0), Flex and Serverless clusters, which keep no downloadable logs, and a
 paused cluster.
+
+**The optional catalog user (from 1.9.0).** With `catalog_username` set, and only then, the agent also
+connects to the cluster itself, with the MongoDB driver, to its SRV connection string
+(`connectionStrings.standardSrv` from the cluster read above): TLS, SCRAM against `admin` as that user,
+application name `trailox-agent/<version> catalog`, a 20-second server selection timeout, at most 8
+connections. It opens the connection for one task or one probe and closes it after. These are the only
+commands it sends, and none reads a document:
+
+| command | when |
+|---|---|
+| `connectionStatus` with `showPrivileges: true`, on `admin` | the probe's `catalog` check |
+| `listDatabases` with `nameOnly: true`, `authorizedDatabases: true` | each `catalog_collections` task |
+| `listCollections` with `nameOnly: true`, `authorizedCollections: true`, per database | each `catalog_collections` task |
+| `aggregate` of the one stage `{$collStats: {storageStats: {}, count: {}}}`, per collection, 8 at a time | each `catalog_collections` task |
+
+The role it needs is `listDatabases`, `listCollections`, `collStats` and `dbStats` on all databases. Its
+`catalog` check reports `ok`; `warn` when `connectionStatus` shows an action that reads documents (`find`,
+`changeStream`) or changes data, collections, indexes, users or roles (`insert`, `update`, `remove`,
+`createCollection`, `dropCollection`, ...), naming them; and `fail` when the agent cannot connect or sign in,
+with what to check (the agent's address on the project's IP access list, or PrivateLink; the user and its
+password). The check never fails the probe. With a catalog user, the check-in's `monitorUser` is that user,
+the account that signs in to the cluster; without one it is the service account's client id.
 
 **Windows** are whole minutes. A task whose start or end is not a whole minute fails. A line belongs to the
 window with `start <= t < end`, by its own time (`t.$date` in the server log, `ts.$date` in the audit log).
@@ -450,8 +476,27 @@ Times are ISO 8601 UTC strings with microseconds. Every column is sent in every 
 | `catalog_users` | `databaseUsers` | a database user | `snapshot_date`, `username`, `database_name`, `roles`, `scopes`, `aws_iam_type`, `ldap_auth_type`, `oidc_auth_type`, `x509_type`, `delete_after_date` |
 | `catalog_roles` | `customDBRoles/roles` | a custom role | `snapshot_date`, `role_name`, `actions`, `inherited_roles` |
 | `catalog_access_list` | `accessList` | an entry | `snapshot_date`, `cidr_block`, `ip_address`, `aws_security_group`, `comment`, `delete_after_date` |
+| `catalog_databases` (from 1.9.0) | each primary's `databases` and their `measurements` | a (primary, database) | `snapshot_date`, `process`, `database`, `objects`, `data_size`, `storage_size`, `index_size`, `collections`, `views`, `indexes` |
+| `catalog_collections` (from 1.9.0; only with the catalog user) | `listCollections` and `$collStats` | a collection or view | `snapshot_date`, `database`, `collection`, `type`, `count`, `size`, `storage_size`, `index_size`, `indexes`, `capped`, `sharded` |
 
-`process` is the member's host as the logs endpoint takes it (`userAlias`). `connection_uuid` is the canonical
+**`catalog_databases`:** the primaries are the cluster's processes whose `typeName` ends in `_PRIMARY`
+(`REPLICA_PRIMARY`, and on a sharded cluster each shard's `SHARD_PRIMARY` or `SHARD_CONFIG_PRIMARY`), never a
+`SHARD_MONGOS` router. `process` is the primary's `/processes` id (`host:port`). Each number is the newest point
+with a value of `DATABASE_OBJECT_COUNT`, `DATABASE_DATA_SIZE`, `DATABASE_STORAGE_SIZE`, `DATABASE_INDEX_SIZE`,
+`DATABASE_COLLECTION_COUNT`, `DATABASE_VIEW_COUNT` and `DATABASE_INDEX_COUNT` in the last day of hourly points; a
+metric with none is 0. `admin`, `local` and `config` are left out. It needs no permission beyond Project Read Only.
+
+**`catalog_collections`:** every database the user may list but `admin`, `local` and `config`, and every
+collection in it but `system.*`, in name order. `collection` is the name as it is, its own dots included. `type`
+is `listCollections`' type (`collection`, `view`, `timeseries`); a view is one row of zeros, with no `$collStats`.
+`count` is the count stage's, the other numbers `storageStats`' `size`, `storageSize`, `totalIndexSize` and
+`nindexes`. A sharded collection answers once per shard that holds it: counts and sizes are summed, `indexes` is
+the largest, and `sharded` is true. At most 10,000 collection rows; past that the listing stops and one more row
+says so, with `database` and `collection` empty, `type` `truncated`, zeros and false. Without a catalog user the
+task is reported as failed with a message that starts `not configured:` (section 5), and is not listed among the
+agent's errors.
+
+`process` is the member's host as the logs endpoint takes it (`userAlias`), except in `catalog_databases`. `connection_uuid` is the canonical
 UUID string in both `mongo_ops` (from the audit line's base64, read big-endian) and `mongo_connections`. `reason`
 is the error's code name (`UserNotFound`, `AuthenticationFailed`), never its message. `result` on a `__other__`
 row is -1. `roles`, `scopes`, `actions` and `inherited_roles` are JSON text.

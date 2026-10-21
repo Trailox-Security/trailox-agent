@@ -16,13 +16,14 @@ namespace Trailox.Agent.Config;
 /// problem, and a value keeps no trailing line break and holds no other control character.
 /// </summary>
 /// <remarks>
-/// Values only: never keys, never comments, and never password_env or password_file, which already say
-/// where a credential is. It works on the parser's events rather than on the text, so what a variable holds
-/// is text - YAML inside it is not read, and a <c>${...}</c> inside it is not expanded again.
+/// Values only: never keys, never comments, and never password_env or password_file (or, from 1.9.0, their
+/// catalog_ pair), which already say where a credential is. It works on the parser's events rather than on the
+/// text, so what a variable holds is text - YAML inside it is not read, and a <c>${...}</c> inside it is not
+/// expanded again.
 /// </remarks>
 internal static class EnvironmentValues
 {
-    /// <summary>The agent key's variable. It, and every variable a password_env names, is never read as a value.</summary>
+    /// <summary>The agent key's variable. It, and every variable a password_env or catalog_password_env names, is never read as a value.</summary>
     public const string AgentKeyVariable = "TRAILOX_AGENT_KEY";
 
     private const string NoValue = "no value - write one, or remove the line to use the default";
@@ -37,7 +38,13 @@ internal static class EnvironmentValues
     private static readonly HashSet<string> EndpointValues = ValueKeys(typeof(EndpointConfig));
 
     /// <summary>Their values name where a credential is: never expanded, and <see cref="ConfigLoader"/> says so.</summary>
-    private static readonly HashSet<string> CredentialKeys = new(StringComparer.Ordinal) { "password_env", "password_file" };
+    private static readonly HashSet<string> CredentialKeys = new(StringComparer.Ordinal)
+    {
+        "password_env", "password_file", "catalog_password_env", "catalog_password_file",
+    };
+
+    /// <summary>The keys whose value names a variable that holds a credential.</summary>
+    private static readonly HashSet<string> CredentialVariableKeys = new(StringComparer.Ordinal) { "password_env", "catalog_password_env" };
 
     // $${ is a literal ${; a reference is ${NAME} or ${NAME:-default}; any other ${ is refused.
     private static readonly Regex Reference = new(
@@ -59,11 +66,11 @@ internal static class EnvironmentValues
         var events = Read(yamlText);
         var (places, targets, aliasAt) = Locate(events);
 
-        // Refused before anything is read: the agent key, and every password a password_env names, in any
-        // endpoint, earlier or later in the file - a value is reported to Trailox or echoed by a problem. What
-        // names a credential is never expanded: written at password_env or password_file, or anchored
-        // elsewhere and aliased there. Ignoring case: Windows reads variables either way, and refusing too
-        // much costs nothing.
+        // Refused before anything is read: the agent key, and every password a password_env (or
+        // catalog_password_env) names, in any endpoint, earlier or later in the file - a value is reported to
+        // Trailox or echoed by a problem. What names a credential is never expanded: written at one of the
+        // CredentialKeys, or anchored elsewhere and aliased there. Ignoring case: Windows reads variables either
+        // way, and refusing too much costs nothing.
         var refused = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { AgentKeyVariable };
         var credentialNames = new HashSet<int>();
         for (var i = 0; i < events.Count; i++)
@@ -78,7 +85,7 @@ internal static class EnvironmentValues
                 continue;
             }
             credentialNames.Add(at);
-            if (place.Key == "password_env")
+            if (CredentialVariableKeys.Contains(place.Key))
             {
                 // password_env: ${CH_PW} is refused later, but CH_PW is still the password's variable.
                 refused.Add(named.Value.Trim());
@@ -199,7 +206,7 @@ internal static class EnvironmentValues
             var name = m.Groups["name"].Value;
             if (refused.Contains(name))
             {
-                problems.Add($"${{{name}}} holds a credential - the agent key, or a password that password_env names - and cannot be used as a value");
+                problems.Add($"${{{name}}} holds a credential - the agent key, or a password that password_env or catalog_password_env names - and cannot be used as a value");
                 return "";
             }
             // What a file-backed ConfigMap or Secret adds, and a password file loses too: .NET's $ matches just

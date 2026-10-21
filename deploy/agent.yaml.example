@@ -61,8 +61,9 @@ endpoints:
   #   pollMinutes: 180                                 # Serverless bills at least 60 seconds per poll
   #   backfillDays: 30                                 # how far back its first collection reads, 0-365 days
 
-  # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
-  # stays here; register only the public half on the user.
+  # A MongoDB Atlas cluster, through the Atlas Administration API as a service account. The
+  # agent connects to the cluster itself only with the optional catalog user (1.9.0 or later),
+  # to list databases and collections and their sizes; it never reads a document.
   # - alias: atlas-prod                               # MongoDB Atlas, agent 1.8.0 or later
   #   engine: mongodb
   #   kind: cloud
@@ -70,8 +71,15 @@ endpoints:
   #   clusterName: Cluster0                            # the cluster's name in Atlas (M10 or larger)
   #   username: mdb_sa_id_0123456789abcdef01234567     # the service account's client id
   #   password_env: TRAILOX_ATLAS_SECRET               # its secret; or password_file
+  #   catalog_username: trailox_catalog                # optional (1.9.0): a database user whose role has only
+  #                                                    #   listDatabases, listCollections, collStats and dbStats;
+  #                                                    #   the agent's address must be on the project's IP access list
+  #   catalog_password_file: /run/secrets/atlas_catalog   # its password; or catalog_password_env
   #   pollMinutes: 10
   #   backfillDays: 7                                  # Atlas keeps log files 30 days
+
+  # A Snowflake account, through the SQL API as a key-pair service user. The PRIVATE key
+  # stays here; register only the public half on the user.
   # - alias: snowflake
   #   engine: snowflake
   #   kind: cloud
