@@ -177,6 +177,23 @@ public class MongoSourceTests
         Assert.Contains("M10 or larger", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// 🔴 Atlas's cluster read refuses a Flex cluster outright (measured 2026-10-21), so the probe never sees its
+    ///    provider. The customer gets the same requirement, not Atlas's 400.
+    /// </summary>
+    [Fact]
+    public async Task A_flex_cluster_refused_by_the_cluster_api_gets_the_requirement()
+    {
+        var (source, atlas) = Source();
+        atlas.Override = r => r.RequestUri!.AbsolutePath == $"/api/atlas/v2/groups/{Project}/clusters/Cluster0"
+            ? FakeAtlas.Json("""{"detail":"Flex cluster Cluster0 cannot be used in the Cluster API.","error":400,"errorCode":"CANNOT_USE_FLEX_CLUSTER_IN_CLUSTER_API","parameters":["Cluster0"],"reason":"Bad Request"}""", HttpStatusCode.BadRequest)
+            : null;
+
+        var ex = await Assert.ThrowsAsync<SourceException>(() => source.ProbeAsync(CancellationToken.None));
+
+        Assert.Equal("cluster Cluster0 is FLEX: Trailox reads MongoDB Atlas through its log files, which Atlas keeps only for dedicated clusters (M10 or larger)", ex.Message);
+    }
+
     [Fact]
     public async Task Mongo_ops_reads_the_audit_file_of_each_member_and_keeps_only_its_window()
     {
@@ -428,6 +445,8 @@ public class MongoSourceTests
     [InlineData(401, """{"error":"invalid_client","error_description":"The provided credentials are not valid"}""", "rejected the service account's credentials")]
     [InlineData(401, """{"detail":"Current user is not authorized to perform this action.","error":401,"errorCode":"USER_UNAUTHORIZED"}""", "Project Read Only and Project Cluster Log Viewer")]
     [InlineData(404, """{"detail":"No group with ID exists.","error":404,"errorCode":"GROUP_NOT_FOUND"}""", "no project with the id in host")]
+    // Measured 2026-10-21: a real project the service account is not a member of is this 401, not the 404.
+    [InlineData(401, """{"detail":"User cannot access this group.","error":401,"errorCode":"USER_CANNOT_ACCESS_GROUP","parameters":[],"reason":"Unauthorized"}""", "the service account is not a member of the project in host: add it to that project with Project Read Only and Project Cluster Log Viewer")]
     // Measured 2026-10-20: Atlas checks the service account's own access list even when the organization does not
     // require one. The answer names the refused address, and the sentence says which list it belongs on.
     [InlineData(403, """{"detail":"IP address 203.0.113.7 is not allowed to access this resource.","error":403,"errorCode":"IP_ADDRESS_NOT_ON_ACCESS_LIST","parameters":["203.0.113.7"],"reason":"Forbidden"}""", "add the agent's outbound address to the service account's API access list")]
@@ -443,6 +462,22 @@ public class MongoSourceTests
 
         Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("not-a-real-secret", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An unknown project id says only that: not being a member is its own answer (USER_CANNOT_ACCESS_GROUP).</summary>
+    [Fact]
+    public async Task An_unknown_project_does_not_blame_membership()
+    {
+        var (source, atlas) = Source();
+        atlas.Override = r => r.RequestUri!.AbsolutePath == $"/api/atlas/v2/groups/{Project}/clusters/Cluster0"
+            ? FakeAtlas.Json("""{"detail":"No group with ID 000000000000000000000000 exists.","error":404,"errorCode":"GROUP_NOT_FOUND","parameters":["000000000000000000000000"],"reason":"Not Found"}""", HttpStatusCode.NotFound)
+            : null;
+
+        var ex = await Assert.ThrowsAnyAsync<SourceException>(() => source.ProbeAsync(CancellationToken.None));
+
+        Assert.StartsWith("Atlas knows no project with the id in host:", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("member", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("not in it", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

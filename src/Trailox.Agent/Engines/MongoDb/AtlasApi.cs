@@ -14,7 +14,9 @@ namespace Trailox.Agent.Engines.MongoDb;
 /// <remarks>
 /// The answers below were measured on 2026-10-19 with a service account holding Project Read Only and
 /// Project Cluster Log Viewer: a wrong secret is 401 invalid_client at the token step; a missing role is
-/// 401 USER_UNAUTHORIZED (not 403); an unknown project is 404 GROUP_NOT_FOUND.
+/// 401 USER_UNAUTHORIZED (not 403); an unknown project is 404 GROUP_NOT_FOUND. A real project the account
+/// is not a member of is 401 USER_CANNOT_ACCESS_GROUP on every read under it, the project itself included
+/// (measured 2026-10-21), not the 404.
 /// </remarks>
 public sealed class AtlasApi
 {
@@ -251,12 +253,13 @@ public sealed class AtlasApi
         {
             (401, "invalid_client") => "Atlas rejected the service account's credentials: the client id in username or the secret is wrong, deleted or expired",
             (401, "USER_UNAUTHORIZED") => $"the service account may not read {what}: give it Project Read Only and Project Cluster Log Viewer on this project",
+            (401, "USER_CANNOT_ACCESS_GROUP") => "the service account is not a member of the project in host: add it to that project with Project Read Only and Project Cluster Log Viewer",
             // Measured 2026-10-20: Atlas checks the service account's own API access list even when the organization
             // does not require one. The token request still succeeds; every call after it answers this 403, and its
             // detail (appended below) names the refused address.
             (403, "IP_ADDRESS_NOT_ON_ACCESS_LIST") => $"Atlas refused {what} from this agent's address: add the agent's outbound address to the service account's API access list",
             (403, _) => $"Atlas refused {what} ({code})",
-            (404, "GROUP_NOT_FOUND") => "Atlas knows no project with the id in host, or the service account is not in it",
+            (404, "GROUP_NOT_FOUND") => "Atlas knows no project with the id in host",
             (404, _) => $"Atlas found no {what} ({code})",
             _ => $"Atlas answered {what} with HTTP {status} {code}",
         };
