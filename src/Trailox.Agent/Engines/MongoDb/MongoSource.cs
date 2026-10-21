@@ -58,7 +58,7 @@ public sealed class MongoSource : IEngineSource
             {
                 // D2: a Free or Flex cluster answers the API and keeps no downloadable logs. Without this it would
                 // "connect", collect nothing, and look like a fault of ours.
-                throw new SourceException($"cluster {_endpoint.ClusterName} is {(tier.Length > 0 ? tier : providerName)}: Trailox reads MongoDB Atlas through its log files, which Atlas keeps only for dedicated clusters (M10 or larger)");
+                throw NotDedicated(tier.Length > 0 ? tier : providerName);
             }
             if (root.TryGetProperty("paused", out var paused) && paused.ValueKind == JsonValueKind.True)
             {
@@ -339,6 +339,11 @@ public sealed class MongoSource : IEngineSource
         return hosts;
     }
 
+    /// <remarks>
+    /// 🔴 A FLEX CLUSTER NEVER REACHES <see cref="IsShared"/>: /clusters/{name} refuses it with 400
+    ///    CANNOT_USE_FLEX_CLUSTER_IN_CLUSTER_API (measured 2026-10-21; only /flexClusters/{name}, on a newer API
+    ///    version, describes it). The refusal is the same D2 sentence the other shared tiers get.
+    /// </remarks>
     private async Task<JsonDocument> ClusterAsync(CancellationToken ct)
     {
         try
@@ -349,7 +354,15 @@ public sealed class MongoSource : IEngineSource
         {
             throw new SourceException($"the project has no dedicated cluster named {_endpoint.ClusterName} (clusterName is the cluster's name in Atlas)");
         }
+        catch (AtlasException ex) when (ex.ErrorCode == "CANNOT_USE_FLEX_CLUSTER_IN_CLUSTER_API")
+        {
+            throw NotDedicated("FLEX");
+        }
     }
+
+    /// <summary>D2's refusal of a cluster that keeps no downloadable logs; <paramref name="kind"/> is its tier or provider.</summary>
+    private SourceException NotDedicated(string kind) =>
+        new($"cluster {_endpoint.ClusterName} is {kind}: Trailox reads MongoDB Atlas through its log files, which Atlas keeps only for dedicated clusters (M10 or larger)");
 
     private async Task<AtlasCheck> SoftCheckAsync(string name, string path, string ok, CancellationToken ct)
     {
