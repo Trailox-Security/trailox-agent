@@ -54,6 +54,18 @@ public sealed class MongoShape
     private readonly Buffer _keys = new(1024);
     private readonly List<Member>[] _members = Enumerable.Range(0, MaxDepth + 2).Select(_ => new List<Member>(16)).ToArray();
 
+    // 🔴 BOUND ONCE, NOT PER SORT. A lambda that reads _keys is a new delegate (and closure) at every call: measured,
+    //    96% of the engine's allocation, 252 bytes a line. List.Sort(IComparer) would not help: it wraps Compare in a
+    //    new Comparison per call. These read _keys when called, so they stay right when the buffer grows.
+    private readonly Comparison<Member> _byKey;
+    private readonly Comparison<Member> _byIndex;
+
+    public MongoShape()
+    {
+        _byKey = CompareKeys;
+        _byIndex = CompareIndexes;
+    }
+
     public ReadOnlySpan<byte> Shape => _out.Span;
 
     public ulong Hash { get; private set; }
@@ -191,22 +203,22 @@ public sealed class MongoShape
     /// <summary>Members already written from <paramref name="start"/>, rewritten as {"key":value,...} in ordinal key order.</summary>
     private void EmitSorted(List<Member> members, int start)
     {
-        members.Sort((a, b) => _keys.Span.Slice(a.KeyStart, a.KeyLength).SequenceCompareTo(_keys.Span.Slice(b.KeyStart, b.KeyLength)));
-        Rewrite(members, start, (o, m, values) =>
-        {
-            o.WriteByte((byte)'"');
-            o.Write(_keys.Span.Slice(m.KeyStart, m.KeyLength));
-            o.Write("\":"u8);
-            o.Write(values.Slice(m.ValueStart - start, m.ValueLength));
-        }, (byte)'{', (byte)'}');
+        members.Sort(_byKey);
+        Rewrite(members, start, keyed: true, (byte)'{', (byte)'}');
     }
 
     /// <summary>An S3 array: an object keyed exactly "1".."n". Written as the array it was, in index order.</summary>
     private Kind EmitIndexed(List<Member> members, int start)
     {
-        members.Sort((a, b) => Index(_keys.Span.Slice(a.KeyStart, a.KeyLength)).CompareTo(Index(_keys.Span.Slice(b.KeyStart, b.KeyLength))));
+        members.Sort(_byIndex);
         return EmitArray(members, start);
     }
+
+    private int CompareKeys(Member a, Member b) => KeyOf(a).SequenceCompareTo(KeyOf(b));
+
+    private int CompareIndexes(Member a, Member b) => Index(KeyOf(a)).CompareTo(Index(KeyOf(b)));
+
+    private ReadOnlySpan<byte> KeyOf(Member m) => _keys.Span.Slice(m.KeyStart, m.KeyLength);
 
     /// <summary>Elements already written from <paramref name="start"/>: one token when all are scalars, else [e1,e2] with runs written once.</summary>
     private Kind EmitArray(List<Member> members, int start)
@@ -228,14 +240,15 @@ public sealed class MongoShape
             _out.Write(ArrayToken(common));
             return Kind.Structured;
         }
-        Rewrite(members, start, null, (byte)'[', (byte)']', collapseRuns: true);
+        Rewrite(members, start, keyed: false, (byte)'[', (byte)']', collapseRuns: true);
         return Kind.Structured;
     }
 
-    private delegate void MemberWriter(Buffer output, Member member, ReadOnlySpan<byte> values);
-
-    /// <summary>Moves the members' bytes aside, then writes them back from <paramref name="start"/> in list order.</summary>
-    private void Rewrite(List<Member> members, int start, MemberWriter? write, byte open, byte close, bool collapseRuns = false)
+    /// <summary>
+    /// Moves the members' bytes aside, then writes them back from <paramref name="start"/> in list order, each as
+    /// "key":value when <paramref name="keyed"/>, else as its value alone.
+    /// </summary>
+    private void Rewrite(List<Member> members, int start, bool keyed, byte open, byte close, bool collapseRuns = false)
     {
         var length = _out.Length - start;
         var copy = ArrayPool<byte>.Shared.Rent(Math.Max(1, length));
@@ -262,14 +275,13 @@ public sealed class MongoShape
                 {
                     _out.WriteByte((byte)',');
                 }
-                if (write != null)
+                if (keyed)
                 {
-                    write(_out, m, values);
+                    _out.WriteByte((byte)'"');
+                    _out.Write(KeyOf(m));
+                    _out.Write("\":"u8);
                 }
-                else
-                {
-                    _out.Write(values.Slice(m.ValueStart - start, m.ValueLength));
-                }
+                _out.Write(values.Slice(m.ValueStart - start, m.ValueLength));
                 previous = i;
             }
             _out.WriteByte(close);
