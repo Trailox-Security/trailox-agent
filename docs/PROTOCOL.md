@@ -126,8 +126,9 @@ X-Trailox-Rows: <number of rows the agent sent, optional>
 body: one JSON object per row, as the database returned it
 ```
 
-A `mongo_ops` body (section 6e) may also contain blank lines, before, between or after rows; a blank line is
-not a row, and a body of blank lines only has no rows.
+A `mongo_ops` body (section 6e), and from 1.8.2 a `mongo_slow_ops`, `mongo_connections` or
+`mongo_signin_failures` body, may also contain blank lines, before, between or after rows; a blank line is not a
+row, and a body of blank lines only has no rows.
 
 Reply `200 { "rowsAccepted": n }`. Any other reply is handled as in section 1: the agent
 records the error, reports it in the next check-in's `lastErrors`, and moves on. Nothing is
@@ -418,8 +419,12 @@ before a member existed (its `created` in `/processes`), and whose log has no li
 end, is complete and empty for that member (from 1.8.2): a backfill that reaches back before a new cluster
 does not wait.
 
-**Keep-alive:** a `mongo_ops` upload streams while the audit files are read, and a busy cluster with few
-distinct operations sends few rows, so the body can be quiet for minutes. While it is open, the agent flushes
+**Streaming:** every log stream's upload streams while the files are read: `mongo_ops` while the audit files
+are, and from 1.8.2 the server-log streams too, which until then held all of a window's rows until the upload.
+What a task holds does not grow with the window.
+
+**Keep-alive:** a busy cluster with few distinct operations, or a server log with few slow operations or failed
+sign-ins, sends few rows while its files are read, so the body can be quiet for minutes. While it is open, the agent flushes
 the compressor at least every 15 s, so a proxy or firewall on the path never sees an idle connection. When no
 row was sent since the last flush, it first writes a blank line, never inside a row.
 

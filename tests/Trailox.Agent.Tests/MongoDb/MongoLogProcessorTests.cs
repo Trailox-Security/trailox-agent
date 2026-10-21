@@ -65,6 +65,32 @@ public class MongoLogProcessorTests
     private static (List<JsonElement> Rows, MongoLogProcessor Processor) Run(MongoLogStream stream, params string[] lines) =>
         Run(stream, MongoLogProcessor.DefaultGroupCap, lines);
 
+    /// <summary>
+    /// 🔴 Running out of memory fails the task: it is not one bad line. On agent 1.8.1 (2026-10-21) a window whose rows
+    ///    outgrew the pod shipped exactly 128 MiB of them as complete, every later row counted malformed.
+    /// </summary>
+    [Fact]
+    public void Running_out_of_memory_is_not_a_malformed_line()
+    {
+        var processor = new MongoLogProcessor(MongoLogStream.Connections, "h", "REPLICA_PRIMARY", Start, End, new RowSink(new Exhausted()));
+        var line = Encoding.UTF8.GetBytes(Accepted("2026-10-19T09:00:01.000+00:00", "3b2a1e0e-5f8a-4a3e-9d61-7c2b8f4e1a90"));
+
+        Assert.Throws<OutOfMemoryException>(() => processor.Process(line));
+        Assert.Equal(0L, processor.Counts.Malformed);
+    }
+
+    /// <summary>A writer that cannot grow.</summary>
+    private sealed class Exhausted : IBufferWriter<byte>
+    {
+        public void Advance(int count)
+        {
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0) => throw new OutOfMemoryException();
+
+        public Span<byte> GetSpan(int sizeHint = 0) => throw new OutOfMemoryException();
+    }
+
     [Fact]
     public void Operations_of_one_minute_and_key_are_one_row_with_their_count()
     {

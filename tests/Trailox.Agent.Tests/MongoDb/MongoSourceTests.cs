@@ -224,20 +224,47 @@ public class MongoSourceTests
     }
 
     [Fact]
-    public async Task Only_the_streamed_ops_upload_asks_for_keep_alive()
+    public async Task Only_the_streamed_log_uploads_ask_for_keep_alive()
     {
         var start = new DateTime(2026, 10, 19, 9, 0, 0, DateTimeKind.Utc);
         var (source, atlas) = Source();
         atlas.Log = (_, name) => name == "mongodb" ? [ServerLine(start.AddMinutes(12))] : [AuditLine(start.AddSeconds(5), "app_orders")];
 
         var ops = (await source.OpenAsync(Window(ProtocolInfo.Streams.MongoOps, start, start.AddMinutes(10)), CancellationToken.None))!;
+        var connections = (await source.OpenAsync(Window(ProtocolInfo.Streams.MongoConnections, start, start.AddMinutes(10)), CancellationToken.None))!;
         var users = (await source.OpenAsync(new AgentTask { ChunkId = "c", Stream = ProtocolInfo.Streams.CatalogUsers }, CancellationToken.None))!;
 
-        // The ops rows stream while gigabytes of audit log are read; every other stream is read whole first.
+        // The log rows stream while the files are read; the catalog is read whole first.
         Assert.True(ops.KeepAlive);
+        Assert.True(connections.KeepAlive);
         Assert.False(users.KeepAlive);
         Assert.Equal(3, (await RowsOf(ops)).Count);
+        Assert.Empty(await RowsOf(connections));
         Assert.Single(await RowsOf(users));
+    }
+
+    /// <summary>
+    /// 🔴 A server-log stream checks every node's completeness before it opens a window's file (from 1.8.2), as
+    ///    mongo_ops does: its rows now stream, so an unpublished window must be found before the upload starts.
+    /// </summary>
+    [Theory]
+    [InlineData(ProtocolInfo.Streams.MongoSlowOps)]
+    [InlineData(ProtocolInfo.Streams.MongoConnections)]
+    [InlineData(ProtocolInfo.Streams.MongoSigninFailures)]
+    public async Task A_server_log_stream_checks_completeness_before_it_reads_the_window(string stream)
+    {
+        var start = new DateTime(2026, 10, 19, 11, 40, 0, DateTimeKind.Utc);
+        // A young window: past CompletenessGiveUp no check is made.
+        var (source, atlas) = Source(now: start.AddMinutes(15));
+        atlas.Log = (_, _) => [ServerLine(start.AddMinutes(12))];
+        var end = new DateTimeOffset(start.AddMinutes(10)).ToUnixTimeSeconds();
+
+        await RowsOf((await source.OpenAsync(Window(stream, start, start.AddMinutes(10)), CancellationToken.None))!);
+
+        var logs = atlas.Paths.Where(p => p.Contains("/logs/mongodb.gz", StringComparison.Ordinal)).ToList();
+        Assert.Equal(6, logs.Count);
+        Assert.All(logs.Take(3), p => Assert.Contains($"startDate={end - 120}&", p, StringComparison.Ordinal));
+        Assert.All(logs.Skip(3), p => Assert.Contains($"startDate={end - 600}&", p, StringComparison.Ordinal));
     }
 
     [Fact]
