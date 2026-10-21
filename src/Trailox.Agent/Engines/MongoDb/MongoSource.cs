@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Globalization;
 using System.IO.Pipelines;
 using System.Text.Json;
@@ -128,30 +127,29 @@ public sealed class MongoSource : IEngineSource
     }
 
     /// <summary>
-    /// The server-log streams: small files (about 5 MB an hour a node under load), read whole into memory, so
-    /// a window whose files are not published yet is reported as such before any byte is uploaded.
+    /// The server-log streams (mongo_slow_ops, mongo_connections, mongo_signin_failures): each node's server log,
+    /// read and streamed as mongo_ops reads its audit files.
     /// </summary>
-    private async Task<RowStream> ServerLogAsync(MongoLogStream stream, AgentTask task, CancellationToken ct)
-    {
-        RequireWholeMinutes(task);
-        var (_, processes) = await ProcessesAsync(ct);
-        var rows = new ArrayBufferWriter<byte>(64 * 1024);
-        var sink = new RowSink(rows);
-        foreach (var process in processes)
-        {
-            var processor = new MongoLogProcessor(stream, process.Host, process.Type, task.StartMicros, task.EndMicros, sink);
-            await ReadAsync(process, ServerLog(process), task, processor, null, ct);
-            RequirePublished(process, processor.Counts.MaxTsMicros, task);
-        }
-        return Buffered(rows.WrittenMemory);
-    }
+    /// <remarks>
+    /// 🔴 STREAMED, NOT HELD (from 1.8.2). They used to hold every row of the window until the upload, so that an
+    ///    unpublished window was reported before any byte left. A cluster whose clients reconnect all the time then
+    ///    outgrew the pod: each new connection is three rows, a 2-minute window at 1,000 new connections a second held
+    ///    350 MiB (bench, 2026-10-20), and a 10-minute one about 630 MB, over the chart's 512 MiB. The completeness
+    ///    check now runs first, on each node's last minutes of server log, as it always has for mongo_ops.
+    /// </remarks>
+    private Task<RowStream> ServerLogAsync(MongoLogStream stream, AgentTask task, CancellationToken ct) =>
+        StreamedAsync(stream, ServerLog, task, ct);
+
+    /// <summary>mongo_ops: the audit files, one line an operation at Full audit.</summary>
+    private Task<RowStream> OpsAsync(AgentTask task, CancellationToken ct) =>
+        StreamedAsync(MongoLogStream.Ops, AuditLog, task, ct);
 
     /// <summary>
-    /// mongo_ops: the audit files, one line an operation at Full audit, so this one streams: each minute is
-    /// shipped as soon as the file is past it, through a pipe the upload drains. The windows' completeness is
-    /// checked first, on each node's small server log.
+    /// One stream's window, read from each node's <paramref name="logName"/> file: each minute is shipped as soon as
+    /// the file is past it, through a pipe the upload drains, so what the task holds does not grow with the window.
+    /// The window's completeness is checked first, on each node's server log, before any byte is uploaded.
     /// </summary>
-    private async Task<RowStream> OpsAsync(AgentTask task, CancellationToken ct)
+    private async Task<RowStream> StreamedAsync(MongoLogStream stream, Func<AtlasProcess, string> logName, AgentTask task, CancellationToken ct)
     {
         RequireWholeMinutes(task);
         var (_, processes) = await ProcessesAsync(ct);
@@ -161,7 +159,7 @@ public sealed class MongoSource : IEngineSource
         }
 
         // The first download is opened here, so that a refusal surfaces as the task's failure before the upload.
-        var first = await _api.DownloadLogAsync(processes[0].Host, AuditLog(processes[0]), Seconds(task.StartMicros), SecondsUp(task.EndMicros), ct);
+        var first = await _api.DownloadLogAsync(processes[0].Host, logName(processes[0]), Seconds(task.StartMicros), SecondsUp(task.EndMicros), ct);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 8 << 20, resumeWriterThreshold: 4 << 20));
         var producer = Task.Run(async () =>
@@ -172,8 +170,8 @@ public sealed class MongoSource : IEngineSource
                 var opened = first;
                 foreach (var process in processes)
                 {
-                    var processor = new MongoLogProcessor(MongoLogStream.Ops, process.Host, process.Type, task.StartMicros, task.EndMicros, sink);
-                    await ReadAsync(process, AuditLog(process), task, processor, pipe.Writer, cts.Token, opened);
+                    var processor = new MongoLogProcessor(stream, process.Host, process.Type, task.StartMicros, task.EndMicros, sink);
+                    await ReadAsync(process, logName(process), task, processor, pipe.Writer, cts.Token, opened);
                     opened = null;
                     await pipe.Writer.FlushAsync(cts.Token);
                 }
@@ -185,7 +183,8 @@ public sealed class MongoSource : IEngineSource
                 await pipe.Writer.CompleteAsync(ex);
             }
         }, CancellationToken.None);
-        // Quiet by design: a busy cluster with few shapes yields few rows while gigabytes of log are read.
+        // Quiet by design: a busy cluster with few shapes, or a server log with few slow operations or failed sign-ins,
+        // yields few rows while the files are read.
         return new RowStream(pipe.Reader.AsStream(), new Producer(cts, producer)) { KeepAlive = true };
     }
 
@@ -223,7 +222,7 @@ public sealed class MongoSource : IEngineSource
         TaskHeartbeat.Beat();
     }
 
-    /// <summary>The audit stream's completeness: each node's server log must reach past the window's end.</summary>
+    /// <summary>A log stream's completeness: each node's server log must reach past the window's end.</summary>
     private async Task RequirePublishedAsync(AtlasProcess process, AgentTask task, CancellationToken ct)
     {
         if (_utcNow() - FromMicros(task.EndMicros) > CompletenessGiveUp)
