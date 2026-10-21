@@ -194,10 +194,13 @@ public sealed partial class MongoLogProcessor
                 ProcessServer(line, ts);
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not (OperationCanceledException or OutOfMemoryException))
         {
             // 🔴 ONE LINE NEVER FAILS A TASK, AND AN OPERATION IS NEVER DROPPED. Any failure on one line is that
             //    line's: a task that threw here would fail at every retry and its window would never land.
+            // 🔴 BUT RUNNING OUT OF MEMORY IS NOT ONE LINE'S FAULT, and fails the task. Measured on agent 1.8.1
+            //    (2026-10-21): a 10-minute window whose held rows outgrew 512 MiB shipped exactly 128 MiB of them and
+            //    succeeded, each later row's write counted here as a malformed line.
             //    Parsing comes before anything is counted, so the line is counted once, here: an audited
             //    operation that cannot be parsed is still shipped, counted, under the command "?unparsed".
             if (Counts.Kept != kept)
