@@ -63,6 +63,11 @@ public static class ProtocolInfo
         public const string AtlasEvents = "atlas_events";
         public const string CatalogRoles = "catalog_roles";
         public const string CatalogAccessList = "catalog_access_list";
+
+        // MongoDB Atlas (agent 1.9): the collection catalog. Each primary's database sizes from the Admin API, for
+        // every source; and, only with the optional catalog user, each collection's size from the cluster itself.
+        public const string CatalogDatabases = "catalog_databases";
+        public const string CatalogCollections = "catalog_collections";
     }
 }
 
@@ -146,6 +151,13 @@ public sealed class AtlasProcess
     public string Type { get; set; } = "";
 
     /// <summary>
+    /// The process's id in the Admin API (/processes <c>id</c>, <c>hostname:port</c> in the internal alias form), which
+    /// its database measurements are read under (1.9.0). The agent's own: not sent to Trailox.
+    /// </summary>
+    [JsonIgnore]
+    public string Id { get; set; } = "";
+
+    /// <summary>
     /// When Atlas created the process (/processes <c>created</c>), if it says. The agent's own: not sent to Trailox.
     /// </summary>
     [JsonIgnore]
@@ -156,7 +168,9 @@ public sealed class AtlasCheck
 {
     public string Name { get; set; } = "";
 
-    /// <summary>ok, warn or fail.</summary>
+    /// <summary>
+    /// ok, warn or fail. The first warn is the catalog check's (1.9.0): a catalog user that holds more than it needs.
+    /// </summary>
     public string Status { get; set; } = "";
     public string Message { get; set; } = "";
 }

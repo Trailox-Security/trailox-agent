@@ -14,7 +14,7 @@ namespace Trailox.Agent.Tests.MongoDb;
 /// 2026-10-19: the cluster, the project's processes (another cluster's included), gzip log files that run
 /// past the asked window, and the measured error answers.
 /// </summary>
-public class MongoSourceTests
+public partial class MongoSourceTests
 {
     private const string Project = "0123456789abcdef01234567";
     private const string ClientId = "mdb_sa_id_00000000000000000000aaaa";
@@ -41,6 +41,15 @@ public class MongoSourceTests
         /// </summary>
         public bool Sharded { get; set; }
 
+        /// <summary>
+        /// The databases list of each process (by its id, unescaped), as /processes/{id}/databases answers it; a process
+        /// not in here lists none. Measured on an M10 (2026-10-21): the list leaves admin out but has local and config.
+        /// </summary>
+        public Dictionary<string, string[]> ProcessDatabases { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>One database's measurements body on one process (id, database); the default has no point at all.</summary>
+        public Func<string, string, string> Measurements { get; set; } = (_, _) => """{"measurements":[]}""";
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri!.PathAndQuery;
@@ -59,26 +68,39 @@ public class MongoSourceTests
             var prefix = $"/api/atlas/v2/groups/{Project}";
             Assert.StartsWith(prefix, path, StringComparison.Ordinal);
             var rest = path[prefix.Length..];
+            if (rest.StartsWith("/processes/", StringComparison.Ordinal))
+            {
+                // /processes/{id}/databases[/{name}/measurements?...]; the id's colon arrives escaped.
+                var parts = rest.Split('?')[0].Split('/');
+                var id = Uri.UnescapeDataString(parts[2]);
+                if (parts.Length == 4)
+                {
+                    var names = ProcessDatabases.GetValueOrDefault(id) ?? [];
+                    var results = string.Join(",", names.Select(n => """{"databaseName":"@0@","links":[]}""".Replace("@0@", n)));
+                    return Json("""{"results":[@0@],"totalCount":@1@}""".Replace("@0@", results).Replace("@1@", names.Length.ToString()));
+                }
+                return Json(Measurements(id, Uri.UnescapeDataString(parts[4])));
+            }
             if (Sharded && rest.StartsWith("/clusters/Cluster0", StringComparison.Ordinal) && !rest.Contains("/logs/", StringComparison.Ordinal))
             {
-                return Json("""{"name":"Cluster0","clusterType":"SHARDED","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27016,@1@:27016,@2@:27016/?ssl=true&authSource=admin"},"providerSettings":{"providerName":"AWS","instanceSizeName":"M30"}}""".Replace("@0@", Hosts[0]).Replace("@1@", Hosts[1]).Replace("@2@", Hosts[2]));
+                return Json("""{"name":"Cluster0","clusterType":"SHARDED","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27016,@1@:27016,@2@:27016/?ssl=true&authSource=admin","standardSrv":"mongodb+srv://cluster0.example.mongodb.net"},"providerSettings":{"providerName":"AWS","instanceSizeName":"M30"}}""".Replace("@0@", Hosts[0]).Replace("@1@", Hosts[1]).Replace("@2@", Hosts[2]));
             }
             if (Sharded && rest.StartsWith("/processes", StringComparison.Ordinal))
             {
                 var mongod = new[] { "SHARD_CONFIG_PRIMARY", "REPLICA_PRIMARY", "REPLICA_SECONDARY" };
-                var routers = Hosts.Select(h => """{"userAlias":"@0@","port":27016,"typeName":"SHARD_MONGOS"}""".Replace("@0@", h));
-                var shards = Hosts.Select((h, i) => """{"userAlias":"@0@","port":27017,"typeName":"@1@"}""".Replace("@0@", h).Replace("@1@", mongod[i]));
+                var routers = Hosts.Select((h, i) => """{"id":"atlas-abcdef-shard-00-0@1@.example.mongodb.net:27016","userAlias":"@0@","port":27016,"typeName":"SHARD_MONGOS"}""".Replace("@0@", h).Replace("@1@", i.ToString()));
+                var shards = Hosts.Select((h, i) => """{"id":"atlas-abcdef-shard-00-0@2@.example.mongodb.net:27017","userAlias":"@0@","port":27017,"typeName":"@1@"}""".Replace("@0@", h).Replace("@1@", mongod[i]).Replace("@2@", i.ToString()));
                 return Json("""{"results":[@0@],"totalCount":6}""".Replace("@0@", string.Join(",", shards.Concat(routers))));
             }
             if (rest.StartsWith("/clusters/Cluster0", StringComparison.Ordinal) && !rest.Contains("/logs/", StringComparison.Ordinal))
             {
-                return Json("""{"name":"Cluster0","clusterType":"REPLICASET","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27017,@1@:27017,@2@:27017/?ssl=true&authSource=admin&replicaSet=atlas-abcdef-shard-0"},"providerSettings":{"providerName":"@3@","instanceSizeName":"@4@"}}""".Replace("@0@", (Hosts[0]).ToString()).Replace("@1@", (Hosts[1]).ToString()).Replace("@2@", (Hosts[2]).ToString()).Replace("@3@", (ProviderName).ToString()).Replace("@4@", (Tier).ToString()));
+                return Json("""{"name":"Cluster0","clusterType":"REPLICASET","paused":false,"mongoDBVersion":"8.0.34","connectionStrings":{"standard":"mongodb://@0@:27017,@1@:27017,@2@:27017/?ssl=true&authSource=admin&replicaSet=atlas-abcdef-shard-0","standardSrv":"mongodb+srv://cluster0.example.mongodb.net"},"providerSettings":{"providerName":"@3@","instanceSizeName":"@4@"}}""".Replace("@0@", (Hosts[0]).ToString()).Replace("@1@", (Hosts[1]).ToString()).Replace("@2@", (Hosts[2]).ToString()).Replace("@3@", (ProviderName).ToString()).Replace("@4@", (Tier).ToString()));
             }
             if (rest.StartsWith("/processes", StringComparison.Ordinal))
             {
                 var created = Created is null ? "" : $",\"created\":\"{Created}\"";
-                var mine = Hosts.Select((h, i) => """{"userAlias":"@0@","hostname":"atlas-abcdef-shard-00-0@1@.example.mongodb.net","typeName":"@2@"@3@}""".Replace("@0@", (h).ToString()).Replace("@1@", (i).ToString()).Replace("@2@", ((i == 2 ? "REPLICA_PRIMARY" : "REPLICA_SECONDARY")).ToString()).Replace("@3@", created));
-                var other = """{"userAlias":"ac-zzzz-shard-00-00.other.mongodb.net","hostname":"atlas-zzzz-shard-00-00.other.mongodb.net","typeName":"REPLICA_PRIMARY"}""";
+                var mine = Hosts.Select((h, i) => """{"id":"atlas-abcdef-shard-00-0@1@.example.mongodb.net:27017","userAlias":"@0@","hostname":"atlas-abcdef-shard-00-0@1@.example.mongodb.net","port":27017,"typeName":"@2@"@3@}""".Replace("@0@", (h).ToString()).Replace("@1@", (i).ToString()).Replace("@2@", ((i == 2 ? "REPLICA_PRIMARY" : "REPLICA_SECONDARY")).ToString()).Replace("@3@", created));
+                var other = """{"id":"atlas-zzzz-shard-00-00.other.mongodb.net:27017","userAlias":"ac-zzzz-shard-00-00.other.mongodb.net","hostname":"atlas-zzzz-shard-00-00.other.mongodb.net","typeName":"REPLICA_PRIMARY"}""";
                 return Json("""{"results":[@0@],"totalCount":4}""".Replace("@0@", (string.Join(",", mine.Append(other))).ToString()));
             }
             if (rest.Contains("/logs/", StringComparison.Ordinal))

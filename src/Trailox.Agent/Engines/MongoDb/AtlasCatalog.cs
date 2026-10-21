@@ -1,16 +1,33 @@
 using System.Buffers;
 using System.Globalization;
 using System.Text.Json;
+using Trailox.Agent.Runner;
 
 namespace Trailox.Agent.Engines.MongoDb;
 
 /// <summary>
-/// What the Admin API says about the project, as rows: its events for a window (atlas_events), and three
-/// daily snapshots (catalog_users, catalog_roles, catalog_access_list). Project Read Only reads all four;
-/// none of them holds secret material (databaseUsers has no password field, measured).
+/// What the Admin API says about the project, as rows: its events for a window (atlas_events), and four
+/// daily snapshots (catalog_users, catalog_roles, catalog_access_list, and from 1.9.0 catalog_databases).
+/// Project Read Only reads all five; none of them holds secret material (databaseUsers has no password field,
+/// measured).
 /// </summary>
 public sealed class AtlasCatalog
 {
+    /// <summary>
+    /// A day of hourly points, of which the newest non-null one is kept. Measured on an M10 (2026-10-21): a point
+    /// about every hour (xx:24, then 15:35), and a window is exactly [now - period, now], so PT2H held one point,
+    /// 54 minutes old, and would hold none after one or two missed collections. A day costs one request all the same.
+    /// </summary>
+    internal const string MeasurementPeriod = "P1D";
+
+    // The metrics of one catalog_databases row, by column; a metric Atlas leaves out, or gives no value, is 0.
+    private static readonly (string Column, string Metric)[] DatabaseMetrics =
+    [
+        ("objects", "DATABASE_OBJECT_COUNT"), ("data_size", "DATABASE_DATA_SIZE"), ("storage_size", "DATABASE_STORAGE_SIZE"),
+        ("index_size", "DATABASE_INDEX_SIZE"), ("collections", "DATABASE_COLLECTION_COUNT"), ("views", "DATABASE_VIEW_COUNT"),
+        ("indexes", "DATABASE_INDEX_COUNT"),
+    ];
+
     private readonly AtlasApi _api;
     private readonly string _ownClientId;
 
@@ -130,6 +147,87 @@ public sealed class AtlasCatalog
             sink.EndRow();
         }
         return rows.WrittenMemory;
+    }
+
+    /// <summary>
+    /// catalog_databases (1.9.0): one row per (primary, database), from each primary's database list and each
+    /// database's measurements, without MongoDB's own databases. Counts and sizes from metadata: no new
+    /// permission, and nothing connects to the cluster.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 THE PROCESS ID HOLDS A COLON (host:27017). It is escaped as a path segment; Atlas answered both forms the same
+    ///    (measured 2026-10-21). An unknown one is 404 HOST_NOT_FOUND.
+    /// ⚠ The databases list leaves admin out but has local and config, and a database it lists may have no point at
+    ///   all yet (all its metrics 0): it is reported as it is.
+    /// </remarks>
+    public async Task<ReadOnlyMemory<byte>> DatabasesAsync(string snapshotDate, IReadOnlyList<string> primaries, CancellationToken ct)
+    {
+        var rows = new ArrayBufferWriter<byte>(4 * 1024);
+        var sink = new RowSink(rows);
+        foreach (var process in primaries)
+        {
+            var path = $"/processes/{Uri.EscapeDataString(process)}/databases";
+            var names = (await _api.ListAsync(path, $"the databases of {process}", ct))
+                .Select(d => Str(d, "databaseName"))
+                .Where(n => n.Length > 0 && !MongoCatalog.SkippedDatabases.Contains(n))
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal);
+            foreach (var database in names)
+            {
+                using var doc = await _api.GetJsonAsync($"{path}/{Uri.EscapeDataString(database)}/measurements?granularity=PT1H&period={MeasurementPeriod}",
+                    $"the measurements of database {database} on {process}", ct);
+                var newest = NewestValues(doc.RootElement);
+                var w = sink.Writer;
+                w.WriteStartObject();
+                w.WriteString("snapshot_date"u8, snapshotDate);
+                w.WriteString("process"u8, process);
+                w.WriteString("database"u8, database);
+                foreach (var (column, metric) in DatabaseMetrics)
+                {
+                    w.WriteNumber(column, newest.GetValueOrDefault(metric));
+                }
+                w.WriteEndObject();
+                sink.EndRow();
+                TaskHeartbeat.Beat();
+            }
+        }
+        return rows.WrittenMemory;
+    }
+
+    /// <summary>Each measurement's newest point with a value, by name. A point without one (null) is skipped, never read as 0.</summary>
+    internal static Dictionary<string, long> NewestValues(JsonElement root)
+    {
+        var values = new Dictionary<string, long>(StringComparer.Ordinal);
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("measurements", out var measurements) || measurements.ValueKind != JsonValueKind.Array)
+        {
+            return values;
+        }
+        foreach (var measurement in measurements.EnumerateArray())
+        {
+            if (!measurement.TryGetProperty("dataPoints", out var points) || points.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+            DateTime? newestAt = null;
+            foreach (var point in points.EnumerateArray())
+            {
+                if (point.ValueKind != JsonValueKind.Object || !point.TryGetProperty("value", out var value) || value.ValueKind != JsonValueKind.Number)
+                {
+                    continue;
+                }
+                // Atlas lists points oldest first; the time decides all the same, and one that does not parse counts as
+                // later than the ones before it.
+                var at = DateTime.TryParse(Str(point, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
+                    ? t
+                    : newestAt ?? DateTime.MinValue;
+                if (newestAt == null || at >= newestAt)
+                {
+                    newestAt = at;
+                    values[Str(measurement, "name")] = value.TryGetInt64(out var n) ? n : (long)Math.Round(value.GetDouble());
+                }
+            }
+        }
+        return values;
     }
 
     private bool IsOwnDownload(JsonElement e) =>

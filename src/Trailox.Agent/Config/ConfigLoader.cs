@@ -162,46 +162,93 @@ public static class ConfigLoader
             }
 
             ResolvePassword(e, where, secrets, problems);
+            ResolveCatalogPassword(e, engine, where, secrets, problems);
         }
         return problems;
     }
 
+    /// <summary>A pair of keys that say where one credential is: an environment variable, or a file.</summary>
+    private sealed record SecretKeys(string Env, string File, string EnvExample, string FileExample);
+
+    private static readonly SecretKeys PasswordKeys = new("password_env", "password_file", "TRAILOX_CH_PROD_PASSWORD", "/run/secrets/ch_prod");
+
+    private static readonly SecretKeys CatalogPasswordKeys =
+        new("catalog_password_env", "catalog_password_file", "TRAILOX_ATLAS_CATALOG_PASSWORD", "/run/secrets/atlas_catalog");
+
     private static void ResolvePassword(EndpointConfig e, string where, ISecretReader secrets, List<string> problems)
     {
-        var hasEnv = !string.IsNullOrWhiteSpace(e.PasswordEnv);
-        var hasFile = !string.IsNullOrWhiteSpace(e.PasswordFile);
+        if (ReadSecret(PasswordKeys, e.PasswordEnv, e.PasswordFile, "", where, secrets, problems) is { } password)
+        {
+            e.Password = password;
+        }
+    }
+
+    /// <summary>
+    /// The optional catalog user (1.9.0, MongoDB Atlas): its name with exactly one password reference, or none of
+    /// the three keys. A reference without a name is refused rather than ignored: it says the customer meant one.
+    /// </summary>
+    private static void ResolveCatalogPassword(EndpointConfig e, IEngine? engine, string where, ISecretReader secrets, List<string> problems)
+    {
+        var hasUser = !string.IsNullOrWhiteSpace(e.CatalogUsername);
+        var hasSecret = !string.IsNullOrWhiteSpace(e.CatalogPasswordEnv) || !string.IsNullOrWhiteSpace(e.CatalogPasswordFile);
+        if (!hasUser && !hasSecret)
+        {
+            return;
+        }
+        if (engine is { TakesCatalogUser: false })
+        {
+            problems.Add($"{where}: catalog_username, catalog_password_env and catalog_password_file are for engine mongodb only");
+            return;
+        }
+        if (!hasUser)
+        {
+            problems.Add($"{where}.catalog_username: required with catalog_password_env or catalog_password_file (the database user whose password they hold)");
+            return;
+        }
+        if (ReadSecret(CatalogPasswordKeys, e.CatalogPasswordEnv, e.CatalogPasswordFile, " with catalog_username", where, secrets, problems) is { } password)
+        {
+            e.CatalogPassword = password;
+        }
+    }
+
+    /// <summary>The credential one pair of keys points at, or null with the problem added. Never prints the credential.</summary>
+    private static string? ReadSecret(SecretKeys keys, string? env, string? file, string requiredWith, string where, ISecretReader secrets, List<string> problems)
+    {
+        var hasEnv = !string.IsNullOrWhiteSpace(env);
+        var hasFile = !string.IsNullOrWhiteSpace(file);
         if (hasEnv == hasFile)
         {
-            problems.Add($"{where}: exactly one of password_env or password_file is required");
-            return;
+            problems.Add($"{where}: exactly one of {keys.Env} or {keys.File} is required{requiredWith}");
+            return null;
         }
         // Never expanded: they already say where the credential is, and ${CH_PW} would make the password
         // itself the name - then printed in the problem below.
-        if (hasEnv && e.PasswordEnv!.Contains("${"))
+        if (hasEnv && env!.Contains("${"))
         {
-            problems.Add($"{where}.password_env: password_env takes the variable's name, e.g. password_env: TRAILOX_CH_PROD_PASSWORD; ${{...}} is not expanded here");
-            return;
+            problems.Add($"{where}.{keys.Env}: {keys.Env} takes the variable's name, e.g. {keys.Env}: {keys.EnvExample}; ${{...}} is not expanded here");
+            return null;
         }
-        if (hasFile && e.PasswordFile!.Contains("${"))
+        if (hasFile && file!.Contains("${"))
         {
-            problems.Add($"{where}.password_file: password_file takes a path, e.g. password_file: /run/secrets/ch_prod; ${{...}} is not expanded here");
-            return;
+            problems.Add($"{where}.{keys.File}: {keys.File} takes a path, e.g. {keys.File}: {keys.FileExample}; ${{...}} is not expanded here");
+            return null;
         }
         try
         {
-            var password = hasEnv ? secrets.FromEnvironment(e.PasswordEnv!) : secrets.FromFile(e.PasswordFile!);
-            if (string.IsNullOrEmpty(password))
+            var secret = hasEnv ? secrets.FromEnvironment(env!) : secrets.FromFile(file!);
+            if (string.IsNullOrEmpty(secret))
             {
                 problems.Add(hasEnv
-                    ? $"{where}: environment variable {e.PasswordEnv} is not set or empty"
-                    : $"{where}: {e.PasswordFile} is empty");
-                return;
+                    ? $"{where}: environment variable {env} is not set or empty"
+                    : $"{where}: {file} is empty");
+                return null;
             }
-            e.Password = password;
+            return secret;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            problems.Add($"{where}: cannot read {e.PasswordFile}: {ex.Message}");
+            problems.Add($"{where}: cannot read {file}: {ex.Message}");
+            return null;
         }
     }
 }

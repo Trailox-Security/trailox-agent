@@ -21,14 +21,18 @@ Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snow
 - **MongoDB Atlas is the one exception to "rows as the database returned them":** the agent reads Atlas's
   log files, replaces every value in every command by its type (`{"customer": 4957}` becomes
   `{"customer": "?number"}`), and ships one row per minute and group with a count. The values never
-  leave your network. See [MongoDB Atlas](#mongodb-atlas).
+  leave your network. It runs no `SELECT` either: it connects to the cluster **only** with the optional
+  catalog user, to list databases and collections and their sizes, and never reads a document. See
+  [MongoDB Atlas](#mongodb-atlas).
 
 ## What leaves your network
 
 - The rows of the audit views for the requested windows: statements run, and logins and sessions
   where the database records them. See each engine below for the exact views.
 - Once a day, a catalog snapshot: tables, columns, users and grants. On Databricks (from 1.6.0)
-  it also includes the names of the workspace's service principals.
+  it also includes the names of the workspace's service principals. On MongoDB Atlas (from 1.9.0) it is
+  each database's size, and with the optional catalog user each collection's name, document count and
+  sizes.
 - **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
   so it never leaves the database.
 - `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
@@ -87,6 +91,7 @@ be committed. Any other value can be written in the file or taken from the envir
 | `clusterName` | Engine-specific: the cluster, warehouse or workgroup (see below) |
 | `username` | The monitoring account the setup script created |
 | `password_env` / `password_file` | Where the credential comes from: an environment variable or a mounted file |
+| `catalog_username`, `catalog_password_env` / `catalog_password_file` | MongoDB Atlas only, optional (1.9.0): the catalog user that lists collections and their sizes, and exactly one place its password comes from. See [MongoDB Atlas](#mongodb-atlas) |
 | `options` | Engine-specific extras (see below) |
 | `collectSessionLog` | Also ship login and session events (default `true`) |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
@@ -131,9 +136,10 @@ Helm chart or a compose file can supply it. A value written in the file works as
 - The variable's content is taken as text: YAML in it is not read, and `${...}` in it is not expanded
   again. Like any value, it loses its trailing line breaks (a value from a file-backed ConfigMap or
   Secret ends in one), and any other control character is a config problem.
-- Credentials still come only through `password_env` and `password_file`, which are never expanded. The
-  agent key's variable, and every variable a `password_env` names, cannot be used as a value: values are
-  reported to Trailox and can appear in error messages.
+- Credentials still come only through `password_env` and `password_file` (and the catalog user's
+  `catalog_password_env` and `catalog_password_file`), which are never expanded. The agent key's variable,
+  and every variable a `password_env` or `catalog_password_env` names, cannot be used as a value: values
+  are reported to Trailox and can appear in error messages.
 - Tools that expand `${...}` themselves need it escaped to pass it on: `$${...}` in a Terraform
   template or in a compose file that inlines `agent.yaml`, and a quoted delimiter (`<<'EOF'`) for a
   shell heredoc. Helm does not expand it.
@@ -254,12 +260,15 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 
 ### MongoDB Atlas
 
-A dedicated Atlas cluster (M10 or larger), through the Atlas Administration API over HTTPS. The agent
-never connects to the cluster itself. From 1.8.0.
+A dedicated Atlas cluster (M10 or larger), through the Atlas Administration API over HTTPS. From 1.8.0.
+The agent connects to the cluster itself **only** with the optional catalog user (from 1.9.0), to list
+databases and collections and their sizes; it never reads a document. Without that user it never
+connects to the cluster.
 
 - **Reads:** each member's server log and audit log files (for a sharded cluster, its `mongos`
   routers'), the project's events, and daily the database users, custom roles and IP access list.
-  Atlas keeps log files 30 days.
+  Atlas keeps log files 30 days. Daily from 1.9.0, each database's size as Atlas measures it on the
+  cluster's primaries (each shard's, on a sharded cluster).
 - **What leaves your network:** per minute and group, a count, the query's **shape** (every value
   replaced by its type), the user, client address, namespace and result, and the metrics of slow
   queries; one row per connection and sign-in (user, client address, application and driver); failed
@@ -272,6 +281,26 @@ never connects to the cluster itself. From 1.8.0.
 - **agent.yaml:** `host` = the project id (24 hex, Project Settings); `clusterName` = the cluster's name;
   `username` = the service account's client id; `password_env`/`password_file` = its secret.
   `port`/`tls` are ignored (HTTPS 443).
+- **Collections (optional, from 1.9.0):** to list each collection with its document count and sizes,
+  add a catalog user. Without one, Trailox shows database sizes only.
+  1. In Atlas, a custom role (for example `trailoxCatalog`) with exactly four actions on all databases:
+     `listDatabases`, `listCollections`, `collStats` and `dbStats`. These are enough, and none of them
+     can read a document. Add each through the action list's search box: ticking a group heading adds
+     every action of that group.
+  2. A database user (for example `trailox_catalog`) with only that role, restricted to the cluster.
+  3. The agent's outbound address on the project's IP access list (Network Access), or a PrivateLink
+     path from the agent to the cluster. The log reading never needed one; this does.
+  4. In `agent.yaml`: `catalog_username` and exactly one of `catalog_password_env` or
+     `catalog_password_file`.
+
+  The agent then connects over TLS as that user (application name `trailox-agent/<version> catalog`),
+  once a day to run `listDatabases`, `listCollections` and `$collStats` (counts and sizes from
+  metadata), and at each probe to run `connectionStatus`. Never `find`, and never a document. The probe
+  reports a `catalog` check: `ok`; `warn` when the user's role also allows reading documents (`find`)
+  or changing anything, which the agent never does but should not be granted; `fail` when the agent
+  cannot connect or sign in, which leaves the logs unaffected. Trailox reports that user as the source's
+  monitoring user, so its own sign-ins and commands are filed as the platform's. At most 10,000
+  collections a day; past that the list says it is incomplete.
 - **Coverage:** with Atlas auditing off, Trailox sees sign-ins, slow queries and project changes. Every
   operation needs auditing on with "audit authorization successes"; Trailox generates the filter, and
   you apply it in Atlas.

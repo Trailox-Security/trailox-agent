@@ -82,13 +82,18 @@ public sealed class EndpointSession
         }
     }
 
+    /// <remarks>
+    /// <c>monitorUser</c> is the account that signs in to the database: the catalog user when there is one (1.9.0,
+    /// MongoDB Atlas, where <see cref="EndpointConfig.Username"/> is an API service account that never does), so
+    /// Trailox files that user's own sign-ins and commands as the platform's.
+    /// </remarks>
     public EndpointReport Report() => new()
     {
         Alias = Config.Alias,
         Engine = Config.Engine,
         Kind = Config.Kind,
         ClusterName = Config.ClusterName,
-        MonitorUser = Config.Username,
+        MonitorUser = string.IsNullOrWhiteSpace(Config.CatalogUsername) ? Config.Username : Config.CatalogUsername,
         CollectSessionLog = Config.CollectSessionLog,
         StoreRawQueryText = Config.StoreRawQueryText,
         ExcludedDatabases = Config.ExcludedDatabases,

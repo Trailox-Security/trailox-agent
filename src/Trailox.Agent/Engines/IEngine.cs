@@ -20,6 +20,12 @@ public interface IEngine
     /// </summary>
     IReadOnlyList<string> Validate(EndpointConfig endpoint);
 
+    /// <summary>
+    /// Whether an endpoint may name the optional catalog user (catalog_username and its password reference,
+    /// resolved by <see cref="ConfigLoader"/>). MongoDB Atlas only (1.9.0); every other engine refuses the keys.
+    /// </summary>
+    bool TakesCatalogUser => false;
+
     /// <summary>A live connection to one endpoint of this engine.</summary>
     IEngineSource CreateSource(EndpointConfig endpoint, IHttpClientFactory httpClientFactory);
 }

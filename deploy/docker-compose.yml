@@ -27,6 +27,7 @@ services:
       TRAILOX_CH_PROD_PASSWORD: ${TRAILOX_CH_PROD_PASSWORD}     # referenced by password_env in agent.yaml
       # TRAILOX_DBX_SECRET: ${TRAILOX_DBX_SECRET}                # a Databricks service principal's OAuth secret
       # TRAILOX_RS_PASSWORD: ${TRAILOX_RS_PASSWORD}              # a Redshift monitoring user's password
+      # TRAILOX_ATLAS_SECRET: ${TRAILOX_ATLAS_SECRET}            # a MongoDB Atlas service account's secret
       # CH_HOST: clickhouse.internal                            # a value agent.yaml refers to as ${CH_HOST} (1.5.0 or later)
       # HTTPS_PROXY: http://proxy.internal:3128
       # NO_PROXY: clickhouse.internal,10.0.0.0/8
@@ -37,3 +38,4 @@ services:
       - ./agent.yaml:/etc/trailox/agent.yaml:ro
       # - ./corp-ca.pem:/etc/trailox/corp-ca.pem:ro
       # - ./trailox_agent.p8:/run/secrets/sf_key:ro             # a Snowflake service user's private key (password_file)
+      # - ./atlas_catalog.pw:/run/secrets/atlas_catalog:ro      # the MongoDB catalog user's password (catalog_password_file, 1.9.0)

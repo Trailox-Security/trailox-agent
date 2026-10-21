@@ -58,6 +58,21 @@ public sealed class EndpointConfig
     [YamlMember(Alias = "password_file", ApplyNamingConventions = false)]
     public string? PasswordFile { get; set; }
 
+    /// <summary>
+    /// A second, optional account that signs in to the database itself, where <see cref="Username"/> cannot.
+    /// MongoDB Atlas only (1.9.0): a database user whose role lists databases and collections and their sizes,
+    /// and reads no document. Empty: none.
+    /// </summary>
+    [YamlMember(Alias = "catalog_username", ApplyNamingConventions = false)]
+    public string CatalogUsername { get; set; } = "";
+
+    /// <summary>The catalog user's password, by environment variable. Exactly one of the two with <see cref="CatalogUsername"/>.</summary>
+    [YamlMember(Alias = "catalog_password_env", ApplyNamingConventions = false)]
+    public string? CatalogPasswordEnv { get; set; }
+
+    [YamlMember(Alias = "catalog_password_file", ApplyNamingConventions = false)]
+    public string? CatalogPasswordFile { get; set; }
+
     public bool CollectSessionLog { get; set; } = true;
     public bool StoreRawQueryText { get; set; } = true;
     public List<string> ExcludedDatabases { get; set; } = new();
@@ -83,4 +98,8 @@ public sealed class EndpointConfig
     /// <summary>Resolved at start-up by the loader; never serialized, never logged.</summary>
     [YamlIgnore]
     public string Password { get; internal set; } = "";
+
+    /// <summary>The catalog user's password, as <see cref="Password"/>; empty without a catalog user.</summary>
+    [YamlIgnore]
+    public string CatalogPassword { get; internal set; } = "";
 }
