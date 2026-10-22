@@ -275,9 +275,9 @@ connects to the cluster.
   sign-ins per minute and connection; project events; the catalog snapshot. Never a value from a
   command, a document, or the error text of a failed sign-in.
 - **Account:** an Atlas service account with **Project Read Only** and **Project Cluster Log Viewer**
-  on the project. Neither can read a document or change access. If the service account has an API
-  access list, add the agent's outbound address to it: Atlas checks it even when your organization does
-  not require one.
+  on the project (Project Read Only alone when the logs come from S3, below). Neither can read a document
+  or change access. If the service account has an API access list, add the agent's outbound address to it:
+  Atlas checks it even when your organization does not require one.
 - **agent.yaml:** `host` = the project id (24 hex, Project Settings); `clusterName` = the cluster's name;
   `username` = the service account's client id; `password_env`/`password_file` = its secret.
   `port`/`tls` are ignored (HTTPS 443).
@@ -301,13 +301,27 @@ connects to the cluster.
   cannot connect or sign in, which leaves the logs unaffected. Trailox reports that user as the source's
   monitoring user, so its own sign-ins and commands are filed as the platform's. At most 10,000
   collections a day; past that the list says it is incomplete.
+- **Logs from your Atlas S3 export (optional, from 1.10.0):** if you already export the cluster's logs to S3
+  with Atlas's log integration (Project Owner sets it up; M10+ on MongoDB 7.0+; log types Mongod and Mongod
+  Audit, or Mongos and Mongos Audit for a sharded cluster), the agent can read them from your bucket instead
+  of downloading them from Atlas: `options: { log_source: s3, s3_bucket: <bucket>, s3_region: <its region>,
+  s3_prefix: <the integration's prefix> }`. The agent reads the bucket as its own AWS identity, from the AWS
+  SDK's default chain: on Kubernetes, IRSA or EKS Pod Identity (`serviceAccount` in the chart). That identity
+  needs `s3:ListBucket` on the bucket for `<prefix>/<clusterName>/` and `s3:GetObject` on the objects under
+  it, plus `kms:Decrypt` when the bucket uses SSE-KMS; no AWS secret goes in `agent.yaml`. The export starts
+  where its live objects start: the hours it backfills when first enabled are not read. 🔴 The export is
+  uncompressed, about 19 times the bytes of the API's gzip files: run the agent in the bucket's region,
+  where S3 reads carry no transfer charge.
 - **Coverage:** with Atlas auditing off, Trailox sees sign-ins, slow queries and project changes. Every
   operation needs auditing on with "audit authorization successes"; Trailox generates the filter, and
   you apply it in Atlas.
 - **Your Activity Feed:** Atlas records each log download as an event, about 860 a day for a
   3-member cluster. Trailox does not ship those events back.
 - **Resources:** reading a busy cluster's audit log is CPU work. Give the agent **1 CPU** for MongoDB
-  sources (`resources.limits.cpu: 1` in the chart); memory stays at 512Mi.
+  sources (`resources.limits.cpu: 1` in the chart); memory stays at 512Mi. From the S3 export a line costs
+  about 2.3 times as much CPU (it is parsed twice and its keys come in any order): measured with Full
+  audit, 1 CPU keeps up with about 75,000 operations a second and 500m with about 44,000. A busier cluster
+  is cheaper to read through the Admin API.
 
 ## Security
 

@@ -42,10 +42,11 @@ node to check that a recent window is published.
 
 ## The S3 export form (`s3`)
 
-The agent has no S3 reader yet (1.8.x refuses `log_source: s3`). The export form times what the engine's
-classes cost on the export's lines, through `LineForm.Rewritten`, and checks that they ship the same rows
-as from the API's lines. The S3 side of the read (`PlainLines`, `S3Record`) is bench code standing in for a
-reader. The form is the one measured on a test cluster's export:
+The export form times what the agent's S3 reader (1.10.0) costs on the export's lines, and checks that it ships
+the same rows as from the API's lines. It reads each object with the engine's own classes: `LogLines` over the
+plain file, `S3Envelope` for each record's inner line, and the processor in `LineForm.Rewritten`. Only listing and
+fetching from S3 are left out: objects are read from disk in name order. The form is the one measured on a test
+cluster's export:
 
 - objects are plain JSON lines, not gzip: at most 10,000 records, and an object over 10 MiB is split into
   `partNNNNN-of-NNNNN` files at line boundaries;
@@ -72,12 +73,8 @@ stream:
 `selftest` generates two small corpora (typical and hostile) and their export form, runs one pass of
 each form with a small group cap, keeps every shipped byte, and fails unless both forms pass the checks
 above, both ship the same rows, and no literal value written by the generator (every literal string
-starts with `lit-`) appears in any row.
-
-One difference between the forms is known and reported as `KNOWN`, not as a failure: the export's rewritten
-slow line of a `findAndModify` reads as an `update`, so those `mongo_slow_ops` rows ship with
-`"command":"update"` and are otherwise the same. It is tolerated only when it is the whole difference, row for
-row; anything else still fails. It waits for the S3 reader.
+starts with `lit-`) appears in any row. Until 1.10.0 a slow `findAndModify` could ship as `update` from the export form
+(its `update` field came first) and was tolerated as a known difference; now any difference fails.
 
 ## Profiles
 

@@ -72,9 +72,24 @@ caConfigMap: ""
 # MongoDB Atlas sources (agent 1.8.0): reading a busy cluster's audit log is CPU work. At 100,000
 # operations a second the agent has about 1.6x to spare at 500m and about 3x at 1 CPU, measured. Give it
 # limits.cpu: 1 for MongoDB; memory stays at 512Mi.
+# From the Atlas S3 log export (1.10.0, options.log_source: s3) a line costs about 2.3 times the CPU of the
+# Admin API's files, measured with Full audit: 1 CPU keeps up with about 75,000 operations a second and 500m
+# with about 44,000. A busier cluster is cheaper to read through the Admin API.
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits:   { cpu: 500m, memory: 512Mi }
+
+# The pod's Kubernetes service account. Needed only for an AWS identity: a MongoDB Atlas source that reads the
+# Atlas S3 log export (agent 1.10.0, options.log_source: s3) reads the bucket as the pod's AWS identity, from the
+# AWS SDK's default chain. With IRSA, create one annotated with the IAM role; with EKS Pod Identity, create or name
+# the one the association uses. The role needs s3:ListBucket on the bucket for the cluster's prefix and
+# s3:GetObject on its objects (kms:Decrypt too when the bucket uses SSE-KMS). Unset, the pod runs as the
+# namespace's default service account, as before.
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+#   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/trailox-agent-atlas-logs
 
 nodeSelector: {}
 tolerations: []

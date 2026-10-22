@@ -75,6 +75,11 @@ endpoints:
   #                                                    #   listDatabases, listCollections, collStats and dbStats;
   #                                                    #   the agent's address must be on the project's IP access list
   #   catalog_password_file: /run/secrets/atlas_catalog   # its password; or catalog_password_env
+  #   options:                                         # optional (1.10.0): the logs from your Atlas S3 log export
+  #     log_source: s3                                 #   instead of the Admin API (default atlas_api)
+  #     s3_bucket: my-atlas-logs                       #   the bucket the Atlas log integration writes to
+  #     s3_region: eu-west-1                           #   its region; read as the agent's own AWS identity
+  #     s3_prefix: atlas-logs                          #   the integration's prefix ("" when it has none)
   #   pollMinutes: 10
   #   backfillDays: 7                                  # Atlas keeps log files 30 days
 

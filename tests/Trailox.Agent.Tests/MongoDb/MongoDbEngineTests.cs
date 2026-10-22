@@ -61,12 +61,53 @@ public class MongoDbEngineTests
     }
 
     [Fact]
-    public void The_S3_log_source_is_refused_until_an_agent_reads_it()
+    public void The_S3_log_source_takes_its_bucket_region_and_prefix_trimmed()
     {
         var e = Endpoint();
         e.Options["log_source"] = "s3";
+        e.Options["s3_bucket"] = " my-atlas-logs ";
+        e.Options["s3_region"] = "eu-west-1";
+        e.Options["s3_prefix"] = "atlas-logs/prod";
 
-        Assert.Contains(new MongoDbEngine().Validate(e), p => p.Contains("s3 is not supported by this agent version yet", StringComparison.Ordinal));
+        Assert.Empty(new MongoDbEngine().Validate(e));
+        Assert.Equal("my-atlas-logs", e.Options["s3_bucket"]);
+    }
+
+    [Theory]
+    [InlineData("", "eu-west-1", "", "options.s3_bucket")]
+    [InlineData("My_Bucket", "eu-west-1", "", "options.s3_bucket")]
+    [InlineData("arn:aws:s3::123456789012:accesspoint/abcd.mrap", "eu-west-1", "", "options.s3_bucket: the bucket's name; an access point")]
+    [InlineData("my-atlas-logs", "", "", "options.s3_region")]
+    [InlineData("my-atlas-logs", "Ireland", "", "options.s3_region")]
+    [InlineData("my-atlas-logs", "eu-west-1", "/atlas-logs", "options.s3_prefix")]
+    [InlineData("my-atlas-logs", "eu-west-1", "atlas-logs/", "options.s3_prefix")]
+    public void A_wrong_S3_option_says_what_it_should_be(string bucket, string region, string prefix, string expected)
+    {
+        var e = Endpoint();
+        e.Options["log_source"] = "s3";
+        e.Options["s3_bucket"] = bucket;
+        e.Options["s3_region"] = region;
+        e.Options["s3_prefix"] = prefix;
+
+        Assert.Contains(new MongoDbEngine().Validate(e), p => p.StartsWith(expected, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void S3_options_without_the_S3_log_source_are_refused()
+    {
+        var e = Endpoint();
+        e.Options["s3_bucket"] = "my-atlas-logs";
+
+        Assert.Equal("options.s3_bucket: only with log_source: s3", Assert.Single(new MongoDbEngine().Validate(e)));
+    }
+
+    [Fact]
+    public void An_unknown_log_source_names_both()
+    {
+        var e = Endpoint();
+        e.Options["log_source"] = "gcs";
+
+        Assert.Equal("options.log_source: 'gcs' must be atlas_api or s3", Assert.Single(new MongoDbEngine().Validate(e)));
     }
 
     [Fact]

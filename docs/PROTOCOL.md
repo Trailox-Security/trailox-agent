@@ -412,6 +412,33 @@ document.
 **Refused by the probe:** Free (M0), Flex and Serverless clusters, which keep no downloadable logs, and a
 paused cluster.
 
+**The Atlas S3 log export (from 1.10.0).** With `options.log_source: s3` the log files come from the
+customer's own bucket, where the Atlas log integration writes them, instead of the `logs/*.gz` calls above;
+every other call stays, and the service account needs Project Read Only only. The agent reads the bucket as its
+own AWS identity, from the AWS SDK's default chain (IRSA, EKS Pod Identity, ECS, the instance profile, or
+`AWS_*` variables), in `options.s3_region`. Keys are
+`{s3_prefix}/{clusterName}/{host}/{dir}/[{yyyy-MM-dd}/]{yyyyMMddTHHmmss.fffZ}-{dir}[.partNNNNN-of-NNNNN].log`, where
+`host` is the process's internal name (its `/processes` id without the port) and `dir` is `mongod` and
+`mongod_audit`, or `mongos` and `mongos_audit` for a sharded cluster's routers; the date folder is Atlas's
+"Daily folders" path choice, found by listing. Each object is plain JSON lines, each line an envelope whose `log`
+member is the server's line as a JSON string, re-encoded by the export (keys in any order, arrays as objects
+keyed `"1"`..`"n"`, nulls left out); the envelope's own `timestamp` is never read.
+
+| call | when |
+|---|---|
+| `ListObjectsV2` of a process's folder from `StartAfter` = the window's start | each log task, per process and log type: the objects named from the window's start to its end plus 5 minutes (an object is named after its newest line, and at most 174 s after its oldest, measured) |
+| `GetObject`, up to 8 at a time per process | each log task, every object selected; lines outside the window are dropped by their own time |
+| `ListObjectsV2` of a server-log folder from the window's end plus 5 minutes | completeness, per process |
+| `ListObjectsV2` with delimiter `/`, and `GetObject` of the first 64 KiB of an object | the probe's `s3` check; and once per agent process, the export's live start |
+
+The probe's `s3` check fails when a process's server-log folder has no object, or its newest object is not an
+export record, and warns when the export wrote nothing for a process in the last 10 minutes. `earliestEventMicros`
+is the export's live start: the latest, across the processes, of the first object named less than 10 minutes after
+its first line. Before it are the export's first objects, written when it was enabled and holding each process's
+log from before then, which are never read. **Completeness** in this form: each process's server-log folder must
+hold an object named after the window's end plus 5 minutes. The export reorders lines within an object by up to 38 s
+(measured), so a minute ships once the reader is 60 s past it, not 2 s (below).
+
 **The optional catalog user (from 1.9.0).** With `catalog_username` set, and only then, the agent also
 connects to the cluster itself, with the MongoDB driver, to its SRV connection string
 (`connectionStrings.standardSrv` from the cluster read above): TLS, SCRAM against `admin` as that user,
@@ -462,7 +489,8 @@ read as an array, and null fields left out. `shape_hash` is XxHash3-64 of the sh
 
 **Groups:** at most 20,000 groups a minute per member; past that, a minute's new keys go to one row whose text
 columns are `__other__`, with the real counts. A line for a minute already shipped in the same task goes into
-that minute's next `part`.
+that minute's next `part`. A minute ships once the file is 2 s past it (the Admin API's files are out of order by at
+most 0.1 s), or 60 s from the S3 export (from 1.10.0).
 
 Times are ISO 8601 UTC strings with microseconds. Every column is sent in every row. An audited operation whose line cannot be parsed is still shipped, counted, with `command` = `?unparsed`; a document nested deeper than the shape follows is written `?deep`.
 

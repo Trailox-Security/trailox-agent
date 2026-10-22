@@ -159,6 +159,64 @@ public class MongoLogProcessorTests
         Assert.Equal(120, Assert.Single(rows).GetProperty("duration_ms_sum").GetInt64());
     }
 
+    /// <summary>
+    /// 🔴 A findAndModify's own "update" field is also a command name, and the S3 export can put it first: until 1.10.0
+    ///    such a slow line shipped as update (5 of 183 slow rows in the bench, 2026-10-20). The command's key holds the
+    ///    collection; "update" holds a document.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"update":{"$inc":{"n":1}},"query":{"_id":7},"findAndModify":"orders","new":true,"$db":"shop"}""", "findAndModify")]
+    [InlineData("""{"explain":true,"pipeline":{"1":{"$match":{"a":1}}},"aggregate":"orders","$db":"shop"}""", "aggregate")]
+    [InlineData("""{"aggregate":1,"pipeline":{"1":{"$currentOp":{}}},"$db":"admin"}""", "aggregate")]
+    [InlineData("""{"verbosity":"queryPlanner","explain":{"find":"orders","filter":{"a":1}},"$db":"shop"}""", "explain")]
+    [InlineData("""{"$db":"shop","updates":{"1":{"q":{"a":1},"u":{"$set":{"b":2}}}},"update":"orders"}""", "update")]
+    public void A_slow_command_is_named_by_the_known_key_that_holds_its_collection(string command, string expected)
+    {
+        var line = """{"attr":{"command":@0@,"ns":"shop.orders","durationMillis":150},"msg":"Slow query","ctx":"conn9","id":51803,"t":{"$date":"2026-10-19T09:00:05.000+00:00"}}""".Replace("@0@", command);
+
+        var (rows, p) = Run(MongoLogStream.SlowOps, MongoLogProcessor.DefaultGroupCap, LineForm.Rewritten, line);
+
+        Assert.Equal(1, p.Counts.Kept);
+        Assert.Equal(expected, Assert.Single(rows).GetProperty("command").GetString());
+    }
+
+    /// <summary>
+    /// The S3 export reorders records within a batch by up to 38 s (PLAN_S3.md §2.2): the same disorder that opens a
+    /// later part of a minute in an Admin API file ships as one row from the export.
+    /// </summary>
+    [Fact]
+    public void Lines_out_of_order_by_40_seconds_ship_as_one_part_from_the_S3_export_and_two_from_the_API()
+    {
+        string[] times = ["2026-10-19T09:00:50.000+00:00", "2026-10-19T09:01:30.000+00:00", "2026-10-19T09:00:51.000+00:00"];
+
+        // The reader lets the processor ship closed minutes as it goes; here after every line.
+        (List<JsonElement> Rows, MongoLogProcessor Processor) Flushed(LineForm form, Func<string, string> line)
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            var processor = new MongoLogProcessor(MongoLogStream.Ops, "cluster0-shard-00-02.example.mongodb.net", "REPLICA_PRIMARY", Start, End,
+                new RowSink(buffer), MongoLogProcessor.DefaultGroupCap, form);
+            foreach (var t in times)
+            {
+                processor.Process(Encoding.UTF8.GetBytes(line(t)));
+                processor.FlushClosedMinutes();
+            }
+            processor.Finish();
+            var rows = Encoding.UTF8.GetString(buffer.WrittenSpan).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => JsonDocument.Parse(l).RootElement.Clone()).ToList();
+            return (rows, processor);
+        }
+
+        var (api, apiProcessor) = Flushed(LineForm.Api, t => AuthCheck(t));
+        var (s3, s3Processor) = Flushed(LineForm.Rewritten, AuthCheckS3);
+
+        Assert.Equal(1, apiProcessor.LateLines);
+        Assert.Equal(3, api.Count);
+        Assert.Equal(0, s3Processor.LateLines);
+        Assert.Equal(2, s3.Count);
+        Assert.Equal(2, s3.Single(r => r.GetProperty("minute").GetString()!.StartsWith("2026-10-19T09:00", StringComparison.Ordinal))
+            .GetProperty("event_count").GetInt64());
+    }
+
     [Fact]
     public void No_literal_value_reaches_an_ops_row()
     {

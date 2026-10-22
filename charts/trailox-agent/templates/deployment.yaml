@@ -19,6 +19,10 @@ spec:
       annotations:
         checksum/config: {{ toYaml .Values.config | sha256sum }}
     spec:
+      {{- with include "trailox-agent.serviceAccountName" . }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      # IRSA and EKS Pod Identity project their own token for AWS; the Kubernetes API token stays unmounted.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

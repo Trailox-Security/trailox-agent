@@ -25,19 +25,35 @@ public sealed class MongoSource : IEngineSource
     private const int HeartbeatLines = 100_000;
     private const int FlushLines = 4096;
 
+    /// <summary>How many objects of one process the S3 reader fetches ahead of the one it reads.</summary>
+    private const int S3Prefetch = 8;
+
+    /// <summary>An S3 source warns when a node's newest object is older than this: the export writes about one a minute.</summary>
+    private static readonly TimeSpan S3StaleAfter = TimeSpan.FromMinutes(10);
+
     private readonly AtlasApi _api;
     private readonly EndpointConfig _endpoint;
     private readonly AtlasCatalog _catalog;
     private readonly Func<DateTime> _utcNow;
+    private readonly AtlasS3Export? _s3;
     private (DateTime At, string Topology, IReadOnlyList<AtlasProcess> Processes)? _processes;
+    private long? _s3LiveStart;
 
-    public MongoSource(HttpClient http, EndpointConfig endpoint, string baseUrl = AtlasApi.DefaultBaseUrl, Func<DateTime>? utcNow = null)
+    /// <param name="s3">The bucket of an S3 source (tests); null builds one from the endpoint's options with the AWS SDK.</param>
+    public MongoSource(HttpClient http, EndpointConfig endpoint, string baseUrl = AtlasApi.DefaultBaseUrl, Func<DateTime>? utcNow = null,
+        IS3Objects? s3 = null)
     {
         _endpoint = endpoint;
         _api = new AtlasApi(http, endpoint.Host, endpoint.Username, endpoint.Password, baseUrl);
         _catalog = new AtlasCatalog(_api, endpoint.Username);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         OpenCatalog = srv => MongoCatalogDriver.Open(srv, endpoint.ClusterName, endpoint.CatalogUsername, endpoint.CatalogPassword);
+        if (endpoint.Options.GetValueOrDefault("log_source") == MongoDbEngine.LogSourceS3)
+        {
+            _s3 = new AtlasS3Export(
+                s3 ?? new AwsS3Objects(endpoint.Options.GetValueOrDefault("s3_bucket", ""), endpoint.Options.GetValueOrDefault("s3_region", "")),
+                endpoint.Options.GetValueOrDefault("s3_prefix", ""), endpoint.ClusterName);
+        }
     }
 
     /// <summary>
@@ -80,12 +96,22 @@ public sealed class MongoSource : IEngineSource
         var (_, processes) = await ProcessesAsync(ct, refresh: true);
         checks.Add(Ok("processes", $"{processes.Count} process(es) whose logs are read"));
 
-        // The log download is what every window needs: refuse the source now rather than fail every task.
-        var now = new DateTimeOffset(_utcNow()).ToUnixTimeSeconds();
-        using (await _api.DownloadLogAsync(processes[0].Host, ServerLog(processes[0]), now - 300, now - 240, ct))
+        // The log files are what every window needs: refuse the source now rather than fail every task.
+        long earliest;
+        if (_s3 is null)
         {
+            var now = new DateTimeOffset(_utcNow()).ToUnixTimeSeconds();
+            using (await _api.DownloadLogAsync(processes[0].Host, ServerLog(processes[0]), now - 300, now - 240, ct))
+            {
+            }
+            checks.Add(Ok("query_log", "the server log downloads (Project Cluster Log Viewer)"));
+            earliest = Micros(_utcNow() - Retention);
         }
-        checks.Add(Ok("query_log", "the server log downloads (Project Cluster Log Viewer)"));
+        else
+        {
+            checks.Add(await S3CheckAsync(processes, ct));
+            earliest = _s3LiveStart ??= await S3LiveStartAsync(processes, ct);
+        }
 
         checks.Add(await SoftCheckAsync("grants", "/databaseUsers?itemsPerPage=1", "database users and roles read (Project Read Only)", ct));
         checks.Add(await SoftCheckAsync("events", "/events?itemsPerPage=1", "project events read (Project Read Only)", ct));
@@ -100,15 +126,15 @@ public sealed class MongoSource : IEngineSource
             Columns = new List<string>(),
             HasSessionLog = true,
             TextReadable = true,
-            EarliestEventMicros = Micros(_utcNow() - Retention),
-            EarliestSessionMicros = Micros(_utcNow() - Retention),
+            EarliestEventMicros = earliest,
+            EarliestSessionMicros = earliest,
             Atlas = new AtlasCaps
             {
                 ProjectId = _endpoint.Host,
                 ClusterName = _endpoint.ClusterName,
                 Tier = tier,
                 Topology = topology,
-                LogSource = MongoDbEngine.LogSourceApi,
+                LogSource = _s3 is null ? MongoDbEngine.LogSourceApi : MongoDbEngine.LogSourceS3,
                 Processes = processes.ToList(),
                 Checks = checks,
             },
@@ -157,11 +183,11 @@ public sealed class MongoSource : IEngineSource
     ///    check now runs first, on each node's last minutes of server log, as it always has for mongo_ops.
     /// </remarks>
     private Task<RowStream> ServerLogAsync(MongoLogStream stream, AgentTask task, CancellationToken ct) =>
-        StreamedAsync(stream, ServerLog, task, ct);
+        _s3 is null ? StreamedAsync(stream, ServerLog, task, ct) : S3StreamedAsync(stream, AtlasS3Export.ServerDir, task, ct);
 
     /// <summary>mongo_ops: the audit files, one line an operation at Full audit.</summary>
     private Task<RowStream> OpsAsync(AgentTask task, CancellationToken ct) =>
-        StreamedAsync(MongoLogStream.Ops, AuditLog, task, ct);
+        _s3 is null ? StreamedAsync(MongoLogStream.Ops, AuditLog, task, ct) : S3StreamedAsync(MongoLogStream.Ops, AtlasS3Export.AuditDir, task, ct);
 
     /// <summary>
     /// One stream's window, read from each node's <paramref name="logName"/> file: each minute is shipped as soon as
@@ -214,31 +240,52 @@ public sealed class MongoSource : IEngineSource
         using var response = opened ?? await _api.DownloadLogAsync(process.Host, logName, Seconds(task.StartMicros), SecondsUp(task.EndMicros), ct);
         await using var body = await response.Content.ReadAsStreamAsync(ct);
         using var lines = new LogLines(body);
-        var sinceFlush = 0;
-        var sinceBeat = 0;
-        while (await lines.FillAsync(ct))
-        {
-            while (lines.TryReadLine(out var line))
-            {
-                processor.Process(line);
-                if (++sinceFlush == FlushLines)
-                {
-                    sinceFlush = 0;
-                    processor.FlushClosedMinutes();
-                }
-                if (++sinceBeat == HeartbeatLines)
-                {
-                    sinceBeat = 0;
-                    TaskHeartbeat.Beat();
-                }
-            }
-            if (pipe != null && pipe.UnflushedBytes > 256 * 1024)
-            {
-                await pipe.FlushAsync(ct);
-            }
-        }
+        await new Feeder(processor, pipe, envelope: null).FeedAsync(lines, ct);
         processor.Finish();
         TaskHeartbeat.Beat();
+    }
+
+    /// <summary>Feeds a file's lines to one process's processor, flushing closed minutes and beating the heartbeat as it goes.</summary>
+    private sealed class Feeder
+    {
+        private readonly MongoLogProcessor _processor;
+        private readonly PipeWriter? _pipe;
+        private readonly S3Envelope? _envelope;
+        private int _sinceFlush;
+        private int _sinceBeat;
+
+        /// <param name="envelope">For S3 export objects: each line is an envelope whose inner line is processed.</param>
+        public Feeder(MongoLogProcessor processor, PipeWriter? pipe, S3Envelope? envelope)
+        {
+            _processor = processor;
+            _pipe = pipe;
+            _envelope = envelope;
+        }
+
+        public async Task FeedAsync(LogLines lines, CancellationToken ct)
+        {
+            while (await lines.FillAsync(ct))
+            {
+                while (lines.TryReadLine(out var line))
+                {
+                    _processor.Process(_envelope is null ? line : _envelope.Inner(line));
+                    if (++_sinceFlush == FlushLines)
+                    {
+                        _sinceFlush = 0;
+                        _processor.FlushClosedMinutes();
+                    }
+                    if (++_sinceBeat == HeartbeatLines)
+                    {
+                        _sinceBeat = 0;
+                        TaskHeartbeat.Beat();
+                    }
+                }
+                if (_pipe != null && _pipe.UnflushedBytes > 256 * 1024)
+                {
+                    await _pipe.FlushAsync(ct);
+                }
+            }
+        }
     }
 
     /// <summary>A log stream's completeness: each node's server log must reach past the window's end.</summary>
@@ -292,6 +339,176 @@ public sealed class MongoSource : IEngineSource
         {
             NotYetPublished = true,
         };
+    }
+
+    // ---- the S3 export (1.10.0) -------------------------------------------------------------------------
+
+    /// <summary>
+    /// One stream's window from the S3 export: each process's objects named from the window's start to its end plus 5
+    /// minutes (<see cref="AtlasS3Export"/>), read in name order and streamed as <see cref="StreamedAsync"/> streams the
+    /// Admin API's files. Completeness first, on each node's server-log folder.
+    /// </summary>
+    private async Task<RowStream> S3StreamedAsync(MongoLogStream stream, Func<AtlasProcess, string> dir, AgentTask task, CancellationToken ct)
+    {
+        RequireWholeMinutes(task);
+        var s3 = _s3!;
+        var (_, processes) = await ProcessesAsync(ct);
+        foreach (var process in processes)
+        {
+            await RequirePublishedS3Async(process, task, ct);
+        }
+        // Every process's object list is made before the first byte is uploaded, so a refusal is the task's failure.
+        var objects = new List<(AtlasProcess Process, List<string> Keys)>();
+        foreach (var process in processes)
+        {
+            objects.Add((process, await s3.NamedBetweenAsync(s3.Folder(process, dir(process)), task.StartMicros,
+                task.EndMicros + AtlasS3Export.SelectAfterEndMicros, ct)));
+        }
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 8 << 20, resumeWriterThreshold: 4 << 20));
+        var producer = Task.Run(async () =>
+        {
+            try
+            {
+                var sink = new RowSink(pipe.Writer);
+                foreach (var (process, keys) in objects)
+                {
+                    var processor = new MongoLogProcessor(stream, process.Host, process.Type, task.StartMicros, task.EndMicros, sink,
+                        form: LineForm.Rewritten);
+                    await ReadS3Async(keys, processor, pipe.Writer, cts.Token);
+                    await pipe.Writer.FlushAsync(cts.Token);
+                }
+                await pipe.Writer.CompleteAsync();
+            }
+            catch (Exception ex)
+            {
+                await pipe.Writer.CompleteAsync(ex);
+            }
+        }, CancellationToken.None);
+        return new RowStream(pipe.Reader.AsStream(), new Producer(cts, producer)) { KeepAlive = true };
+    }
+
+    /// <summary>
+    /// One process's objects, fetched up to <see cref="S3Prefetch"/> ahead and read in name order: the export's records
+    /// are out of order within an object, by up to 38 s, and the processor's 60-second grace takes that.
+    /// </summary>
+    private async Task ReadS3Async(List<string> keys, MongoLogProcessor processor, PipeWriter? pipe, CancellationToken ct)
+    {
+        var objects = _s3!.Objects;
+        var feeder = new Feeder(processor, pipe, new S3Envelope());
+        var ahead = new Queue<Task<Stream>>();
+        var next = 0;
+        try
+        {
+            while (next < keys.Count || ahead.Count > 0)
+            {
+                while (ahead.Count < S3Prefetch && next < keys.Count)
+                {
+                    ahead.Enqueue(objects.OpenAsync(keys[next++], ct));
+                }
+                await using var body = await ahead.Dequeue();
+                using var lines = new LogLines(body, gzip: false);
+                await feeder.FeedAsync(lines, ct);
+            }
+        }
+        finally
+        {
+            // An object opened ahead and never read still holds a connection.
+            while (ahead.Count > 0)
+            {
+                try
+                {
+                    await (await ahead.Dequeue()).DisposeAsync();
+                }
+                catch (Exception)
+                {
+                    // The task already failed or was cancelled; what failed here is not news.
+                }
+            }
+        }
+        processor.Finish();
+        TaskHeartbeat.Beat();
+    }
+
+    /// <summary>
+    /// The S3 form of the completeness check: each node's server-log folder must hold an object named after the window's
+    /// end plus 5 minutes. The export writes about one a minute a node, so until then a late object can still come.
+    /// </summary>
+    private async Task RequirePublishedS3Async(AtlasProcess process, AgentTask task, CancellationToken ct)
+    {
+        if (_utcNow() - FromMicros(task.EndMicros) > CompletenessGiveUp)
+        {
+            return;
+        }
+        var after = task.EndMicros + AtlasS3Export.SelectAfterEndMicros;
+        if (await _s3!.AnyNamedSinceAsync(_s3.Folder(process, AtlasS3Export.ServerDir(process)), after, ct))
+        {
+            return;
+        }
+        throw new SourceException($"the S3 export of {process.Host} has no object named after {FromMicros(after):HH:mm}Z yet, "
+            + $"5 minutes past the window's end {FromMicros(task.EndMicros):HH:mm}Z")
+        {
+            NotYetPublished = true,
+        };
+    }
+
+    /// <summary>
+    /// The probe's <c>s3</c> check, in place of the Admin API download: each process's server-log folder exists and has
+    /// objects, and its newest recent object is an export record. A node the export no longer writes is a warning.
+    /// </summary>
+    private async Task<AtlasCheck> S3CheckAsync(IReadOnlyList<AtlasProcess> processes, CancellationToken ct)
+    {
+        var s3 = _s3!;
+        var since = Micros(_utcNow() - S3StaleAfter);
+        var stale = new List<string>();
+        foreach (var process in processes)
+        {
+            var folder = s3.Folder(process, AtlasS3Export.ServerDir(process));
+            if (!await s3.AnyAsync(folder, ct))
+            {
+                throw new SourceException($"the S3 export does not write {process.Host}: s3://{_endpoint.Options.GetValueOrDefault("s3_bucket")}/{folder} "
+                    + "has no object. Check the Atlas log integration's bucket, prefix and log types (Mongod, Mongod Audit; Mongos, "
+                    + "Mongos Audit for a sharded cluster), and options.s3_prefix");
+            }
+            var newest = await s3.NewestSinceAsync(folder, since, ct);
+            if (newest is null)
+            {
+                stale.Add(process.Host);
+                continue;
+            }
+            if (await s3.FirstRecordMicrosAsync(newest, audit: false, ct) is null)
+            {
+                throw new SourceException($"s3://{_endpoint.Options.GetValueOrDefault("s3_bucket")}/{newest} is not an Atlas log export "
+                    + "record (a JSON envelope whose log member holds the server's line)");
+            }
+        }
+        return stale.Count == 0
+            ? Ok("s3", $"the Atlas S3 export writes all {processes.Count} process(es) (s3://{_endpoint.Options.GetValueOrDefault("s3_bucket")}/{s3.Root})")
+            : new AtlasCheck
+            {
+                Name = "s3",
+                Status = "warn",
+                Message = EndpointSession.Trim($"the Atlas S3 export wrote nothing in the last {S3StaleAfter.TotalMinutes:0} minutes for "
+                    + $"{string.Join(", ", stale)}: windows wait until it does (check the Atlas log integration)"),
+            };
+    }
+
+    /// <summary>
+    /// S1 (PLAN_S3.md): an S3 source starts at the export's live start, the latest of its processes' (each server-log
+    /// folder's first object named less than 10 minutes after its first line). The export's first backfill, each node's
+    /// log from before it was enabled, is never read.
+    /// </summary>
+    private async Task<long> S3LiveStartAsync(IReadOnlyList<AtlasProcess> processes, CancellationToken ct)
+    {
+        long start = 0;
+        foreach (var process in processes)
+        {
+            var live = await _s3!.LiveStartAsync(_s3.Folder(process, AtlasS3Export.ServerDir(process)), audit: false, ct);
+            start = Math.Max(start, live ?? 0);
+        }
+        // The gateway plans whole minutes; a window that starts before the live start only reads less.
+        return start - start % MinuteAggregator.MinuteMicros;
     }
 
     /// <summary>The cluster's processes whose logs are read: the hosts of its standard connection string, matched to /processes.</summary>

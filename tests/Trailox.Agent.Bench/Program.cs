@@ -229,18 +229,11 @@ public static class Program
                 var api = await EnginePass.RunAsync(manifest, dir, options, CancellationToken.None);
                 var exported = await EnginePass.RunAsync(s3, s3Dir, options, CancellationToken.None);
                 var problems = Verify(manifest, api).Select(p => "api: " + p).Concat(Verify(s3, exported).Select(p => "s3: " + p)).ToList();
-                var known = new List<string>();
+                // Every stream ships the same rows from both forms: until 1.10.0 a slow findAndModify could ship as update
+                // from the S3 form, and was tolerated here as a known difference.
                 foreach (var stream in EnginePass.Order)
                 {
-                    if (Difference(api.Shipped[stream], exported.Shipped[stream]) is not { } difference)
-                    {
-                        continue;
-                    }
-                    if (stream == MongoLogStream.SlowOps && SlowFindAndModifyAsUpdate(api.Shipped[stream], exported.Shipped[stream]) is { } renamed)
-                    {
-                        known.Add($"{EnginePass.StreamName(stream)}: {renamed:N0} slow findAndModify shipped as update by the S3 form");
-                    }
-                    else
+                    if (Difference(api.Shipped[stream], exported.Shipped[stream]) is { } difference)
                     {
                         problems.Add($"{EnginePass.StreamName(stream)}: the S3 form shipped other rows than the API form: {difference}");
                     }
@@ -258,8 +251,7 @@ public static class Program
                 }
                 Console.WriteLine($"{profile}: {manifest.Lines:N0} lines in {manifest.Files.Count} files and {s3.Files.Count} export objects, " +
                                   $"{api.Streams.Values.Sum(s => s.Rows):N0} rows, {overflow:N0} lines over the cap: " +
-                                  (problems.Count == 0 ? "PASS" : "FAIL " + string.Join("; ", problems)) +
-                                  string.Concat(known.Select(k => " (KNOWN, waits for the S3 reader round: " + k + ")")));
+                                  (problems.Count == 0 ? "PASS" : "FAIL " + string.Join("; ", problems)));
                 failed |= problems.Count > 0;
             }
             finally
@@ -274,22 +266,6 @@ public static class Program
             }
         }
         return failed ? 1 : 0;
-    }
-
-    /// <summary>
-    /// The one known difference between the forms (2026-10-20): the S3 export's rewritten slow line of a findAndModify
-    /// reads as an update, so its row ships with <c>"command":"update"</c> and is otherwise the same. The number of such
-    /// rows when that is ALL that differs; null when anything else does. It waits for the S3 reader round.
-    /// </summary>
-    private static int? SlowFindAndModifyAsUpdate(byte[] api, byte[] s3)
-    {
-        var left = Rows(api);
-        var right = Rows(s3);
-        var onlyLeft = left.Except(right).Order(StringComparer.Ordinal).ToList();
-        var renamed = right.Except(left)
-            .Select(r => r.Replace("\"command\":\"update\"", "\"command\":\"findAndModify\"", StringComparison.Ordinal))
-            .Order(StringComparer.Ordinal).ToList();
-        return onlyLeft.Count > 0 && left.Count == right.Count && onlyLeft.SequenceEqual(renamed) ? onlyLeft.Count : null;
     }
 
     /// <summary>Null when both hold the same rows (in any order); else how they differ, with one row of each side.</summary>

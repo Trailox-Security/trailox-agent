@@ -161,12 +161,15 @@ internal static class EnginePass
         return bytes;
     }
 
-    /// <summary>The same loop over one export object: each record's inner line goes to the engine, in the rewritten form.</summary>
+    /// <summary>
+    /// The same loop over one export object, with the engine's own S3 classes (1.10.0): the plain-file reader and the
+    /// envelope's unwrap, so what is measured is what ships. Each record's inner line goes to the engine, rewritten form.
+    /// </summary>
     private static async Task<long> ReadS3Async(string path, MongoLogProcessor processor, Pacer? pacer, CancellationToken ct)
     {
         var bytes = new FileInfo(path).Length;
-        using var lines = new PlainLines(File.OpenRead(path));
-        var record = new S3Record();
+        using var lines = new LogLines(File.OpenRead(path), gzip: false);
+        var record = new S3Envelope();
         var since = 0;
         while (await lines.FillAsync(ct))
         {

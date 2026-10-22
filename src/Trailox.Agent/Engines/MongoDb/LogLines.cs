@@ -6,8 +6,9 @@ using System.Text.Json;
 namespace Trailox.Agent.Engines.MongoDb;
 
 /// <summary>
-/// The lines of a gzip log file (any number of members: Atlas concatenates one per published chunk),
-/// read from a stream as spans over one pooled buffer, with no string or array per line.
+/// The lines of a log file read from a stream as spans over one pooled buffer, with no string or array per line:
+/// an Admin API download is gzip (any number of members: Atlas concatenates one per published chunk), an S3 export
+/// object plain JSON lines (Phase 0 facts §18.3).
 /// <see cref="FillAsync"/> reads; <see cref="TryReadLine"/> only hands out lines already read, so a
 /// caller can loop over spans between awaits. A line is valid until the next <see cref="FillAsync"/>.
 /// </summary>
@@ -23,10 +24,11 @@ public sealed class LogLines : IDisposable
 
     public long Lines { get; private set; }
 
-    /// <param name="gzip">The compressed file; it is decompressed here and disposed with this reader.</param>
-    public LogLines(Stream gzip)
+    /// <param name="source">The file; disposed with this reader.</param>
+    /// <param name="gzip">True when <paramref name="source"/> is compressed: it is decompressed here.</param>
+    public LogLines(Stream source, bool gzip = true)
     {
-        _source = new GZipStream(gzip, CompressionMode.Decompress);
+        _source = gzip ? new GZipStream(source, CompressionMode.Decompress) : source;
     }
 
     /// <summary>Reads more of the file. False once the file is exhausted and every line was handed out.</summary>
@@ -110,10 +112,6 @@ public static class LineScan
 {
     private const int HeadBytes = 160;
 
-    /// <summary>The offset of the value of a top-level key, for a line of the given form, or -1.</summary>
-    public static int Value(ReadOnlySpan<byte> line, ReadOnlySpan<byte> quotedKey, ReadOnlySpan<byte> key, LineForm form) =>
-        form == LineForm.Api ? ValueOf(line, quotedKey) : TopLevelValue(line, key);
-
     /// <summary>The offset of the value of the top-level <paramref name="key"/>, found by skipping every other value; -1 if absent.</summary>
     public static int TopLevelValue(ReadOnlySpan<byte> line, ReadOnlySpan<byte> key)
     {
@@ -139,6 +137,50 @@ public static class LineScan
         {
         }
         return -1;
+    }
+
+    /// <summary>
+    /// The offsets of the values of two top-level keys of a rewritten line, found in ONE scan that stops once both are
+    /// seen; -1 for one that is absent.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ One scan, not one per key: the S3 form gives no key a fixed place, so each lookup skips over the nested
+    ///   values before it, and a line's time and its id (or atype) were two such scans before the parse (bench,
+    ///   2026-10-20: the S3 form cost 2.8 times the API form a line).
+    /// </remarks>
+    public static void TopLevelValues(ReadOnlySpan<byte> line, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second, out int firstAt, out int secondAt)
+    {
+        firstAt = secondAt = -1;
+        try
+        {
+            var r = new Utf8JsonReader(line, new JsonReaderOptions { MaxDepth = 256 });
+            if (!r.Read() || r.TokenType != JsonTokenType.StartObject)
+            {
+                return;
+            }
+            while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
+            {
+                var isFirst = firstAt < 0 && r.ValueTextEquals(first);
+                var isSecond = !isFirst && secondAt < 0 && r.ValueTextEquals(second);
+                r.Read();
+                if (isFirst)
+                {
+                    firstAt = (int)r.TokenStartIndex;
+                }
+                else if (isSecond)
+                {
+                    secondAt = (int)r.TokenStartIndex;
+                }
+                if (firstAt >= 0 && secondAt >= 0)
+                {
+                    return;
+                }
+                r.Skip();
+            }
+        }
+        catch (JsonException)
+        {
+        }
     }
 
     /// <summary>The offset of the value of <paramref name="quotedKey"/> in the first bytes of the line, or -1.</summary>
@@ -185,9 +227,15 @@ public static class LineScan
     /// </summary>
     public static bool TryTimestampMicros(ReadOnlySpan<byte> line, bool audit, out long micros, LineForm form = LineForm.Api)
     {
-        micros = 0;
         var key = form == LineForm.Rewritten ? TopLevelValue(line, audit ? "ts"u8 : "t"u8)
             : audit ? ValueOf(line, "\"ts\""u8) : 0;
+        return TryTimestampAt(line, key, out micros);
+    }
+
+    /// <summary>The line's own time in Unix microseconds, from its <c>t</c>/<c>ts</c> value at <paramref name="key"/> (-1: none).</summary>
+    public static bool TryTimestampAt(ReadOnlySpan<byte> line, int key, out long micros)
+    {
+        micros = 0;
         if (key < 0)
         {
             return false;

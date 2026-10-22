@@ -17,6 +17,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The MongoDB S3 log reader (1.10.0). SecurityToken is not called directly: the SDK loads it to sign in with
+         a web identity (IRSA) from the default credential chain. -->
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.1" />
+    <PackageReference Include="AWSSDK.SecurityToken" Version="4.0.101.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="MongoDB.Driver" Version="3.12.0" />

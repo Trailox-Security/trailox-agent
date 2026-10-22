@@ -18,3 +18,12 @@ app.kubernetes.io/version: {{ include "trailox-agent.imageTag" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
+
+{{- /* The pod's service account: the one the chart creates, the one named, or none (the namespace's default). */}}
+{{- define "trailox-agent.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- .Values.serviceAccount.name | default (include "trailox-agent.fullname" .) -}}
+{{- else -}}
+{{- .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
