@@ -78,9 +78,24 @@ public static class SfRawSelects
         $"DATA_TYPE, COMMENT, DELETED FROM {AccountUsage}.COLUMNS " +
         $"WHERE DELETED IS NULL AND {ExcludedDatabases(endpoint, "TABLE_CATALOG")}";
 
+    /// <remarks>
+    /// From 1.11: HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME and EMAIL, so Trailox can say which users
+    /// are people and which are services, how each signs in, and whose each one is. Still no password, key or
+    /// first and last name: the view holds no secret, and the two name columns are not read.
+    /// </remarks>
     public const string CatalogUsers =
         "SELECT " + SnapshotDate + ", USER_ID, NAME, CREATED_ON, DELETED_ON, LOGIN_NAME, HAS_PASSWORD, HAS_MFA, HAS_RSA_PUBLIC_KEY, HAS_PAT, " +
-        "DISABLED, DEFAULT_ROLE, DEFAULT_WAREHOUSE, LAST_SUCCESS_LOGIN, TYPE, OWNER FROM " + AccountUsage + ".USERS WHERE DELETED_ON IS NULL";
+        "DISABLED, DEFAULT_ROLE, DEFAULT_WAREHOUSE, LAST_SUCCESS_LOGIN, TYPE, OWNER, " +
+        "HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME, EMAIL FROM " + AccountUsage + ".USERS WHERE DELETED_ON IS NULL";
+
+    /// <summary>
+    /// From 1.11: every credential of the account - programmatic access tokens, key pairs, MFA methods and workload
+    /// identities - with its owner, status, role restriction and dates. The view holds no secret, and expired
+    /// tokens drop out of it 7 days after they expire.
+    /// </summary>
+    public const string CatalogCredentials =
+        "SELECT " + SnapshotDate + ", CREDENTIAL_ID, NAME, USER_NAME, TYPE, DOMAIN, COMMENT, STATUS, ADDITIONAL_DETAILS, " +
+        "CREATED_BY, LAST_ALTERED_BY, CREATED_ON, LAST_USED_ON, LAST_ALTERED, EXPIRATION_DATE FROM " + AccountUsage + ".CREDENTIALS";
 
     public const string CatalogGrants =
         "SELECT " + SnapshotDate + ", CREATED_ON, MODIFIED_ON, PRIVILEGE, GRANTED_ON, NAME, TABLE_CATALOG, TABLE_SCHEMA, GRANTED_TO, " +
@@ -98,6 +113,7 @@ public static class SfRawSelects
         ProtocolInfo.Streams.CatalogColumns => CatalogColumns(endpoint),
         ProtocolInfo.Streams.CatalogUsers => CatalogUsers,
         ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
+        ProtocolInfo.Streams.CatalogCredentials => CatalogCredentials,
         _ => null,
     };
 }

@@ -128,6 +128,7 @@ public class SnowflakeEngineTests
         {
             ProtocolInfo.Streams.Events, ProtocolInfo.Streams.AccessHistory, ProtocolInfo.Streams.Logins, ProtocolInfo.Streams.Sessions,
             ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogColumns, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants,
+            ProtocolInfo.Streams.CatalogCredentials,
         };
         foreach (var stream in streams)
         {
@@ -149,6 +150,30 @@ public class SnowflakeEngineTests
         Assert.EndsWith("WHERE DELETED IS NULL AND TABLE_CATALOG NOT IN ('SNOWFLAKE', 'HR_PRIVATE', 'it''s')", sql);
         Assert.EndsWith("GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')", SfRawSelects.CatalogGrants);
         Assert.EndsWith("USERS WHERE DELETED_ON IS NULL", SfRawSelects.CatalogUsers);
+    }
+
+    /// <summary>
+    /// 1.11: the credential list and four more user columns. The Trailox side keys the credential on CREDENTIAL_ID and
+    /// joins sign-ins to it, and reads the users' new columns by these lower-cased names, so the names are the contract.
+    /// </summary>
+    [Fact]
+    public void Credentials_and_the_new_user_columns_are_read_by_name_and_never_a_secret()
+    {
+        Assert.Equal(
+            "SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREDENTIAL_ID, NAME, USER_NAME, TYPE, DOMAIN, COMMENT, STATUS, " +
+            "ADDITIONAL_DETAILS, CREATED_BY, LAST_ALTERED_BY, CREATED_ON, LAST_USED_ON, LAST_ALTERED, EXPIRATION_DATE " +
+            "FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS",
+            SfRawSelects.CatalogCredentials);
+        Assert.Equal(SfRawSelects.CatalogCredentials,
+            SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.CatalogCredentials }));
+        Assert.Equal("catalog_credentials", ProtocolInfo.Streams.CatalogCredentials);
+
+        Assert.Contains(", OWNER, HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME, EMAIL FROM ", SfRawSelects.CatalogUsers);
+        // Leading ", " so HAS_PASSWORD and HAS_RSA_PUBLIC_KEY (flags, not secrets) do not match.
+        foreach (var never in new[] { "FIRST_NAME", "LAST_NAME", ", RSA_PUBLIC_KEY", ", PASSWORD," })
+        {
+            Assert.DoesNotContain(never, SfRawSelects.CatalogUsers);
+        }
     }
 
     [Fact]
