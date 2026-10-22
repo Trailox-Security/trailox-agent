@@ -69,6 +69,23 @@ public class S3EnvelopeTests
         Assert.Equal("", Inner(record));
     }
 
+    /// <summary>
+    /// 🔴 A stackalloc inside the unescape loop took more stack at every escape: 100,000 of them overflowed a 1.5 MB
+    ///    thread, which kills the process. 250,000 escapes on a 256 KiB thread now decode.
+    /// </summary>
+    [Fact]
+    public void A_record_of_many_unicode_escapes_does_not_grow_the_stack()
+    {
+        var log = string.Concat(Enumerable.Repeat("<é😀", 250_000 / 4));
+        string? inner = null;
+        var thread = new Thread(() => inner = Inner(Envelope(log, JavaScriptEncoder.Default)), maxStackSize: 256 * 1024);
+
+        thread.Start();
+        thread.Join();
+
+        Assert.Equal(log, inner);
+    }
+
     [Fact]
     public void A_line_longer_than_the_buffer_grows_it()
     {

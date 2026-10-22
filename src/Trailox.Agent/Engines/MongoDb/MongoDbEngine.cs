@@ -36,7 +36,8 @@ public sealed class MongoDbEngine : IEngine
 
     // S3's bucket naming rules (3-63 characters; lower-case letters, digits, '.', '-'; a letter or digit at each end).
     private static readonly Regex BucketPattern = new(@"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\z", RegexOptions.Compiled);
-    private static readonly Regex RegionPattern = new(@"^[a-z]{2}(-[a-z]+)+-[0-9]+\z", RegexOptions.Compiled);
+    // AWS region names: eu-west-1, us-gov-west-1, and the European Sovereign Cloud's eusc-de-east-1.
+    private static readonly Regex RegionPattern = new(@"^[a-z]{2,4}(-[a-z]+)+-[0-9]+\z", RegexOptions.Compiled);
     // The integration's prefix as typed in Atlas: path segments, no leading or trailing '/'.
     private static readonly Regex PrefixPattern = new(@"^[A-Za-z0-9!_.*'()-]+(/[A-Za-z0-9!_.*'()-]+)*\z", RegexOptions.Compiled);
 
@@ -109,7 +110,8 @@ public sealed class MongoDbEngine : IEngine
         }
         else if (!BucketPattern.IsMatch(bucket))
         {
-            problems.Add("options.s3_bucket: the name of the bucket the Atlas log integration writes to, e.g. my-atlas-logs");
+            problems.Add("options.s3_bucket: the name of the bucket the Atlas log integration writes to, e.g. my-atlas-logs "
+                + "(a DNS-compatible name: a legacy name with upper case or '_' is not supported)");
         }
         if (!RegionPattern.IsMatch(options.GetValueOrDefault("s3_region", "")))
         {

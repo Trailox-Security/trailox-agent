@@ -109,8 +109,34 @@ public sealed class MongoSource : IEngineSource
         }
         else
         {
-            checks.Add(await S3CheckAsync(processes, ct));
-            earliest = _s3LiveStart ??= await S3LiveStartAsync(processes, ct);
+            var check = await S3CheckAsync(processes, ct);
+            if (_s3LiveStart is { } known)
+            {
+                earliest = known;
+            }
+            else
+            {
+                var (start, found) = await S3LiveStartAsync(processes, ct);
+                earliest = start;
+                if (found)
+                {
+                    _s3LiveStart = start;
+                }
+                else
+                {
+                    // ⚠ NOT KEPT: right after the export is enabled every object is still its first backfill, and a start
+                    //   kept now would be a backfill object's name for the life of the process. The next probe looks again.
+                    check = new AtlasCheck
+                    {
+                        Name = "s3",
+                        Status = "warn",
+                        Message = EndpointSession.Trim((check.Status == "ok" ? "" : check.Message + "; ")
+                            + "the Atlas S3 export is still delivering the logs it copies when first enabled: collection starts at its "
+                            + "first live files, which the next check looks for again"),
+                    };
+                }
+            }
+            checks.Add(check);
         }
 
         checks.Add(await SoftCheckAsync("grants", "/databaseUsers?itemsPerPage=1", "database users and roles read (Project Read Only)", ct));
@@ -345,9 +371,16 @@ public sealed class MongoSource : IEngineSource
 
     /// <summary>
     /// One stream's window from the S3 export: each process's objects named from the window's start to its end plus 5
-    /// minutes (<see cref="AtlasS3Export"/>), read in name order and streamed as <see cref="StreamedAsync"/> streams the
-    /// Admin API's files. Completeness first, on each node's server-log folder.
+    /// minutes (<see cref="AtlasS3Export"/>), and after a stall the ones past that still holding the window's lines, read
+    /// in name order and streamed as <see cref="StreamedAsync"/> streams the Admin API's files. Completeness first, on
+    /// each node's server-log folder.
     /// </summary>
+    /// <remarks>
+    /// 🔴 NAMES ALONE LOSE LINES AFTER A STALL. The first object after an export stall holds the stalled lines under a late
+    ///    name; selection by name stops 5 minutes past the window, and completeness passes on that very object, so its
+    ///    lines of the window were dropped without a word (review of agent PR #14). The Admin API reader checks the lines
+    ///    themselves and never had this gap.
+    /// </remarks>
     private async Task<RowStream> S3StreamedAsync(MongoLogStream stream, Func<AtlasProcess, string> dir, AgentTask task, CancellationToken ct)
     {
         RequireWholeMinutes(task);
@@ -358,11 +391,15 @@ public sealed class MongoSource : IEngineSource
             await RequirePublishedS3Async(process, task, ct);
         }
         // Every process's object list is made before the first byte is uploaded, so a refusal is the task's failure.
+        var audit = stream == MongoLogStream.Ops;
+        var margin = task.EndMicros + AtlasS3Export.SelectAfterEndMicros;
         var objects = new List<(AtlasProcess Process, List<string> Keys)>();
         foreach (var process in processes)
         {
-            objects.Add((process, await s3.NamedBetweenAsync(s3.Folder(process, dir(process)), task.StartMicros,
-                task.EndMicros + AtlasS3Export.SelectAfterEndMicros, ct)));
+            var folder = s3.Folder(process, dir(process));
+            var keys = await s3.NamedBetweenAsync(folder, task.StartMicros, margin, ct);
+            keys.AddRange(await s3.HoldingWindowAfterAsync(folder, margin, task.EndMicros, audit, ct));
+            objects.Add((process, keys));
         }
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -442,7 +479,7 @@ public sealed class MongoSource : IEngineSource
             return;
         }
         var after = task.EndMicros + AtlasS3Export.SelectAfterEndMicros;
-        if (await _s3!.AnyNamedSinceAsync(_s3.Folder(process, AtlasS3Export.ServerDir(process)), after, ct))
+        if (await _s3!.AnyNamedSinceAsync(_s3.Folder(process, AtlasS3Export.ServerDir(process)), after, Micros(_utcNow()), ct))
         {
             return;
         }
@@ -471,13 +508,15 @@ public sealed class MongoSource : IEngineSource
                     + "has no object. Check the Atlas log integration's bucket, prefix and log types (Mongod, Mongod Audit; Mongos, "
                     + "Mongos Audit for a sharded cluster), and options.s3_prefix");
             }
-            var newest = await s3.NewestSinceAsync(folder, since, ct);
+            var newest = await s3.NewestSinceAsync(folder, since, Micros(_utcNow()), ct);
             if (newest is null)
             {
                 stale.Add(process.Host);
                 continue;
             }
-            if (await s3.FirstRecordMicrosAsync(newest, audit: false, ct) is null)
+            // An empty object has nothing to check; one whose first record (up to 1 MiB) is not a record is no export.
+            var (empty, first) = await s3.FirstRecordAsync(newest, audit: false, ct);
+            if (!empty && first is null)
             {
                 throw new SourceException($"s3://{_endpoint.Options.GetValueOrDefault("s3_bucket")}/{newest} is not an Atlas log export "
                     + "record (a JSON envelope whose log member holds the server's line)");
@@ -497,18 +536,20 @@ public sealed class MongoSource : IEngineSource
     /// <summary>
     /// S1 (PLAN_S3.md): an S3 source starts at the export's live start, the latest of its processes' (each server-log
     /// folder's first object named less than 10 minutes after its first line). The export's first backfill, each node's
-    /// log from before it was enabled, is never read.
+    /// log from before it was enabled, is never read. Found only when every process's folder has a live object.
     /// </summary>
-    private async Task<long> S3LiveStartAsync(IReadOnlyList<AtlasProcess> processes, CancellationToken ct)
+    private async Task<(long Start, bool Found)> S3LiveStartAsync(IReadOnlyList<AtlasProcess> processes, CancellationToken ct)
     {
         long start = 0;
+        var found = true;
         foreach (var process in processes)
         {
             var live = await _s3!.LiveStartAsync(_s3.Folder(process, AtlasS3Export.ServerDir(process)), audit: false, ct);
-            start = Math.Max(start, live ?? 0);
+            start = Math.Max(start, live?.Micros ?? 0);
+            found &= live is { Found: true };
         }
         // The gateway plans whole minutes; a window that starts before the live start only reads less.
-        return start - start % MinuteAggregator.MinuteMicros;
+        return (start - start % MinuteAggregator.MinuteMicros, found);
     }
 
     /// <summary>The cluster's processes whose logs are read: the hosts of its standard connection string, matched to /processes.</summary>

@@ -45,16 +45,6 @@ internal sealed class FakeS3 : IS3Objects
         }
     }
 
-    public Task<IReadOnlyList<string>> FoldersAsync(string prefix, CancellationToken ct)
-    {
-        Lists++;
-        Check();
-        IReadOnlyList<string> folders = Objects.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal) && k.IndexOf('/', prefix.Length) > 0)
-            .Select(k => k[..(k.IndexOf('/', prefix.Length) + 1)])
-            .Distinct().Order(StringComparer.Ordinal).ToList();
-        return Task.FromResult(folders);
-    }
-
     public Task<Stream> OpenAsync(string key, CancellationToken ct)
     {
         Check();

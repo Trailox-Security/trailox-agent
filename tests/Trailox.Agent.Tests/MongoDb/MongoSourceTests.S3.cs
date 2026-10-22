@@ -168,6 +168,49 @@ public partial class MongoSourceTests
         Assert.Contains("cluster0-shard-00-02.example.mongodb.net", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// 🔴 An export stall: the window's operations arrive in an object named 9 minutes after its end, past the margin, and
+    ///    completeness passes on that same object. They used to be dropped without a word; they are now counted.
+    /// </summary>
+    [Fact]
+    public async Task Operations_delivered_late_after_an_export_stall_are_counted()
+    {
+        var start = new DateTime(2026, 10, 19, 9, 0, 0, DateTimeKind.Utc);
+        var end = start.AddMinutes(10);
+        var (source, _, s3) = S3Source(now: end.AddMinutes(20));
+        LiveServerLogs(s3, end.AddMinutes(9), end.AddMinutes(12));
+        PutS3(s3, 0, "mongod_audit", end.AddMinutes(9), [AuditLine(end.AddMinutes(-1), "app_orders"), AuditLine(end.AddMinutes(-1).AddSeconds(5), "app_orders")]);
+        PutS3(s3, 0, "mongod_audit", end.AddMinutes(10), [AuditLine(end.AddMinutes(4), "app_orders")]);
+
+        var rows = await RowsOf((await source.OpenAsync(Window(ProtocolInfo.Streams.MongoOps, start, end), CancellationToken.None))!);
+
+        Assert.Equal(2, rows.Sum(r => r.GetProperty("event_count").GetInt64()));
+    }
+
+    /// <summary>
+    /// Right after the export is enabled, every object is its first backfill: the probe warns, and the start it reports is
+    /// not kept, so the next probe, once live objects exist, reports the real one.
+    /// </summary>
+    [Fact]
+    public async Task A_probe_while_the_export_is_still_backfilling_warns_and_looks_again_later()
+    {
+        var (source, _, s3) = S3Source();
+        for (var node = 0; node < 3; node++)
+        {
+            PutS3(s3, node, "mongod", Now.AddMinutes(-5), [ServerLine(Now.AddHours(-6))]);
+        }
+
+        var first = await source.ProbeAsync(CancellationToken.None);
+        LiveServerLogs(s3, Now.AddMinutes(-3), Now.AddMinutes(-1));
+        var second = await source.ProbeAsync(CancellationToken.None);
+
+        var check = Assert.Single(first.Atlas!.Checks, c => c.Name == "s3");
+        Assert.Equal("warn", check.Status);
+        Assert.Contains("still delivering", check.Message, StringComparison.Ordinal);
+        Assert.Equal("ok", Assert.Single(second.Atlas!.Checks, c => c.Name == "s3").Status);
+        Assert.Equal(Micros(Now.AddMinutes(-3).AddSeconds(-Now.AddMinutes(-3).Second)), second.EarliestEventMicros);
+    }
+
     [Fact]
     public async Task A_window_past_the_give_up_age_is_read_as_it_is()
     {

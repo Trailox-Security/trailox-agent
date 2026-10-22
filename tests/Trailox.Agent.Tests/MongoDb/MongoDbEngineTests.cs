@@ -92,6 +92,20 @@ public class MongoDbEngineTests
         Assert.Contains(new MongoDbEngine().Validate(e), p => p.StartsWith(expected, StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("us-gov-west-1")]
+    [InlineData("eusc-de-east-1")]
+    [InlineData("ap-southeast-2")]
+    public void Every_AWS_region_name_form_is_taken(string region)
+    {
+        var e = Endpoint();
+        e.Options["log_source"] = "s3";
+        e.Options["s3_bucket"] = "my-atlas-logs";
+        e.Options["s3_region"] = region;
+
+        Assert.Empty(new MongoDbEngine().Validate(e));
+    }
+
     [Fact]
     public void S3_options_without_the_S3_log_source_are_refused()
     {

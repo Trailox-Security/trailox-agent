@@ -181,6 +181,37 @@ public class MongoLogProcessorTests
     }
 
     /// <summary>
+    /// 🔴 A command with no known key: a slow write statement ({"q":…,"u":…}) or a command missing from the list. The
+    ///    API's files put the name first; the S3 export shuffles keys, so the first key was a different name each time.
+    ///    Every key order of the S3 form now gives one name, and for a write statement the API form's.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"q":{"_id":7},"u":{"$set":{"s":1}},"multi":false,"upsert":false}""", "q", "q")]
+    [InlineData("""{"q":{"_id":7},"limit":1}""", "q", "q")]
+    [InlineData("""{"newAdminCommand":"orders","maxTimeMS":1000,"lsid":{"id":1},"$db":"admin","verbose":true}""", "newAdminCommand", "newAdminCommand")]
+    [InlineData("""{"moveRange":"shop.orders","toShard":"shard-1","min":{"_id":1},"$db":"admin"}""", "moveRange", "moveRange")]
+    public void A_command_with_no_known_key_has_one_name_in_every_key_order(string command, string api, string s3)
+    {
+        static string Line(string c) =>
+            """{"t":{"$date":"2026-10-19T09:00:05.000+00:00"},"id":51803,"ctx":"conn9","msg":"Slow query","attr":{"type":"update","ns":"shop.orders","command":@0@,"durationMillis":150}}""".Replace("@0@", c);
+        static string Shuffled(string c, int seed)
+        {
+            using var doc = JsonDocument.Parse(c);
+            var rng = new Random(seed);
+            var members = doc.RootElement.EnumerateObject().OrderBy(_ => rng.Next()).ToList();
+            return "{" + string.Join(",", members.Select(m => JsonSerializer.Serialize(m.Name) + ":" + m.Value.GetRawText())) + "}";
+        }
+
+        var (apiRows, _) = Run(MongoLogStream.SlowOps, MongoLogProcessor.DefaultGroupCap, LineForm.Api, Line(command));
+        Assert.Equal(api, Assert.Single(apiRows).GetProperty("command").GetString());
+        foreach (var seed in Enumerable.Range(1, 12))
+        {
+            var (s3Rows, _) = Run(MongoLogStream.SlowOps, MongoLogProcessor.DefaultGroupCap, LineForm.Rewritten, Line(Shuffled(command, seed)));
+            Assert.Equal(s3, Assert.Single(s3Rows).GetProperty("command").GetString());
+        }
+    }
+
+    /// <summary>
     /// The S3 export reorders records within a batch by up to 38 s (PLAN_S3.md §2.2): the same disorder that opens a
     /// later part of a minute in an Admin API file ships as one row from the export.
     /// </summary>

@@ -56,6 +56,15 @@ internal static class Commands
     public static void Write(ArrayBufferWriter<byte> w, bool audit, string template, string collection, string db, string f1, string f2, in Envelope env, Random rng)
     {
         w.Clear();
+        if (!audit && template is "update" or "delete")
+        {
+            // mongod logs a slow write as the one statement, with no command key at all: {"q":…,"u":…,"multi":…,"upsert":…}
+            // or {"q":…,"limit":…}. The S3 form shuffles its keys, so its name cannot be the first key (agent 1.10.0).
+            w.Write(Encoding.UTF8.GetBytes(template == "update"
+                ? $"{{\"q\":{{\"_id\":{rng.Next(1000000)}}},\"u\":{{\"$set\":{{\"{f1}\":\"{Lit(rng)}\"}}}},\"multi\":false,\"upsert\":false}}"
+                : $"{{\"q\":{{\"{f1}\":\"{Lit(rng)}\"}},\"limit\":1}}"));
+            return;
+        }
         var s = new StringBuilder(512);
         var write = template is "insert" or "update" or "findAndModify" or "delete";
         switch (template)

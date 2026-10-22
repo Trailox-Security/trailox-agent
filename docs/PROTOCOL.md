@@ -420,22 +420,26 @@ own AWS identity, from the AWS SDK's default chain (IRSA, EKS Pod Identity, ECS,
 `{s3_prefix}/{clusterName}/{host}/{dir}/[{yyyy-MM-dd}/]{yyyyMMddTHHmmss.fffZ}-{dir}[.partNNNNN-of-NNNNN].log`, where
 `host` is the process's internal name (its `/processes` id without the port) and `dir` is `mongod` and
 `mongod_audit`, or `mongos` and `mongos_audit` for a sharded cluster's routers; the date folder is Atlas's
-"Daily folders" path choice, found by listing. Each object is plain JSON lines, each line an envelope whose `log`
+"Daily folders" path choice. Both layouts are listed at every call, and nothing about a folder is cached: the folder
+itself, and each date folder from the day before a time range to its last day (a folder's date need not be the name's). Each object is plain JSON lines, each line an envelope whose `log`
 member is the server's line as a JSON string, re-encoded by the export (keys in any order, arrays as objects
 keyed `"1"`..`"n"`, nulls left out); the envelope's own `timestamp` is never read.
 
 | call | when |
 |---|---|
-| `ListObjectsV2` of a process's folder from `StartAfter` = the window's start | each log task, per process and log type: the objects named from the window's start to its end plus 5 minutes (an object is named after its newest line, and at most 174 s after its oldest, measured) |
+| `ListObjectsV2` of a process's folder (and its date folders) from `StartAfter` = the window's start | each log task, per process and log type: the objects named from the window's start to its end plus 5 minutes (an object is named after its newest line, and at most 174 s after its oldest, measured) |
+| `ListObjectsV2` from the window's end plus 5 minutes, and `GetObject` of the first 64 KiB (1 MiB when the first record is longer) of each object it lists, until one whose first record is past the window's end plus 60 s | each log task, per process and log type: after an export stall, the first object holds the stalled lines under a late name; usually the first object already ends it |
 | `GetObject`, up to 8 at a time per process | each log task, every object selected; lines outside the window are dropped by their own time |
 | `ListObjectsV2` of a server-log folder from the window's end plus 5 minutes | completeness, per process |
-| `ListObjectsV2` with delimiter `/`, and `GetObject` of the first 64 KiB of an object | the probe's `s3` check; and once per agent process, the export's live start |
+| `ListObjectsV2`, and `GetObject` of an object's first 64 KiB (1 MiB when its first record is longer) | the probe's `s3` check, and the export's live start until one is found |
 
 The probe's `s3` check fails when a process's server-log folder has no object, or its newest object is not an
-export record, and warns when the export wrote nothing for a process in the last 10 minutes. `earliestEventMicros`
-is the export's live start: the latest, across the processes, of the first object named less than 10 minutes after
-its first line. Before it are the export's first objects, written when it was enabled and holding each process's
-log from before then, which are never read. **Completeness** in this form: each process's server-log folder must
+export record (an empty object is passed over), and warns when the export wrote nothing for a process in the last 10
+minutes. `earliestEventMicros` is the export's live start, rounded down to the minute: the latest, across the
+processes, of the first object named less than 10 minutes after its first line. Before it are the export's first
+objects, written when it was enabled and holding each process's log from before then, which are never read. While
+every object is still that backfill, the check warns, the newest object's name is reported, and the next probe looks
+again; a live start once found is kept for the life of the process. **Completeness** in this form: each process's server-log folder must
 hold an object named after the window's end plus 5 minutes. The export reorders lines within an object by up to 38 s
 (measured), so a minute ships once the reader is 60 s past it, not 2 s (below).
 

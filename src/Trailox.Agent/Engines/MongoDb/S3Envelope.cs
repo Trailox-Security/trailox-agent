@@ -39,6 +39,10 @@ public sealed class S3Envelope
     {
         length = 0;
         var i = 0;
+        // 🔴 OUTSIDE THE LOOP. A stackalloc inside it takes more stack at every \u escape until the method returns: a
+        //    record of 100,000 escapes overflowed a 1.5 MB thread, which no catch can stop, and the agent died on the
+        //    same window at every retry (review of agent PR #14, 2026-10-22).
+        Span<byte> utf8 = stackalloc byte[4];
         while (true)
         {
             var run = s[i..].IndexOfAny((byte)'"', (byte)'\\');
@@ -96,7 +100,6 @@ public sealed class S3Envelope
             {
                 return false;
             }
-            Span<byte> utf8 = stackalloc byte[4];
             var written = new Rune(scalar).EncodeToUtf8(utf8);
             Append(utf8[..written], ref length);
         }

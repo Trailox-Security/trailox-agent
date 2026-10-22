@@ -86,7 +86,9 @@ starts with `lit-`) appears in any row. Until 1.10.0 a slow `findAndModify` coul
 | Failed sign-ins | 1 every 10 s | 100 a second |
 
 Both: 100,000 operations a second (`--ops`), 90% on the primary, Full audit (one `authCheck` line per
-operation), 0.05% of operations slow (measured), 10 background server-log lines per node a second.
+operation), 0.05% of operations slow (measured), 10 background server-log lines per node a second. A slow update
+or delete is logged as mongod logs it, the one statement with no command key (`{"q":…,"u":…}`), so the export form
+must name it as the API form does.
 
 ## Running it
 

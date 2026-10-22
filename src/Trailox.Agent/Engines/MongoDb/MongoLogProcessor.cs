@@ -107,6 +107,15 @@ public sealed partial class MongoLogProcessor
         "grantRolesToUser", "revokeRolesFromUser", "createRole", "updateRole", "dropRole", "hello", "isMaster", "ismaster",
         "ping", "serverStatus", "replSetGetStatus", "killCursors", "endSessions", "dbStats", "collStats", "validate",
         "compact", "currentOp", "killOp", "shardCollection", "moveChunk", "balancerStart", "balancerStop", "replSetUpdatePosition",
+        // Admin and sharding commands, so the S3 form names them as the API form does (moveRange and addShard are in a
+        // sharded cluster's slow log). Only names no other command uses as a field.
+        "moveRange", "addShard", "removeShard", "splitChunk", "mergeChunks", "refineCollectionShardKey", "reshardCollection",
+        "enableSharding", "listShards", "balancerStatus", "configureCollectionBalancing", "cleanupOrphaned",
+        "commitTransaction", "abortTransaction", "killSessions", "killAllSessions", "dropConnections",
+        "createSearchIndexes", "updateSearchIndex", "dropSearchIndex", "listSearchIndexes", "buildInfo", "hostInfo",
+        "getParameter", "setParameter", "setFeatureCompatibilityVersion", "connectionStatus", "usersInfo", "rolesInfo",
+        "dropAllUsersFromDatabase", "dropAllRolesFromDatabase", "grantRolesToRole", "revokeRolesFromRole",
+        "grantPrivilegesToRole", "revokePrivilegesFromRole", "replSetHeartbeat", "getLog", "fsync",
     };
 
     private readonly MongoLogStream _stream;
@@ -660,13 +669,18 @@ public sealed partial class MongoLogProcessor
     ///    can come first: the bench shipped 5 of 183 slow rows as update (2026-10-20). The command's own key holds the
     ///    collection (or 1); "update" holds a document, as an aggregate's "explain" holds a boolean. Only when no known
     ///    key holds one (an explain, whose value is the explained command) is the first known key the name.
+    /// 🔴 WITH NO KNOWN KEY, THE S3 FORM CANNOT USE THE FIRST KEY. A slow write statement is logged as
+    ///    {"q":…,"u":…,"multi":…,"upsert":…}, and a command missing from the list by its own name, first in the API's
+    ///    files. The export shuffles keys, so "the first key" named one statement q, upsert or multi at random (review of
+    ///    agent PR #14). The S3 form takes q when there is one, else the least key that holds a string or a number and
+    ///    is not the driver's envelope, else the least key: the same name every time.
     /// </remarks>
     private void Command(scoped ref Utf8JsonReader r, ref LineFields f, bool fromSlowLog)
     {
         if (fromSlowLog && f.CommandName.IsEmpty)
         {
             var peek = r;
-            ReadOnlySpan<byte> first = default, firstKnown = default, command = default;
+            ReadOnlySpan<byte> first = default, firstKnown = default, command = default, q = default, leastScalar = default, least = default;
             while (peek.Read() && peek.TokenType == JsonTokenType.PropertyName)
             {
                 var key = peek.ValueSpan;
@@ -676,7 +690,8 @@ public sealed partial class MongoLogProcessor
                 }
                 var known = KnownCommands.Contains(Encoding.UTF8.GetString(key));
                 peek.Read();
-                if (known && peek.TokenType is JsonTokenType.String or JsonTokenType.Number)
+                var scalar = peek.TokenType is JsonTokenType.String or JsonTokenType.Number;
+                if (known && scalar)
                 {
                     command = key;
                     break;
@@ -685,10 +700,28 @@ public sealed partial class MongoLogProcessor
                 {
                     firstKnown = key;
                 }
+                if (key.SequenceEqual("q"u8))
+                {
+                    q = key;
+                }
+                if (least.IsEmpty || key.SequenceCompareTo(least) < 0)
+                {
+                    least = key;
+                }
+                if (scalar && key.Length > 0 && key[0] != (byte)'$' && !MongoShape.IsEnvelope(key)
+                    && (leastScalar.IsEmpty || key.SequenceCompareTo(leastScalar) < 0))
+                {
+                    leastScalar = key;
+                }
                 peek.Skip();
             }
             // An explain's own value is the explained command, a document: with no better key it is still the name.
-            f.CommandName = !command.IsEmpty ? command : !firstKnown.IsEmpty ? firstKnown : first;
+            f.CommandName = !command.IsEmpty ? command
+                : !firstKnown.IsEmpty ? firstKnown
+                : _form == LineForm.Api ? first
+                : !q.IsEmpty ? q
+                : !leastScalar.IsEmpty ? leastScalar
+                : least;
         }
         _shape.Normalize(ref r);
         f.HasShape = true;
