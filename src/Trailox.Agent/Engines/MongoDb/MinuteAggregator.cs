@@ -59,8 +59,8 @@ public sealed class MinuteGroup
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
-/// <item>A minute ships as soon as the file is 2 seconds past it (measured disorder: at most 0.1 s), which
-/// keeps memory flat however long the window.</item>
+/// <item>A minute ships as soon as the file is past it by the grace: 2 seconds for the Admin API's files (measured
+/// disorder: at most 0.1 s), 60 for the S3 export's (at most 37.8 s). It keeps memory flat however long the window.</item>
 /// <item>A line for a minute already shipped opens the next PART of that minute; it never replaces a row.</item>
 /// <item>Cardinality guard: past <c>groupCap</c> groups in one (minute, part), every new key of that minute
 /// goes into one "__other__" group with its real counts. The guard admits keys in file order, so a
@@ -71,7 +71,17 @@ public sealed class MinuteAggregator
 {
     public const string Other = "__other__";
     public const long MinuteMicros = 60_000_000;
-    private const long FlushGraceMicros = 2_000_000;
+
+    /// <summary>The Admin API's files are out of order by at most 0.1 s (PLAN_PHASE1B.md §3.3).</summary>
+    public const long ApiGraceMicros = 2_000_000;
+
+    /// <summary>
+    /// The S3 export reorders records within a batch: at most 37.8 s in 3 days of Cluster1, and no minute opened a later
+    /// part at 30 s (PLAN_S3.md §2.2).
+    /// </summary>
+    public const long S3GraceMicros = 60_000_000;
+
+    private readonly long _flushGraceMicros;
 
     private readonly int _groupCap;
     private readonly int _labelCount;
@@ -87,8 +97,10 @@ public sealed class MinuteAggregator
 
     public long LateLines { get; private set; }
 
-    public MinuteAggregator(int groupCap, int labelCount, Action<MinuteGroup> emit)
+    /// <param name="flushGraceMicros">How far the file must be past a minute before it ships: how out of order its lines come.</param>
+    public MinuteAggregator(int groupCap, int labelCount, Action<MinuteGroup> emit, long flushGraceMicros = ApiGraceMicros)
     {
+        _flushGraceMicros = flushGraceMicros;
         _groupCap = groupCap;
         _labelCount = labelCount;
         _emit = emit;
@@ -135,7 +147,7 @@ public sealed class MinuteAggregator
     /// <summary>Ships every minute the file has moved past by more than the grace.</summary>
     public void FlushBefore(long maxTsMicros)
     {
-        var closedBefore = maxTsMicros - FlushGraceMicros;
+        var closedBefore = maxTsMicros - _flushGraceMicros;
         if (closedBefore <= _flushedBefore)
         {
             return;

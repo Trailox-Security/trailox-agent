@@ -96,8 +96,9 @@ public sealed partial class MongoLogProcessor
         "enableSharding"u8.ToArray(), "addShard"u8.ToArray(), "removeShard"u8.ToArray(),
     ];
 
-    // Command names a slow-query line's "command" can start with. The command is the first of these keys
-    // found, never simply the first key: the S3 export reorders keys.
+    // Command names a slow-query line's "command" can start with. The command is the first of these keys whose value
+    // is a string or a number (the collection, or 1), never simply the first key: the S3 export reorders keys, and a
+    // command's own fields can carry these names (findAndModify's "update", aggregate's "explain").
     private static readonly HashSet<string> KnownCommands = new(StringComparer.Ordinal)
     {
         "find", "aggregate", "count", "distinct", "getMore", "insert", "update", "delete", "findAndModify", "findandmodify",
@@ -106,6 +107,15 @@ public sealed partial class MongoLogProcessor
         "grantRolesToUser", "revokeRolesFromUser", "createRole", "updateRole", "dropRole", "hello", "isMaster", "ismaster",
         "ping", "serverStatus", "replSetGetStatus", "killCursors", "endSessions", "dbStats", "collStats", "validate",
         "compact", "currentOp", "killOp", "shardCollection", "moveChunk", "balancerStart", "balancerStop", "replSetUpdatePosition",
+        // Admin and sharding commands, so the S3 form names them as the API form does (moveRange and addShard are in a
+        // sharded cluster's slow log). Only names no other command uses as a field.
+        "moveRange", "addShard", "removeShard", "splitChunk", "mergeChunks", "refineCollectionShardKey", "reshardCollection",
+        "enableSharding", "listShards", "balancerStatus", "configureCollectionBalancing", "cleanupOrphaned",
+        "commitTransaction", "abortTransaction", "killSessions", "killAllSessions", "dropConnections",
+        "createSearchIndexes", "updateSearchIndex", "dropSearchIndex", "listSearchIndexes", "buildInfo", "hostInfo",
+        "getParameter", "setParameter", "setFeatureCompatibilityVersion", "connectionStatus", "usersInfo", "rolesInfo",
+        "dropAllUsersFromDatabase", "dropAllRolesFromDatabase", "grantRolesToRole", "revokeRolesFromRole",
+        "grantPrivilegesToRole", "revokePrivilegesFromRole", "replSetHeartbeat", "getLog", "fsync",
     };
 
     private readonly MongoLogStream _stream;
@@ -122,6 +132,9 @@ public sealed partial class MongoLogProcessor
     private readonly ArrayBufferWriter<byte> _key = new(512);
     private byte[] _scratch = new byte[1 << 16];
     private int _scratchUsed;
+
+    /// <summary>A rewritten line's top-level id (server log) or atype (audit) offset, found in the scan for its time.</summary>
+    private int _keyAt = -1;
 
     public LineCounts Counts { get; } = new();
 
@@ -143,11 +156,14 @@ public sealed partial class MongoLogProcessor
         _windowStart = windowStartMicros;
         _windowEnd = windowEndMicros;
         _sink = sink;
+        // The S3 export reorders records within a batch by up to 38 s (PLAN_S3.md §2.2): with the API's 2 s grace a busy
+        // minute would ship in several parts.
+        var grace = form == LineForm.Rewritten ? MinuteAggregator.S3GraceMicros : MinuteAggregator.ApiGraceMicros;
         _aggregator = stream switch
         {
-            MongoLogStream.Ops => new MinuteAggregator(groupCap, OpsLabels, WriteOps),
-            MongoLogStream.SlowOps => new MinuteAggregator(groupCap, SlowLabels, WriteSlow),
-            MongoLogStream.SigninFailures => new MinuteAggregator(groupCap, FailureLabels, WriteFailure),
+            MongoLogStream.Ops => new MinuteAggregator(groupCap, OpsLabels, WriteOps, grace),
+            MongoLogStream.SlowOps => new MinuteAggregator(groupCap, SlowLabels, WriteSlow, grace),
+            MongoLogStream.SigninFailures => new MinuteAggregator(groupCap, FailureLabels, WriteFailure, grace),
             _ => null,
         };
     }
@@ -168,7 +184,18 @@ public sealed partial class MongoLogProcessor
             return;
         }
         var audit = _audit;
-        if (!LineScan.TryTimestampMicros(line, audit, out var ts, _form))
+        long ts;
+        bool timed;
+        if (_form == LineForm.Rewritten)
+        {
+            LineScan.TopLevelValues(line, audit ? "ts"u8 : "t"u8, audit ? "atype"u8 : "id"u8, out var timeAt, out _keyAt);
+            timed = LineScan.TryTimestampAt(line, timeAt, out ts);
+        }
+        else
+        {
+            timed = LineScan.TryTimestampMicros(line, audit, out ts);
+        }
+        if (!timed)
         {
             Counts.Malformed++;
             return;
@@ -218,7 +245,7 @@ public sealed partial class MongoLogProcessor
     /// <summary>An operation's audit line that would not parse: its type and time are known from the raw bytes, so it is counted.</summary>
     private bool UnparsedOp(ReadOnlySpan<byte> line, long ts)
     {
-        var atype = LineScan.QuotedAt(line, LineScan.Value(line, "\"atype\""u8, "atype"u8, _form));
+        var atype = LineScan.QuotedAt(line, KeyAt(line, "\"atype\""u8));
         if (!atype.SequenceEqual("authCheck"u8) && !IsDdl(atype))
         {
             return false;
@@ -229,11 +256,15 @@ public sealed partial class MongoLogProcessor
         return true;
     }
 
+    /// <summary>The offset of the line's id or atype value: from its first bytes, or for a rewritten line from the time scan.</summary>
+    private int KeyAt(ReadOnlySpan<byte> line, ReadOnlySpan<byte> quotedKey) =>
+        _form == LineForm.Rewritten ? _keyAt : LineScan.ValueOf(line, quotedKey);
+
     // ---- server log -------------------------------------------------------------------------------
 
     private void ProcessServer(ReadOnlySpan<byte> line, long ts)
     {
-        var at = LineScan.Value(line, "\"id\""u8, "id"u8, _form);
+        var at = KeyAt(line, "\"id\""u8);
         if (!LineScan.TryInt(line, at, out var id))
         {
             Counts.Malformed++;
@@ -427,7 +458,7 @@ public sealed partial class MongoLogProcessor
 
     private void ProcessAudit(ReadOnlySpan<byte> line, long ts)
     {
-        var atype = LineScan.QuotedAt(line, LineScan.Value(line, "\"atype\""u8, "atype"u8, _form));
+        var atype = LineScan.QuotedAt(line, KeyAt(line, "\"atype\""u8));
         var isOp = atype.SequenceEqual("authCheck"u8);
         var isStartup = !isOp && atype.SequenceEqual("startup"u8);
         var isDdl = !isOp && !isStartup && IsDdl(atype);
@@ -629,13 +660,27 @@ public sealed partial class MongoLogProcessor
 
     // ---- shared parsing ----------------------------------------------------------------------------
 
-    /// <summary>The command document: its shape, and for a slow line its name (the first known command key).</summary>
+    /// <summary>
+    /// The command document: its shape, and for a slow line its name, the first known command key whose value is a
+    /// string or a number.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 NOT JUST THE FIRST KNOWN KEY. A findAndModify carries an "update" field, and in the S3 export's key order it
+    ///    can come first: the bench shipped 5 of 183 slow rows as update (2026-10-20). The command's own key holds the
+    ///    collection (or 1); "update" holds a document, as an aggregate's "explain" holds a boolean. Only when no known
+    ///    key holds one (an explain, whose value is the explained command) is the first known key the name.
+    /// 🔴 WITH NO KNOWN KEY, THE S3 FORM CANNOT USE THE FIRST KEY. A slow write statement is logged as
+    ///    {"q":…,"u":…,"multi":…,"upsert":…}, and a command missing from the list by its own name, first in the API's
+    ///    files. The export shuffles keys, so "the first key" named one statement q, upsert or multi at random (review of
+    ///    agent PR #14). The S3 form takes q when there is one, else the least key that holds a string or a number and
+    ///    is not the driver's envelope, else the least key: the same name every time.
+    /// </remarks>
     private void Command(scoped ref Utf8JsonReader r, ref LineFields f, bool fromSlowLog)
     {
         if (fromSlowLog && f.CommandName.IsEmpty)
         {
             var peek = r;
-            ReadOnlySpan<byte> first = default;
+            ReadOnlySpan<byte> first = default, firstKnown = default, command = default, q = default, leastScalar = default, least = default;
             while (peek.Read() && peek.TokenType == JsonTokenType.PropertyName)
             {
                 var key = peek.ValueSpan;
@@ -643,15 +688,40 @@ public sealed partial class MongoLogProcessor
                 {
                     first = key;
                 }
-                if (KnownCommands.Contains(Encoding.UTF8.GetString(key)))
+                var known = KnownCommands.Contains(Encoding.UTF8.GetString(key));
+                peek.Read();
+                var scalar = peek.TokenType is JsonTokenType.String or JsonTokenType.Number;
+                if (known && scalar)
                 {
-                    first = key;
+                    command = key;
                     break;
                 }
-                peek.Read();
+                if (known && firstKnown.IsEmpty)
+                {
+                    firstKnown = key;
+                }
+                if (key.SequenceEqual("q"u8))
+                {
+                    q = key;
+                }
+                if (least.IsEmpty || key.SequenceCompareTo(least) < 0)
+                {
+                    least = key;
+                }
+                if (scalar && key.Length > 0 && key[0] != (byte)'$' && !MongoShape.IsEnvelope(key)
+                    && (leastScalar.IsEmpty || key.SequenceCompareTo(leastScalar) < 0))
+                {
+                    leastScalar = key;
+                }
                 peek.Skip();
             }
-            f.CommandName = first;
+            // An explain's own value is the explained command, a document: with no better key it is still the name.
+            f.CommandName = !command.IsEmpty ? command
+                : !firstKnown.IsEmpty ? firstKnown
+                : _form == LineForm.Api ? first
+                : !q.IsEmpty ? q
+                : !leastScalar.IsEmpty ? leastScalar
+                : least;
         }
         _shape.Normalize(ref r);
         f.HasShape = true;

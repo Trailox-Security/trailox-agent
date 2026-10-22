@@ -404,7 +404,8 @@ public sealed class MongoShape
         _ => Kind.None,
     };
 
-    private static bool IsEnvelope(ReadOnlySpan<byte> name)
+    /// <summary>A key of the driver's envelope (lsid, $db, maxTimeMS...), not of the command itself.</summary>
+    internal static bool IsEnvelope(ReadOnlySpan<byte> name)
     {
         foreach (var e in Envelope)
         {
