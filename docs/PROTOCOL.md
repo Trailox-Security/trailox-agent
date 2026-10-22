@@ -355,9 +355,16 @@ names in lower case (`QUERY_ID` becomes `query_id`).
 | `catalog_columns` | `COLUMNS` (existing, outside `SNOWFLAKE`) | | yes |
 | `catalog_users` | `USERS` (existing) | | yes |
 | `catalog_grants` | `GRANTS_TO_ROLES` (current, on tables, views, databases and schemas) | | yes |
+| `catalog_credentials` | `CREDENTIALS` (from 1.11.0) | | yes |
 
 With `storeRawQueryText` false, `QUERY_TEXT` and `BIND_VALUES` are excluded from `events`.
 `excludedDatabases` are left out of the catalog streams.
+
+From 1.11.0, `catalog_users` also reads `HAS_WORKLOAD_IDENTITY`, `PASSWORD_LAST_SET_TIME`, `DISPLAY_NAME` and
+`EMAIL`, and `catalog_credentials` lists every credential of the account: programmatic access tokens, key pairs,
+MFA methods and workload identities, with their owner, status, role restriction and dates. Neither reads a secret:
+`CREDENTIALS` holds no token or key, and `USERS` holds no password. An agent older than 1.11.0 is never asked for
+`catalog_credentials`.
 
 ```sql
 -- probe
@@ -380,11 +387,15 @@ SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, COLUMN_ID, COL
        TABLE_CATALOG, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE, COMMENT, DELETED
   FROM SNOWFLAKE.ACCOUNT_USAGE.COLUMNS WHERE DELETED IS NULL AND TABLE_CATALOG NOT IN ('SNOWFLAKE', <excluded>)
 SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, USER_ID, NAME, CREATED_ON, DELETED_ON, LOGIN_NAME, HAS_PASSWORD,
-       HAS_MFA, HAS_RSA_PUBLIC_KEY, HAS_PAT, DISABLED, DEFAULT_ROLE, DEFAULT_WAREHOUSE, LAST_SUCCESS_LOGIN, TYPE, OWNER
+       HAS_MFA, HAS_RSA_PUBLIC_KEY, HAS_PAT, DISABLED, DEFAULT_ROLE, DEFAULT_WAREHOUSE, LAST_SUCCESS_LOGIN, TYPE, OWNER,
+       HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME, EMAIL
   FROM SNOWFLAKE.ACCOUNT_USAGE.USERS WHERE DELETED_ON IS NULL
 SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREATED_ON, MODIFIED_ON, PRIVILEGE, GRANTED_ON, NAME, TABLE_CATALOG,
        TABLE_SCHEMA, GRANTED_TO, GRANTEE_NAME, GRANT_OPTION, GRANTED_BY, DELETED_ON, GRANTED_BY_ROLE_TYPE, OBJECT_INSTANCE
   FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')
+SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREDENTIAL_ID, NAME, USER_NAME, TYPE, DOMAIN, COMMENT, STATUS,
+       ADDITIONAL_DETAILS, CREATED_BY, LAST_ALTERED_BY, CREATED_ON, LAST_USED_ON, LAST_ALTERED, EXPIRATION_DATE
+  FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
 ```
 
 ## 6e. MongoDB Atlas (engine `mongodb`, from 1.8.0)

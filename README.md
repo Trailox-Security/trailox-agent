@@ -32,7 +32,9 @@ Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snow
 - Once a day, a catalog snapshot: tables, columns, users and grants. On Databricks (from 1.6.0)
   it also includes the names of the workspace's service principals. On MongoDB Atlas (from 1.9.0) it is
   each database's size, and with the optional catalog user each collection's name, document count and
-  sizes.
+  sizes. On Snowflake (from 1.11.0) it also includes each user's display name and email, and the
+  account's list of credentials (access tokens, key pairs, MFA methods and workload identities: names,
+  owners, status and dates, never a secret).
 - **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
   so it never leaves the database.
 - `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
@@ -245,7 +247,8 @@ A provisioned cluster or Serverless workgroup, over the Postgres wire protocol (
 Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 
 - **Reads:** `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, `ACCESS_HISTORY`, `LOGIN_HISTORY`,
-  `SESSIONS`, and daily `TABLES`, `COLUMNS`, `USERS` and `GRANTS_TO_ROLES`.
+  `SESSIONS`, and daily `TABLES`, `COLUMNS`, `USERS`, `GRANTS_TO_ROLES` and (from 1.11.0) `CREDENTIALS`.
+  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it.
 - **Account:** a `TYPE = SERVICE` user with a key pair you generate. The private key stays with
   the agent; Trailox never sees either half. Its role needs the `SNOWFLAKE.GOVERNANCE_VIEWER`,
   `SNOWFLAKE.SECURITY_VIEWER` and `SNOWFLAKE.OBJECT_VIEWER` database roles and `USAGE` on a

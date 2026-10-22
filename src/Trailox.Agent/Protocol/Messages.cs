@@ -68,6 +68,10 @@ public static class ProtocolInfo
         // every source; and, only with the optional catalog user, each collection's size from the cluster itself.
         public const string CatalogDatabases = "catalog_databases";
         public const string CatalogCollections = "catalog_collections";
+
+        // Snowflake (agent 1.11): every credential the account knows - programmatic access tokens, key pairs, MFA
+        // methods and workload identities - by name, owner, status and dates. Never a secret: the view holds none.
+        public const string CatalogCredentials = "catalog_credentials";
     }
 }
 
