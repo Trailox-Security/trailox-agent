@@ -17,6 +17,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The PostgreSQL RDS log reader (1.12.0): DescribeDBLogFiles and DownloadDBLogFilePortion. -->
+    <PackageReference Include="AWSSDK.RDS" Version="4.0.106" />
     <!-- The MongoDB S3 log reader (1.10.0). SecurityToken is not called directly: the SDK loads it to sign in with
          a web identity (IRSA) from the default credential chain. -->
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.1" />
