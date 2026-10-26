@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>trailox-agent</AssemblyName>
+    <RootNamespace>Trailox.Agent</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Keep exception MESSAGES: with UseSystemResourceKeys the runtime logs resource keys such as
+         net_http_client_execution_error instead of the text. -->
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
+    <!-- Version is stamped by the release workflow (-p:Version=...); this is the dev default. -->
+    <Version>0.1.0</Version>
+    <InformationalVersion>$(Version)</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The PostgreSQL RDS log reader (1.12.0): DescribeDBLogFiles and DownloadDBLogFilePortion. -->
+    <PackageReference Include="AWSSDK.RDS" Version="4.0.106" />
+    <!-- The MongoDB S3 log reader (1.10.0). SecurityToken is not called directly: the SDK loads it to sign in with
+         a web identity (IRSA) from the default credential chain. -->
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.1" />
+    <PackageReference Include="AWSSDK.SecurityToken" Version="4.0.101.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageReference Include="MongoDB.Driver" Version="3.12.0" />
+    <PackageReference Include="Npgsql" Version="10.0.0" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.0" />
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Trailox.Agent.Tests" />
+  </ItemGroup>
+
+</Project>

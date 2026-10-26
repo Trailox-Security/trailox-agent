@@ -1,0 +1,105 @@
+# Trailox Agent Helm values.
+image:
+  repository: ghcr.io/trailox-security/trailox-agent
+  # Empty: the agent version this chart was released with, so upgrading the chart upgrades the agent on
+  # every node. Set it to run another version. "1" follows the latest 1.x release, but a node that already
+  # has "1" keeps the copy it pulled while pullPolicy is IfNotPresent.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The agent key (shown once at enrolment) and every database password come from ONE existing
+# Secret, referenced by name; the chart never creates a Secret with a value from values.yaml.
+#   kubectl create secret generic trailox-agent --from-literal=TRAILOX_AGENT_KEY=tlx_... --from-literal=TRAILOX_CH_PROD_PASSWORD=...
+#   (a Databricks endpoint adds --from-literal=TRAILOX_DBX_SECRET=<the service principal's OAuth secret>;
+#    a Redshift endpoint adds --from-literal=TRAILOX_RS_PASSWORD=<the monitoring user's password>;
+#    a Snowflake endpoint adds --from-file=TRAILOX_SF_KEY=trailox_agent.p8, its PKCS#8 private key,
+#    referenced as password_env: TRAILOX_SF_KEY;
+#    a MongoDB Atlas endpoint adds --from-literal=TRAILOX_ATLAS_SECRET=<the service account's secret>, and with
+#    the optional catalog user (agent 1.9.0) --from-literal=TRAILOX_ATLAS_CATALOG_PASSWORD=<its password>,
+#    referenced as catalog_password_env: TRAILOX_ATLAS_CATALOG_PASSWORD;
+#    a PostgreSQL endpoint adds --from-literal=TRAILOX_PG_PASSWORD=<the monitoring role's password>)
+# The chart mounts no Secret as files, so here every credential, the catalog user's included, comes through
+# password_env / catalog_password_env.
+existingSecret: trailox-agent
+
+# agent.yaml, rendered into a ConfigMap. No secret belongs here.
+# Any value can come from the agent's environment instead (agent 1.5.0 or later): ${NAME}, ${NAME:-default},
+# or ${NAME:-} to leave the key to its default - e.g. host: ${CH_HOST}, port: ${CH_PORT:-8443}. Set the
+# variables under env (a value, or valueFrom) or in a ConfigMap listed in extraEnvFrom. Inside [...] or {...}
+# quote the reference: excludedDatabases: ["${CH_EXCLUDED}"]. Credentials still come only through
+# password_env / password_file. The environment is read when the pod starts: after changing a ConfigMap or
+# Secret it comes from, run kubectl rollout restart deploy/<release>.
+config:
+  version: 1
+  gateway: https://agent.trailox.io
+  endpoints:
+    - alias: prod-cluster
+      engine: clickhouse
+      kind: onprem
+      host: clickhouse.internal
+      port: 8443
+      tls: true
+      clusterName: ""
+      username: trailox_monitor
+      password_env: TRAILOX_CH_PROD_PASSWORD
+      collectSessionLog: true
+      storeRawQueryText: true
+      excludedDatabases: []
+      # pollMinutes: 10        # 1.4.0: used when Trailox first registers the source (1-1440)
+      # backfillDays: 30       # 1.4.0: used when Trailox first registers the source (0-365)
+
+# Extra environment (proxy, private CA, log level, and the variables config refers to as ${NAME}).
+env: []
+#  - name: HTTPS_PROXY
+#    value: http://proxy.internal:3128
+#  - name: NO_PROXY
+#    value: clickhouse.internal,10.0.0.0/8
+#  - name: SSL_CERT_FILE
+#    value: /etc/trailox/ca/corp-ca.pem
+#  - name: CH_HOST                     # config: host: ${CH_HOST}
+#    valueFrom:
+#      configMapKeyRef: { name: db-endpoints, key: ch_host }
+
+# Whole ConfigMaps (or Secrets) as environment, for the variables config refers to as ${NAME} (agent 1.5.0
+# or later). Each key becomes a variable of exactly that name: a key CH_HOST serves ${CH_HOST}. They come
+# before existingSecret, so a key here never replaces the agent key or a password.
+extraEnvFrom: []
+#  - configMapRef:
+#      name: trailox-agent-settings
+
+# Mount a private CA bundle from an existing ConfigMap (key: corp-ca.pem) at /etc/trailox/ca.
+caConfigMap: ""
+
+# MongoDB Atlas sources (agent 1.8.0): reading a busy cluster's audit log is CPU work. At 100,000
+# operations a second the agent has about 1.6x to spare at 500m and about 3x at 1 CPU, measured. Give it
+# limits.cpu: 1 for MongoDB; memory stays at 512Mi.
+# From the Atlas S3 log export (1.10.0, options.log_source: s3) a line costs about 2.3 times the CPU of the
+# Admin API's files, measured with Full audit: 1 CPU keeps up with about 75,000 operations a second and 500m
+# with about 44,000. A busier cluster is cheaper to read through the Admin API.
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+# The pod's Kubernetes service account. Needed only for an AWS identity: a MongoDB Atlas source that reads the
+# Atlas S3 log export (agent 1.10.0, options.log_source: s3) reads the bucket as the pod's AWS identity, from the
+# AWS SDK's default chain. With IRSA, create one annotated with the IAM role; with EKS Pod Identity, create or name
+# the one the association uses. The role needs s3:ListBucket on the bucket for the cluster's prefix and
+# s3:GetObject on its objects (kms:Decrypt too when the bucket uses SSE-KMS). Unset, the pod runs as the
+# namespace's default service account, as before.
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+#   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/trailox-agent-atlas-logs
+
+# A self-managed PostgreSQL server's log directory (agent 1.12.0, options.log_source: file), mounted read-only from the
+# node at mountPath (options.log_directory in config). The pod must run on the database's node (nodeSelector), and
+# supplementalGroups must hold the directory's group, so the agent can read the files (mode 0640).
+logVolume:
+  hostPath: ""
+  mountPath: /var/log/trailox-pg
+supplementalGroups: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

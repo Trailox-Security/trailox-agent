@@ -1,0 +1,417 @@
+# Trailox Agent
+
+A small, stateless container you run inside your own network. It reads your database's **own
+audit and catalog views** with a read-only account you create, and streams the rows to Trailox
+over HTTPS, **outbound only, on port 443**. Nothing inbound, no IP allow-list, no VPN, and the
+database credentials never leave your network.
+
+Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snowflake**, from
+1.8.0 **MongoDB Atlas**, and from 1.12.0 **PostgreSQL** (Amazon RDS, Aurora and self-managed). One agent
+can read any number of endpoints across them.
+
+## What the agent does
+
+- It runs **only `SELECT` statements**, against the database's built-in audit and catalog views.
+  The complete SQL for every engine is in one file per engine under
+  [`src/Trailox.Agent/Engines`](src/Trailox.Agent/Engines), and reproduced in
+  [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+- It keeps **no state and no buffer**. It asks Trailox which time windows to read, reads each one,
+  streams the result straight into a gzip upload, and repeats. If it stops, the next start
+  re-reads the same window, so a restart repeats work but never loses data.
+- It holds **no logic about what the rows mean**. Classification and analysis happen in Trailox.
+- **MongoDB Atlas is the one exception to "rows as the database returned them":** the agent reads Atlas's
+  log files, replaces every value in every command by its type (`{"customer": 4957}` becomes
+  `{"customer": "?number"}`), and ships one row per minute and group with a count. The values never
+  leave your network. It runs no `SELECT` either: it connects to the cluster **only** with the optional
+  catalog user, to list databases and collections and their sizes, and never reads a document. See
+  [MongoDB Atlas](#mongodb-atlas).
+- **PostgreSQL also reads log files:** the server log holds the sign-ins and the DDL, so the agent reads it,
+  through the RDS API on Amazon RDS and Aurora or from the log directory on a self-managed server. It ships
+  only the connection lines, failed sign-ins and DDL statements, with passwords replaced by `<redacted>`,
+  and counts the other lines. See [PostgreSQL](#postgresql).
+
+## What leaves your network
+
+- The rows of the audit views for the requested windows: statements run, and logins and sessions
+  where the database records them. See each engine below for the exact views.
+- Once a day, a catalog snapshot: tables, columns, users and grants. On Databricks (from 1.6.0)
+  it also includes the names of the workspace's service principals. On MongoDB Atlas (from 1.9.0) it is
+  each database's size, and with the optional catalog user each collection's name, document count and
+  sizes. On Snowflake (from 1.11.0) it also includes each user's display name and email, and the
+  account's list of credentials (access tokens, key pairs, MFA methods and workload identities: names,
+  owners, status and dates, never a secret). On PostgreSQL (from 1.12.0) it also includes the logging
+  settings and the statement texts of `pg_stat_statements`, with passwords replaced.
+- **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
+  so it never leaves the database.
+- `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
+  engine:
+  - **ClickHouse:** statements that touch those databases. The catalog snapshot still lists them.
+  - **Amazon Redshift:** statements, their text and `UNLOAD` records. The per-step detail
+    (`sys_query_detail`) and the catalog snapshot still include them.
+  - **Snowflake** and **Databricks:** the catalog snapshot only. Statements that touch those
+    databases are still shipped.
+- Never: table data, credentials, or anything outside the audit and catalog views listed below
+  (and, on Databricks, the service principal directory).
+
+## Quick start (docker compose)
+
+1. In Trailox, open **Settings → Trailox Agents → Enrol an agent**. Copy the key; it is shown once.
+2. On the same page, generate the setup script for your database and run it. It creates a
+   read-only monitoring account (see the per-engine notes below).
+3. Save [`deploy/agent.yaml.example`](deploy/agent.yaml.example) as `agent.yaml` next to
+   [`deploy/docker-compose.yml`](deploy/docker-compose.yml) and describe your endpoints.
+4. Put the agent key and each endpoint's credential in the environment (or a `.env` file), or
+   mount them as files:
+
+       TRAILOX_AGENT_KEY=tlx_...
+       TRAILOX_CH_PROD_PASSWORD=...
+
+5. `docker compose up -d`. Your endpoints appear under **Database sources** within a minute.
+
+Kubernetes: [`deploy/kubernetes/agent.yaml`](deploy/kubernetes/agent.yaml), or the Helm chart:
+
+    helm install trailox-agent oci://ghcr.io/trailox-security/charts/trailox-agent --version <version> -f values.yaml
+
+The image is `ghcr.io/trailox-security/trailox-agent`, tagged with each release version and with
+`1` for the latest 1.x release. The chart runs the agent version it was released with, so
+`helm upgrade --version <new>` upgrades the agent; set `image.tag` to run another. `1` moves with each
+release, but a machine that has already pulled it keeps that copy: with compose, upgrade with
+`docker compose pull && docker compose up -d`.
+
+Every tag serves `linux/amd64` and `linux/arm64` (for example AWS Graviton): Docker and Kubernetes pull
+the one that matches the machine, so the same command and chart work on both.
+
+## Configuration
+
+`agent.yaml` (default path `/etc/trailox/agent.yaml`, override with `TRAILOX_CONFIG`). **It never
+contains a secret**: credentials are referenced by environment variable or file, so the file can
+be committed. Any other value can be written in the file or taken from the environment; see
+[Values from the environment](#values-from-the-environment).
+
+| Key | Meaning |
+|---|---|
+| `gateway` | `https://agent.trailox.io` unless Trailox tells you otherwise |
+| `probeIntervalMinutes` | How often each endpoint is re-probed (default 60). An endpoint whose probe failed is re-probed at every check-in until it succeeds |
+| `endpoints[].alias` | Short name for the source in Trailox (`[A-Za-z0-9_-]{1,64}`), unique per account |
+| `endpoints[].engine` | `clickhouse`, `databricks`, `redshift`, `snowflake` or `mongodb` (1.8.0) |
+| `endpoints[].kind` | `cloud` or `onprem`; informational |
+| `host`, `port`, `tls` | How the **agent** reaches the database. Meaning per engine below; Trailox never learns them |
+| `clusterName` | Engine-specific: the cluster, warehouse or workgroup (see below) |
+| `username` | The monitoring account the setup script created |
+| `password_env` / `password_file` | Where the credential comes from: an environment variable or a mounted file |
+| `catalog_username`, `catalog_password_env` / `catalog_password_file` | MongoDB Atlas only, optional (1.9.0): the catalog user that lists collections and their sizes, and exactly one place its password comes from. See [MongoDB Atlas](#mongodb-atlas) |
+| `options` | Engine-specific extras (see below) |
+| `collectSessionLog` | Also ship login and session events (default `true`) |
+| `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
+| `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
+| `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse and MongoDB, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
+| `backfillDays` | How far back the first collection reads, 0-365 days (default 30). **Used only when Trailox first registers the source**; changing it later re-reads nothing. From 1.4.0 |
+
+A key written with no value (`tls:`, or `~` or `null`) is a config problem: write a value, or remove
+the line to use the default. `endpoints`, `excludedDatabases` and `options` may be left empty. A
+value's trailing line breaks are dropped (a YAML `|` block adds one), and any other control character
+in a value is a config problem. From 1.5.2; earlier agents read a key with no value as `false`, `0`
+or nothing, or stopped with a stack trace.
+
+### Values from the environment
+
+From 1.5.0 any value in `agent.yaml` can come from the agent's environment instead of the file, so a
+Helm chart or a compose file can supply it. A value written in the file works as before.
+
+| Written | Result |
+|---|---|
+| `${NAME}` | The variable's value. When it is not set or empty the agent does not start (exit 2), and names the line, the key and the variable |
+| `${NAME:-default}` | The variable's value, or `default` when it is not set or empty |
+| `${NAME:-}` | The variable's value; when it is not set or empty the key is left out, so its default applies (a list item is dropped) |
+| `$${` | A literal `${` |
+
+    endpoints:
+      - alias: prod-cluster
+        engine: clickhouse
+        host: ${CH_HOST}
+        port: ${CH_PORT:-8443}
+        clusterName: ${CH_CLUSTER:-}
+        username: trailox_monitor
+        password_env: TRAILOX_CH_PROD_PASSWORD
+        excludedDatabases: ["${CH_EXCLUDED}"]
+
+- A reference can be the whole value or part of one (`ch-${ENV}.internal`), in any value: numbers,
+  `true`/`false`, list items and `options`. Keys and comments are never read, so a commented-out block
+  may name variables that are not set.
+- Inside `[...]` or `{...}` quote it, as above: there an unquoted `{` is YAML syntax.
+- `NAME` is letters, digits and `_`, not starting with a digit. Anything else after `${`, such as
+  `${NAME:?error}` or a default that contains `${`, is a config problem.
+- The variable's content is taken as text: YAML in it is not read, and `${...}` in it is not expanded
+  again. Like any value, it loses its trailing line breaks (a value from a file-backed ConfigMap or
+  Secret ends in one), and any other control character is a config problem.
+- Credentials still come only through `password_env` and `password_file` (and the catalog user's
+  `catalog_password_env` and `catalog_password_file`), which are never expanded. The agent key's variable,
+  and every variable a `password_env` or `catalog_password_env` names, cannot be used as a value: values
+  are reported to Trailox and can appear in error messages.
+- Tools that expand `${...}` themselves need it escaped to pass it on: `$${...}` in a Terraform
+  template or in a compose file that inlines `agent.yaml`, and a quoted delimiter (`<<'EOF'`) for a
+  shell heredoc. Helm does not expand it.
+- The environment is read at start: restart the agent after changing a variable.
+- Agents before 1.5.0 read `${...}` literally and stop with a config problem.
+
+With the Helm chart, put the references in `config` and the variables under `env` (a value, or
+`valueFrom` a ConfigMap or Secret), or list whole ConfigMaps under `extraEnvFrom`, where each key
+becomes a variable of exactly that name:
+
+    config:
+      version: 1
+      gateway: https://agent.trailox.io
+      endpoints:
+        - alias: prod-cluster
+          engine: clickhouse
+          host: ${CH_HOST}
+          port: ${CH_PORT:-8443}
+          password_env: TRAILOX_CH_PROD_PASSWORD
+    env:
+      - name: CH_HOST
+        valueFrom:
+          configMapKeyRef: { name: db-endpoints, key: ch_host }
+    # or a ConfigMap whose keys are the variables themselves (CH_HOST, CH_PORT, ...):
+    # extraEnvFrom:
+    #   - configMapRef: { name: trailox-agent-settings }
+
+After changing a ConfigMap or Secret that the variables come from, `kubectl rollout restart
+deploy/<release>`.
+
+Environment: `TRAILOX_AGENT_KEY` (or `TRAILOX_AGENT_KEY_FILE`), `TRAILOX_CONFIG`,
+`TRAILOX_LOG_LEVEL`, the standard `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and any
+variable `agent.yaml` refers to as `${NAME}`.
+
+Commands: `run` (default), `validate-config`, `healthcheck` (exit 0 when the loop ran in the last
+5 minutes), `version`. Exit codes: 2 config invalid, 3 agent key rejected, 4 agent version too old.
+Anything else (database or network unavailable) is retried in place with backoff.
+
+**Turning a source off.** A source you turn off in Trailox is left alone by the agent too: from
+1.3.3 it is not probed, and nothing is read from it, until you turn it on again. The log says so
+once, when it changes. Earlier versions went on probing it, and on Databricks and Snowflake a probe
+runs statements, which can start a warehouse. The agent learns that a source is off from the answer
+to a check-in, so after a restart every endpoint in `agent.yaml` is probed once before that answer
+arrives. To keep the agent away from a database altogether, remove its block from `agent.yaml`.
+
+## Databases
+
+### ClickHouse
+
+Self-managed or ClickHouse Cloud, over the HTTP interface (usually 8443 with TLS).
+
+- **Reads:** `system.query_log`, `system.session_log`, and daily `system.tables`,
+  `system.users`, `system.grants`, and (from 1.7) the `readonly`, `allow_ddl` and profile rows of
+  `system.settings_profile_elements`, so Trailox can tell which users a readonly setting stops
+  from writing. Every request carries `log_comment=trailox-agent`, and the agent excludes its own
+  reads. Any other statement that carries that comment is reported like any other (from 1.12.0).
+- **Account:** a `readonly = 2` user with `SELECT` on those system tables; the Agents page
+  prints the script.
+- **agent.yaml:** `host`/`port`/`tls` = the HTTP endpoint; `clusterName` = the cluster to
+  read across all replicas (`default` on ClickHouse Cloud, empty on a single node; a wrong value
+  silently reads only part of the cluster); `password_env`/`password_file` = the user's password.
+- **Without statement text:** a normalized shape and a hash of the text are sent instead.
+
+### Databricks
+
+A Unity Catalog workspace, through the SQL Statement Execution API over HTTPS.
+
+- **Reads:** `system.query.history`, `system.access.table_lineage`,
+  `system.access.column_lineage`, `system.access.audit` (sign-ins), and daily the
+  `information_schema` tables, columns and privileges of your catalogs.
+- **Service principal names (from 1.6.0):** Databricks records a service principal by its
+  application id only, so once a day the agent also lists the workspace's service principals
+  (application id, display name, active) from the workspace directory. Read-only, and no grant
+  is needed. See [docs/PROTOCOL.md](docs/PROTOCOL.md) 6b.
+- **Account:** a service principal with an OAuth secret that only the agent holds. It needs
+  `USE CATALOG` on `system`; `USE SCHEMA` and `SELECT` on `system.query`, `system.access` and
+  `system.information_schema`; `BROWSE` on each catalog to inventory; and `CAN USE` on the SQL
+  warehouse.
+- **agent.yaml:** `host` = the workspace hostname; `clusterName` = the SQL warehouse id
+  (16 hex characters); `username` = the principal's application id; `password_env`/`password_file`
+  = its OAuth secret. `port`/`tls` are ignored (HTTPS 443).
+- **Statement text** is shown as `<REDACTED>` by Databricks unless the principal is in
+  `databricks_pii_access`. The agent detects this and reports it, and then no text is stored.
+  `excludedDatabases` here means catalogs; `system`, `samples` and `__databricks_internal` are
+  always excluded.
+
+### Amazon Redshift
+
+A provisioned cluster or Serverless workgroup, over the Postgres wire protocol (5439, TLS required).
+
+- **Reads:** `sys_query_history`, `sys_query_text`, `sys_query_detail` (scan and write steps
+  only), `sys_unload_history`, `sys_connection_log`, and daily `svv_table_info`,
+  `svv_all_columns`, `pg_user` and `svv_relation_privileges`.
+- **Account:** a database user with the `sys:monitor` role; the password stays with the agent.
+- **agent.yaml:** `host` = the cluster or workgroup endpoint; `port` 5439; `clusterName` = the
+  cluster identifier or workgroup name (descriptive); `username`; `password_env`/`password_file`;
+  `options.database` = the database to sign in to (default `dev`).
+- The cluster needs no public endpoint: the agent runs inside your VPC. A paused Serverless
+  workgroup is resumed by the agent's first read.
+
+### Snowflake
+
+Through the Snowflake SQL API over HTTPS, as a key-pair service user.
+
+- **Reads:** `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, `ACCESS_HISTORY`, `LOGIN_HISTORY`,
+  `SESSIONS`, and daily `TABLES`, `COLUMNS`, `USERS`, `GRANTS_TO_ROLES` and (from 1.11.0) `CREDENTIALS`.
+  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it.
+- **Account:** a `TYPE = SERVICE` user with a key pair you generate. The private key stays with
+  the agent; Trailox never sees either half. Its role needs the `SNOWFLAKE.GOVERNANCE_VIEWER`,
+  `SNOWFLAKE.SECURITY_VIEWER` and `SNOWFLAKE.OBJECT_VIEWER` database roles and `USAGE` on a
+  warehouse. The setup script also caps that warehouse at 2 credits a day with a resource monitor.
+- **agent.yaml:** `host` = the account identifier (`myorg-myaccount`); `clusterName` = the
+  warehouse; `username` = the service user; `password_file` (or `password_env`) = its
+  unencrypted PKCS#8 PEM private key; `options.role` = the role (default `TRAILOX_MONITOR`).
+  `port`/`tls` are ignored (HTTPS 443).
+- Every read resumes the warehouse (60-second minimum billing), so reads are scheduled hourly by
+  default. Enterprise Edition or higher is required for table and column attribution
+  (`ACCESS_HISTORY`).
+
+### MongoDB Atlas
+
+A dedicated Atlas cluster (M10 or larger), through the Atlas Administration API over HTTPS. From 1.8.0.
+The agent connects to the cluster itself **only** with the optional catalog user (from 1.9.0), to list
+databases and collections and their sizes; it never reads a document. Without that user it never
+connects to the cluster.
+
+- **Reads:** each member's server log and audit log files (for a sharded cluster, its `mongos`
+  routers'), the project's events, and daily the database users, custom roles and IP access list.
+  Atlas keeps log files 30 days. Daily from 1.9.0, each database's size as Atlas measures it on the
+  cluster's primaries (each shard's, on a sharded cluster).
+- **What leaves your network:** per minute and group, a count, the query's **shape** (every value
+  replaced by its type), the user, client address, namespace and result, and the metrics of slow
+  queries; one row per connection and sign-in (user, client address, application and driver); failed
+  sign-ins per minute and connection; project events; the catalog snapshot. Never a value from a
+  command, a document, or the error text of a failed sign-in.
+- **Account:** an Atlas service account with **Project Read Only** and **Project Cluster Log Viewer**
+  on the project (Project Read Only alone when the logs come from S3, below). Neither can read a document
+  or change access. If the service account has an API access list, add the agent's outbound address to it:
+  Atlas checks it even when your organization does not require one.
+- **agent.yaml:** `host` = the project id (24 hex, Project Settings); `clusterName` = the cluster's name;
+  `username` = the service account's client id; `password_env`/`password_file` = its secret.
+  `port`/`tls` are ignored (HTTPS 443).
+- **Collections (optional, from 1.9.0):** to list each collection with its document count and sizes,
+  add a catalog user. Without one, Trailox shows database sizes only.
+  1. In Atlas, a custom role (for example `trailoxCatalog`) with exactly four actions on all databases:
+     `listDatabases`, `listCollections`, `collStats` and `dbStats`. These are enough, and none of them
+     can read a document. Add each through the action list's search box: ticking a group heading adds
+     every action of that group.
+  2. A database user (for example `trailox_catalog`) with only that role, restricted to the cluster.
+  3. The agent's outbound address on the project's IP access list (Network Access), or a PrivateLink
+     path from the agent to the cluster. The log reading never needed one; this does.
+  4. In `agent.yaml`: `catalog_username` and exactly one of `catalog_password_env` or
+     `catalog_password_file`.
+
+  The agent then connects over TLS as that user (application name `trailox-agent/<version> catalog`),
+  once a day to run `listDatabases`, `listCollections` and `$collStats` (counts and sizes from
+  metadata), and at each probe to run `connectionStatus`. Never `find`, and never a document. The probe
+  reports a `catalog` check: `ok`; `warn` when the user's role also allows reading documents (`find`)
+  or changing anything, which the agent never does but should not be granted; `fail` when the agent
+  cannot connect or sign in, which leaves the logs unaffected. Trailox reports that user as the source's
+  monitoring user, so its own sign-ins and commands are shown as Trailox's own. At most 10,000
+  collections a day; past that the list says it is incomplete.
+- **Logs from your Atlas S3 export (optional, from 1.10.0):** if you already export the cluster's logs to S3
+  with Atlas's log integration (Project Owner sets it up; M10+ on MongoDB 7.0+; log types Mongod and Mongod
+  Audit, or Mongos and Mongos Audit for a sharded cluster), the agent can read them from your bucket instead
+  of downloading them from Atlas: `options: { log_source: s3, s3_bucket: <bucket>, s3_region: <its region>,
+  s3_prefix: <the integration's prefix> }`. The agent reads the bucket as its own AWS identity, from the AWS
+  SDK's default chain: on Kubernetes, IRSA or EKS Pod Identity (`serviceAccount` in the chart). That identity
+  needs `s3:ListBucket` on the bucket for `<prefix>/<clusterName>/` and `s3:GetObject` on the objects under
+  it, plus `kms:Decrypt` when the bucket uses SSE-KMS; no AWS secret goes in `agent.yaml`. The export starts
+  where its live objects start: the hours it backfills when first enabled are not read. **The export is
+  uncompressed**, about 19 times the bytes of the API's gzip files: run the agent in the bucket's region,
+  where S3 reads carry no transfer charge.
+- **Coverage:** with Atlas auditing off, Trailox sees sign-ins, slow queries and project changes. Every
+  operation needs auditing on with "audit authorization successes"; Trailox generates the filter, and
+  you apply it in Atlas.
+- **Your Activity Feed:** Atlas records each log download as an event, about 860 a day for a
+  3-member cluster. Trailox does not ship those events back.
+- **Resources:** reading a busy cluster's audit log is CPU work. Give the agent **1 CPU** for MongoDB
+  sources (`resources.limits.cpu: 1` in the chart); memory stays at 512Mi. From the S3 export a line costs
+  about 2.3 times as much CPU (it is parsed twice and its keys come in any order): measured with Full
+  audit, 1 CPU keeps up with about 75,000 operations a second and 500m with about 44,000. A busier cluster
+  is cheaper to read through the Admin API.
+
+### PostgreSQL
+
+PostgreSQL 13 or later, from 1.12.0: Amazon RDS and Aurora, whose server log the agent reads through the RDS API,
+or a self-managed server, whose log directory is mounted read-only into the agent.
+
+- **Reads:**
+  - the server log, for sign-ins (`log_connections`, `log_disconnections`), failed sign-ins and DDL
+    (`log_statement = 'ddl'`). On RDS and Aurora through `DescribeDBLogFiles` and `DownloadDBLogFilePortion`:
+    no CloudWatch export is needed. On a self-managed server from the log directory;
+  - at most every 15 minutes, the counters of `pg_stat_statements` without their text (`showtext := false`),
+    on each server;
+  - daily: tables (sizes from the planner's `relpages`, never a size function), columns (1,000 tables per
+    statement), roles and their memberships, grants, the logging settings of each server, and the statement
+    texts of `pg_stat_statements`.
+- **What leaves your network:** connection lines (user, database, client address and port, application),
+  failed sign-ins with the server's detail (the `pg_hba.conf` line that matched, or that the role does not
+  exist), DDL statements, and per window one row that counts the other lines it read. Passwords in any text
+  (`PASSWORD '...'`, password verifiers, connection strings) are replaced by `<redacted>` before anything is
+  sent. Never application error text or a statement's parameters. With `storeRawQueryText: false` a DDL
+  statement ships its command (`CREATE TABLE`) only, and no statement text is read.
+- **Account:** a role with `LOGIN`, `CONNECTION LIMIT 2`, and membership in `pg_read_all_stats` and
+  `pg_read_all_settings`, and nothing else. The agent's sessions run with `statement_timeout` 30 s,
+  `lock_timeout` 1 s and read-only transactions, and use one connection at a time.
+- **Sign-in:** SCRAM-SHA-256 only. The agent refuses a server that asks for the password in clear text or as MD5, or
+  that lets it in without one, before the password is sent: set the role's password as SCRAM and use `scram-sha-256`
+  in `pg_hba.conf`. With `tls: true` the connection is encrypted and the sign-in uses channel binding
+  (SCRAM-SHA-256-PLUS), so a machine between the agent and the server cannot pass it on; the agent does not check
+  the server's certificate. Point the agent at the server itself, not at a connection pooler.
+- **agent.yaml:** `host`/`port`/`tls` = the primary's address; `username` and its password;
+  `options.log_source` = `rds_api` or `file`. With `rds_api`: `options.instances` = the instance identifiers,
+  primary first, each `id` or `id=host`, and `options.rds_region`. A replica's host is derived only when `host` is
+  the primary's RDS instance endpoint; with an address, a CNAME or an Aurora cluster endpoint, name each replica's
+  host (`id=host`). A server the agent cannot reach is skipped, and the others are read.
+  With `file`: `options.log_directory` = where the log directory is mounted in the container. `options.database`
+  = where the agent signs in for the counters (default `postgres`).
+- **Amazon RDS and Aurora:** in a custom parameter group, `log_connections`, `log_disconnections`,
+  `log_statement = ddl`, `log_rotation_age = 10` and `log_filename = postgresql.log.%Y-%m-%d-%H%M`. The agent's AWS
+  identity (IRSA or EKS Pod Identity on Kubernetes, an instance profile, or `AWS_*` variables) needs
+  `rds:DescribeDBLogFiles` and `rds:DownloadDBLogFilePortion` on each instance, nothing else. Reading the log costs
+  the instance some CPU, so the agent reads only the files of each window, at most 4 calls a second (2 while it
+  catches up). With hourly files a window reads up to 3.5 times what the server wrote; daily files are refused.
+  RDS keeps log files for `rds.log_retention_period` (3 days by default, 7 at most): a longer outage loses the gap.
+- **Self-managed:** `logging_collector = on` (one restart), the log in a directory of its own that the agent's group
+  can read (mode 2750, `log_file_mode = 0640`, then one `pg_rotate_logfile()`), `log_destination = jsonlog`
+  (`csvlog` on 13 and 14), `log_timezone = UTC` and `log_rotation_age = 10min`. Mount the directory read-only and
+  run the agent with its group: `group_add` in compose, `logVolume` and `supplementalGroups` in the chart. On the
+  database host, `network_mode: host` lets the agent reach a server that listens on `localhost`.
+- **The probe's checks:** `role`, `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
+  (UTC), `logging_collector` (self-managed), `pg_stat_statements`, `instances` (each replica answers), `replicas` and
+  `log_files`, each `ok`, `warn` or `fail` with what to change.
+- **A rejected password:** the agent stops signing in to that source, for its probe and its tasks, until it
+  restarts, so it never fills your log with its own failed sign-ins. Fix the password, then restart the agent.
+
+## Security
+
+- Minimal image (`mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled`): no shell, no package manager.
+- Runs as UID 10001, read-only root filesystem, all capabilities dropped, `no-new-privileges`.
+- Listens on nothing. Outbound HTTPS to Trailox and connections to your databases only; proxy and
+  private-CA aware through the standard environment variables.
+- Images are signed with Sigstore cosign and carry SPDX and CycloneDX SBOM attestations. The
+  multi-platform index a tag points to is signed, and so is each platform's image; each platform's
+  image carries its own SBOMs, and the index carries both:
+
+      cosign verify ghcr.io/trailox-security/trailox-agent:1 \
+        --certificate-identity-regexp '^https://github.com/Trailox-Security/trailox-agent/' \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+- The agent key is a bearer credential. Rotate or revoke it from the Agents page; a revoked key
+  stops working on the agent's next request.
+
+## Building
+
+    dotnet test
+    docker build -t trailox-agent:dev .
+    docker buildx build --platform linux/arm64 -t trailox-agent:dev-arm64 .   # another platform
+
+## Protocol
+
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md): the requests the agent sends and the SQL it runs.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
