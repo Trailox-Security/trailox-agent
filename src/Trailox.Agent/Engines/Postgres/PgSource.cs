@@ -32,6 +32,18 @@ public sealed class PgSource : IEngineSource
     /// <summary>The platform, once the server gave a definite answer: it does not change while the agent runs.</summary>
     private string? _platform;
 
+    /// <summary>
+    /// Whether the server writes its log in English (<c>lc_messages</c>), from the newest probe; English until a probe says
+    /// otherwise. The window reader counts what it cannot recognise by it.
+    /// </summary>
+    private bool _english = true;
+
+    /// <summary>
+    /// <c>log_rotation_age</c> in minutes, from the newest probe; 0 until one reads it. The window reader tells a window
+    /// whose file is gone by it.
+    /// </summary>
+    private int _rotationMinutes;
+
     public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null)
     {
         _endpoint = endpoint;
@@ -64,6 +76,9 @@ public sealed class PgSource : IEngineSource
             checks.Add(await RoleCheckAsync(conn, ct));
             var settings = await SettingsAsync(conn, ct);
             checks.AddRange(PgProbeChecks.Settings(settings, caps.LogSource));
+            _english = PgProbeChecks.English(settings.GetValueOrDefault("lc_messages", ""));
+            _rotationMinutes = int.TryParse(settings.GetValueOrDefault("log_rotation_age", ""), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var minutes) ? minutes : 0;
             var extension = await ScalarAsync(conn, PgSql.StatStatementsVersion, ct) as string;
             caps.StatStatements = extension != null;
             checks.Add(PgProbeChecks.StatStatements(extension, settings, _catalog.Database));
@@ -140,7 +155,8 @@ public sealed class PgSource : IEngineSource
         var callsPerSecond = _utcNow() - FromMicros(task.EndMicros) > CatchUp ? CatchUpCallsPerSecond : LiveCallsPerSecond;
         foreach (var instance in _instances)
         {
-            var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows);
+            var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+                _english, _rotationMinutes);
             if (_rds != null)
             {
                 await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond), ct);
@@ -204,7 +220,7 @@ public sealed class PgSource : IEngineSource
                 var starts = files.Where(f => f.Format == newest.Format).Select(f => f.StartMicros).OfType<long>().OrderBy(t => t).ToList();
                 report.OldestLogMicros = starts.FirstOrDefault();
                 report.LogFileMinutes = PgProbeChecks.FileMinutes(starts);
-                checks.Add(PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes));
+                checks.Add(PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes, _rotationMinutes));
             }
         }
         catch (SourceException ex)

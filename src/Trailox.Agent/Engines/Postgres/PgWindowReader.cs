@@ -51,10 +51,17 @@ public sealed class PgWindowReader
 
     private static readonly JsonSerializerOptions CountsJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
+    /// <summary>The start of the first file after a gap that tells a stopped server: PostgreSQL's own startup line.</summary>
+    internal const string ShutDownLine = "database system was shut down at";
+
+    private const int HeadBytes = 64 * 1024;
+
     private readonly string _instance;
     private readonly long _start;
     private readonly long _end;
     private readonly bool _shipText;
+    private readonly bool _english;
+    private readonly long _rotationMicros;
     private readonly RowSink _sink;
     private readonly PgRows? _rows;
     private readonly SortedDictionary<string, long> _counted = new(StringComparer.Ordinal);
@@ -64,6 +71,7 @@ public sealed class PgWindowReader
     private long _outOfWindow;
     private long _unreadable;
     private long _malformed;
+    private long _preamble;
     private int _files;
     private long _bytes;
     private long? _firstLogMicros;
@@ -72,12 +80,24 @@ public sealed class PgWindowReader
 
     /// <param name="shipText">The source's <c>storeRawQueryText</c>: when false, a statement record ships its command only.</param>
     /// <param name="rows">The upload's pipe, flushed as rows build up; null when the rows go to memory.</param>
-    public PgWindowReader(string instance, long startMicros, long endMicros, bool shipText, RowSink sink, PgRows? rows = null)
+    /// <param name="english">
+    /// The server writes its log in English (<c>lc_messages</c>, from the probe). When it does not, a LOG record of no kind
+    /// we know is counted <c>unrecognised</c>: it may be a sign-in or a statement the agent cannot read.
+    /// An English server's other LOG records (checkpoints, autovacuum) stay <c>other</c>.
+    /// </param>
+    /// <param name="rotationMinutes">
+    /// <c>log_rotation_age</c>, from the probe: a new file at least this often. 0 (unknown, or no rotation by time): a
+    /// directory window is never said to be missing.
+    /// </param>
+    public PgWindowReader(string instance, long startMicros, long endMicros, bool shipText, RowSink sink, PgRows? rows = null,
+        bool english = true, int rotationMinutes = 0)
     {
         _instance = instance;
         _start = startMicros;
         _end = endMicros;
         _shipText = shipText;
+        _english = english;
+        _rotationMicros = Math.Max(0, rotationMinutes) * 60_000_000L;
         _sink = sink;
         _rows = rows;
     }
@@ -87,6 +107,22 @@ public sealed class PgWindowReader
 
     public void Add(PgLogRecord r)
     {
+        if (r.UnreadLines > 0)
+        {
+            // Lines the parser could not read count once, in the window of their time.
+            if (r.TsMicros >= _start && r.TsMicros < _end)
+            {
+                if (r.Preamble)
+                {
+                    _preamble += r.UnreadLines;
+                }
+                else
+                {
+                    _malformed += r.UnreadLines;
+                }
+            }
+            return;
+        }
         _records++;
         if (r.TsMicros == long.MinValue)
         {
@@ -105,7 +141,7 @@ public sealed class PgWindowReader
         var kind = r.Kind;
         if (!PgRecordKinds.Shipped(kind))
         {
-            var key = kind.ToString().ToLowerInvariant();
+            var key = kind == PgRecordKind.Other && r.Level == "LOG" && !_english ? "unrecognised" : kind.ToString().ToLowerInvariant();
             _counted[key] = _counted.GetValueOrDefault(key) + 1;
             return;
         }
@@ -128,11 +164,15 @@ public sealed class PgWindowReader
         {
             _firstLogMicros = oldest;
         }
+        else if (Gap(directory, all) is { } gap)
+        {
+            Missing(gap);
+        }
         var done = new List<PgLogRecord>();
         foreach (var file in files)
         {
             _files++;
-            var parser = PgLogParser.For(file.Format);
+            var parser = PgLogParser.For(file.Format, file.StartMicros);
             // A file that starts before the window holds it at its end: its last megabyte usually covers that.
             var tail = (file.StartMicros ?? long.MinValue) < _start ? directory.Tail(file, TailBytes, _start - StopMarginMicros) : null;
             if (tail != null)
@@ -160,6 +200,72 @@ public sealed class PgWindowReader
             }
         }
     }
+
+    /// <summary>
+    /// Why a window that no file holds is missing, when log files start both before and after it: the
+    /// server was stopped, which its next file says at its start ("database system was shut down at"), or the window's
+    /// files were deleted (a retention that ran out). Null when no file is newer: the window is not written yet.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 NO FILE = NO FILE STARTED FOR IT, NOT NONE WRITTEN IN IT. A file's last write says
+    ///    nothing on a quiet server, and the next file, which starts at the window's end, is read for the window's last
+    ///    seconds. A file starts at least every <c>log_rotation_age</c>, so the window is missing when the newest file
+    ///    that starts before its end started a whole rotation before its start.
+    /// 🔴 THE SERVER'S OWN FORMAT ONLY. Beside each jsonlog or csvlog file, the logging collector keeps a .log of the same
+    ///    name for what it wrote to stderr ("ending log output to stderr"): never the file that says how the server started.
+    /// </remarks>
+    internal string? Gap(PgLogDirectory directory, IReadOnlyList<PgLogFile> all)
+    {
+        if (_rotationMicros == 0)
+        {
+            return null;
+        }
+        var format = all.Any(f => f.Format == PgLogFormat.Json) ? PgLogFormat.Json
+            : all.Any(f => f.Format == PgLogFormat.Csv) ? PgLogFormat.Csv
+            : PgLogFormat.Stderr;
+        var dated = all.Where(f => f.Format == format && f.StartMicros != null).ToList();
+        var before = dated.Where(f => f.StartMicros < _end).Select(f => f.StartMicros!.Value).DefaultIfEmpty(long.MinValue).Max();
+        var next = dated.Where(f => f.StartMicros >= _end).MinBy(f => f.StartMicros);
+        if (next == null || before == long.MinValue || before + _rotationMicros > _start)
+        {
+            return null;
+        }
+        return StartedAfterShutdown(directory.Head(next, HeadBytes), next) ? "stopped" : "deleted";
+    }
+
+    /// <summary>
+    /// Whether a file's first records include the startup process's "database system was shut down at": a LOG record whose
+    /// backend_type is "startup", read by the file's own parser. Never for stderr, or a record with no backend_type.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 NEVER A SUBSTRING OF THE FILE, AND NEVER BY FIELDS THAT ARE EMPTY.
+    ///    Any user can put those words in the log, in a statement's text or a RAISE LOG, and "stopped" is info where
+    ///    "deleted" warns: a log deletion would hide behind a planted line. The server names the process that wrote each
+    ///    record; no client sets it. A client before sign-in, or a background worker, has no user and no database too.
+    /// 🔴 NEVER stderr. Its prefix is free text: the server writes the user name a client
+    ///    asked for as it is, a newline included, so a refused client can begin a line of its own with any prefix at all.
+    ///    jsonlog and csvlog quote their fields. Our setup sets one of the two; a stderr log someone set up themselves
+    ///    reads a stopped server as "deleted", which warns.
+    /// </remarks>
+    internal static bool StartedAfterShutdown(string head, PgLogFile file)
+    {
+        if (file.Format == PgLogFormat.Stderr)
+        {
+            return false;
+        }
+        var parser = PgLogParser.For(file.Format, file.StartMicros);
+        var records = new List<PgLogRecord>();
+        foreach (var line in head.Split('\n').Take(StartupRecords))
+        {
+            parser.Feed(line.TrimEnd('\r'), records);
+        }
+        parser.Finish(records);
+        return records.Take(StartupRecords).Any(r => r.UnreadLines == 0 && r.Level == "LOG" && r.BackendType == "startup"
+            && r.Message.StartsWith(ShutDownLine, StringComparison.Ordinal));
+    }
+
+    /// <summary>How far into a file the startup lines are: "starting PostgreSQL", "listening on" (one per address), then this.</summary>
+    private const int StartupRecords = 20;
 
     private async Task ReadWholeAsync(PgLogDirectory directory, PgLogFile file, PgLogParser parser, List<PgLogRecord> done,
         CancellationToken ct)
@@ -199,7 +305,7 @@ public sealed class PgWindowReader
                 {
                     // A message never spans a rotation: the record in progress ends with its file.
                     Close(parser, done);
-                    parser = new StderrLogParser();
+                    parser = new StderrLogParser(PgLogFileNames.StartMicros(line.File));
                     file = line.File;
                 }
                 parser!.Feed(line.Text, done);
@@ -234,6 +340,7 @@ public sealed class PgWindowReader
             ["shipped"] = _shipped,
             ["out_of_window"] = _outOfWindow,
             ["unreadable"] = _unreadable + _malformed,
+            ["preamble"] = _preamble,
             ["counted"] = _counted,
             ["files"] = _files,
             ["bytes"] = _bytes,

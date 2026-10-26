@@ -96,18 +96,23 @@ public class PgLogFilesTests : IDisposable
         Assert.Equal(new[] { "postgresql-Wed.log" }, PgLogFileNames.ForWindow(files, At(6, 10), At(6, 20), 0).Select(f => f.Name));
     }
 
-    private static string Json(DateTime at, int pid, string severity, string message, string? app = "psql") =>
+    /// <param name="session">False for a server process's own record (startup, checkpointer): no user, no database.</param>
+    /// <param name="remote">A connection's address; a session's by default. A client before sign-in has one and no user.</param>
+    /// <param name="backend">backend_type, left out by default.</param>
+    private static string Json(DateTime at, int pid, string severity, string message, string? app = "psql", bool session = true,
+        bool? remote = null, string? backend = null) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["timestamp"] = at.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture) + " UTC",
-            ["user"] = "app",
-            ["dbname"] = "appdb",
+            ["user"] = session ? "app" : null,
+            ["dbname"] = session ? "appdb" : null,
             ["pid"] = pid,
-            ["remote_host"] = "192.0.2.10",
-            ["remote_port"] = 50000 + pid,
+            ["remote_host"] = remote ?? session ? "192.0.2.10" : null,
+            ["remote_port"] = remote ?? session ? 50000 + pid : null,
             ["error_severity"] = severity,
             ["message"] = message,
             ["application_name"] = app,
+            ["backend_type"] = backend,
         }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value));
 
     private void Write(string name, DateTime lastWrite, params string[] lines)
@@ -147,6 +152,143 @@ public class PgLogFilesTests : IDisposable
         var counts = JsonDocument.Parse(rows[2].GetProperty("message").GetString()!).RootElement;
         Assert.Equal(1, counts.GetProperty("counted").GetProperty("other").GetInt64());
         Assert.Equal(2, counts.GetProperty("files").GetInt32());
+    }
+
+    private async Task<JsonElement> CountsOf(long start, long end, int rotationMinutes = 10)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var reader = new PgWindowReader("db1", start, end, shipText: true, new RowSink(buffer), rotationMinutes: rotationMinutes);
+        await reader.ReadAsync(new PgLogDirectory(_dir), CancellationToken.None);
+        reader.WriteCounts();
+        return JsonDocument.Parse(Rows(buffer)[^1].GetProperty("message").GetString()!).RootElement.Clone();
+    }
+
+    /// <summary>
+    /// 🔴 A window that no file holds, between an older file and a newer one, is missing. Its files were
+    ///    deleted (a retention that ran out), or the server was stopped, which its next file says at its start.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 The third case: a session that writes the shut-down line's words (a RAISE LOG, a statement's text) must not turn
+    ///    a deletion into a stop, which is info where a deletion warns.
+    /// </remarks>
+    [Theory]
+    [InlineData("checkpoint", "deleted")]
+    [InlineData("startup", "stopped")]
+    [InlineData("planted", "deleted")]
+    [InlineData("preauth", "deleted")]
+    [InlineData("worker", "deleted")]
+    public async Task A_window_between_older_and_newer_files_with_none_of_its_own_is_missing(string next, string missing)
+    {
+        const string shutDown = "database system was shut down at 2026-10-22 06:09:59 UTC";
+        Write("postgresql-2026-10-22_060000.json", Day.AddHours(6).AddMinutes(9).AddSeconds(59),
+            Json(Day.AddHours(6).AddMinutes(5), 1, "LOG", "statement: CREATE TABLE a (b int)"));
+        Write("postgresql-2026-10-22_060000.log", Day.AddHours(6));
+        // The logging collector's own stderr file, beside the jsonlog file it starts with.
+        Write("postgresql-2026-10-22_063000.log", Day.AddHours(6).AddMinutes(30),
+            "2026-10-22 06:30:00.084 UTC [2] LOG:  ending log output to stderr",
+            "2026-10-22 06:30:00.084 UTC [2] HINT:  Future log output will go to log destination \"jsonlog\".");
+        Write("postgresql-2026-10-22_063000.json", Day.AddHours(6).AddMinutes(39),
+            Json(Day.AddHours(6).AddMinutes(30), 2, "LOG", "starting PostgreSQL 17.6 on x86_64-pc-linux-gnu", session: false),
+            next switch
+            {
+                "startup" => Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", shutDown, app: null, session: false, backend: "startup"),
+                "planted" => Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", shutDown),
+                "preauth" => Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", shutDown, app: null, session: false, remote: true),
+                "worker" => Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", shutDown, app: null, session: false, backend: "background worker"),
+                _ => Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", "checkpoint starting: time", session: false),
+            });
+
+        var counts = await CountsOf(At(6, 10), At(6, 20));
+
+        Assert.Equal(missing, counts.GetProperty("missing").GetString());
+        Assert.Equal(0, counts.GetProperty("files").GetInt32());
+    }
+
+    /// <summary>
+    /// 🔴 stderr never says a stop. The server writes the user name a refused
+    ///    client asked for as it is, so the second line here is that client's, written after a newline in its user name:
+    ///    the genuine startup line and the forged one are the same text.
+    /// </summary>
+    [Fact]
+    public void A_stderr_file_never_says_a_stop()
+    {
+        var file = new PgLogFile("postgresql-2026-10-22_063000.log", At(6, 30), At(6, 39), 100, PgLogFormat.Stderr);
+        var head = "2026-10-22 06:30:00 UTC::@:[431]:LOG:  starting PostgreSQL 17.6\n"
+            + "2026-10-22 06:30:00 UTC::@:[432]:LOG:  database system was shut down at 2026-10-22 06:09:59 UTC\n";
+        Assert.False(PgWindowReader.StartedAfterShutdown(head, file));
+    }
+
+    /// <summary>csvlog names the process in its 24th column (13 and later): the line is PostgreSQL 13's own.</summary>
+    [Theory]
+    [InlineData("startup", true)]
+    [InlineData("background worker", false)]
+    public void A_csvlog_file_says_a_stop_in_the_startup_processs_record(string backend, bool stopped)
+    {
+        var file = new PgLogFile("postgresql-2026-10-26_152746.csv", At(6, 30), At(6, 39), 100, PgLogFormat.Csv);
+        var head = "2026-10-26 15:27:46.993 UTC,,,714,,6adf7172.2ca,1,,2026-10-26 15:27:46 UTC,,0,LOG,00000,"
+            + "\"database system was shut down at 2026-10-26 15:27:46 UTC\",,,,,,,,,\"\",\"" + backend + "\"\n";
+        Assert.Equal(stopped, PgWindowReader.StartedAfterShutdown(head, file));
+    }
+
+    /// <summary>
+    /// 🔴 Missing is told by the files that start, not by when they were last written:
+    ///    - "aligned": files rotate on the windows' own 10-minute marks, so the next file starts at the window's end and is
+    ///      read for its last seconds. It used to count as the window's file, and a deleted window was never missing.
+    ///    - "quiet": an hourly file on a quiet server was last written long before the window. It used to say "deleted".
+    ///    - "unknown": with no rotation by time to go by, a window is never said to be missing.
+    /// </summary>
+    [Theory]
+    [InlineData("aligned", "deleted")]
+    [InlineData("quiet", null)]
+    [InlineData("unknown", null)]
+    public async Task A_window_is_missing_when_no_file_started_for_it(string layout, string? missing)
+    {
+        var rotation = layout switch { "quiet" => 60, "unknown" => 0, _ => 10 };
+        Write("postgresql-2026-10-22_060000.json", Day.AddHours(6));
+        Write("postgresql-2026-10-22_060000.log", Day.AddHours(6));
+        var next = layout == "quiet" ? 7 * 60 : 6 * 60 + 20;
+        Write($"postgresql-2026-10-22_{next / 60:00}{next % 60:00}00.json", Day.AddMinutes(next + 6),
+            Json(Day.AddMinutes(next + 5), 1, "LOG", "statement: CREATE TABLE a (b int)"));
+        Write($"postgresql-2026-10-22_{next / 60:00}{next % 60:00}00.log", Day.AddMinutes(next));
+
+        var counts = layout == "quiet" ? await CountsOf(At(6, 30), At(6, 40), rotation) : await CountsOf(At(6, 10), At(6, 20), rotation);
+
+        Assert.Equal(missing, counts.GetProperty("missing").GetString());
+    }
+
+    /// <summary>
+    /// 🔴 The logging collector's stderr file shares its name's time with the jsonlog file beside it. On ext4 it can be
+    ///    listed first, and a stopped server would read as "deleted". Only the server's own format
+    ///    says how it started, in whatever order the directory lists them.
+    /// </summary>
+    [Fact]
+    public void The_stderr_file_beside_a_jsonlog_file_never_says_how_the_server_started()
+    {
+        Write("postgresql-2026-10-22_060000.json", Day.AddHours(6).AddMinutes(9),
+            Json(Day.AddHours(6).AddMinutes(5), 1, "LOG", "statement: CREATE TABLE a (b int)"));
+        Write("postgresql-2026-10-22_063000.log", Day.AddHours(6).AddMinutes(30),
+            "2026-10-22 06:30:00.084 UTC [2] LOG:  ending log output to stderr");
+        Write("postgresql-2026-10-22_063000.json", Day.AddHours(6).AddMinutes(39),
+            Json(Day.AddHours(6).AddMinutes(30), 3, "LOG", "database system was shut down at 2026-10-22 06:09:59 UTC", app: null,
+                session: false, backend: "startup"));
+        var directory = new PgLogDirectory(_dir);
+        var listed = directory.List().OrderBy(f => f.Format == PgLogFormat.Stderr ? 0 : 1).ToList();
+        var reader = new PgWindowReader("db1", At(6, 10), At(6, 20), shipText: true, new RowSink(new ArrayBufferWriter<byte>()),
+            rotationMinutes: 10);
+
+        Assert.Equal(PgLogFormat.Stderr, listed[0].Format);
+        Assert.Equal("stopped", reader.Gap(directory, listed));
+    }
+
+    [Fact]
+    public async Task A_window_after_the_newest_file_is_not_missing_yet()
+    {
+        Write("postgresql-2026-10-22_060000.json", Day.AddHours(6).AddMinutes(9),
+            Json(Day.AddHours(6).AddMinutes(5), 1, "LOG", "statement: CREATE TABLE a (b int)"));
+
+        var counts = await CountsOf(At(6, 10), At(6, 20));
+
+        Assert.Equal(JsonValueKind.Null, counts.GetProperty("missing").ValueKind);
     }
 
     [Fact]

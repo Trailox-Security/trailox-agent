@@ -109,9 +109,13 @@ public static class PgProbeChecks
         return gaps.Count == 0 ? 0 : (int)Math.Round(gaps.Min() / 60_000_000.0);
     }
 
+    /// <remarks>
+    /// Files under 20 minutes are ok: a window then reads less than one and a half times what the server wrote, and an
+    /// irregular gap between two names (a reboot's file) is no setting to fix. Before, such a file warned "up to 1 times".
+    /// </remarks>
     public static PostgresCheck LogFiles(string instance, int files, int minutes) => files == 0
         ? Fail("log_files", $"{instance}: no log file found")
-        : minutes is 0 or <= 10
+        : minutes is 0 or < 20
             ? Ok("log_files", $"{instance}: {files} log files")
             : minutes <= 60
                 ? Warn("log_files", $"{instance}: each log file covers {minutes} minutes, so a window reads up to {(minutes / 10 + 1) / 2.0:0.#} times "
@@ -119,10 +123,31 @@ public static class PgProbeChecks
                 : Fail("log_files", $"{instance}: each log file covers {minutes} minutes, so the agent would read each line many times over. "
                     + "Set log_rotation_age = 10 and a file name with minutes");
 
+    /// <summary>
+    /// A log directory's files, and its <c>log_rotation_age</c>: a window is said to be missing only when no file started for
+    /// a whole rotation. With no rotation by time (0, or a setting the role cannot read) a deleted log file
+    /// cannot be told from a quiet server; with 20 minutes or more, files deleted over less than that are not told. Both
+    /// warn, so neither is silent. Files of their own that rotate by
+    /// size can look fine by their names alone.
+    /// </summary>
+    public static PostgresCheck LogFiles(string instance, int files, int minutes, int rotationMinutes)
+    {
+        var check = LogFiles(instance, files, minutes);
+        return check.Status != "ok" ? check
+            : rotationMinutes == 0
+                ? Warn("log_files", $"{instance}: {files} log files, but log_rotation_age is 0 or cannot be read, so a log file deleted "
+                    + "from the directory cannot be told from a quiet server. Set log_rotation_age = 10")
+            : rotationMinutes >= 20
+                ? Warn("log_files", $"{instance}: {files} log files, but log_rotation_age is {rotationMinutes} minutes, so log files deleted "
+                    + $"from the directory are told only when no file started for {rotationMinutes} minutes. Set log_rotation_age = 10")
+            : check;
+    }
+
     private static bool On(string value) =>
         value is "on" or "true" or "1" || value.Contains("authorization", StringComparison.Ordinal) || value == "all";
 
-    private static bool English(string language) =>
+    /// <summary>Whether <c>lc_messages</c> writes English (C, POSIX, en_*; unset is C).</summary>
+    internal static bool English(string language) =>
         language.Length == 0 || language is "C" or "POSIX" || language.StartsWith("C.", StringComparison.Ordinal)
         || language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
 

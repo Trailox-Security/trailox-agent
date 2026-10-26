@@ -21,9 +21,10 @@ public abstract class PgLogParser
     /// <summary>The end of the file: the record in progress is complete.</summary>
     public abstract void Finish(List<PgLogRecord> done);
 
-    public static PgLogParser For(PgLogFormat format) => format switch
+    /// <param name="fileStartMicros">The time in the file's name, for stderr lines that no record follows.</param>
+    public static PgLogParser For(PgLogFormat format, long? fileStartMicros = null) => format switch
     {
-        PgLogFormat.Stderr => new StderrLogParser(),
+        PgLogFormat.Stderr => new StderrLogParser(fileStartMicros),
         PgLogFormat.Csv => new CsvLogParser(),
         PgLogFormat.Json => new JsonLogParser(),
         _ => throw new ArgumentOutOfRangeException(nameof(format)),
@@ -35,6 +36,12 @@ public abstract class PgLogParser
 /// choice <c>%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:</c>. A message's DETAIL, HINT and STATEMENT are lines of their
 /// own with the same pid; the backend writes them as one unit, so they follow the message in the file.
 /// </summary>
+/// <remarks>
+/// Lines it cannot read go to the window reader as <see cref="PgLogRecord.UnreadLines"/> with a time, so each counts in
+/// one window only: lines before the file's first record take that record's time (or the
+/// file's, when no record follows) and are a <see cref="PgLogRecord.Preamble"/>; a record with a prefix we do not know
+/// takes its own time, and its continuation lines count with it, once.
+/// </remarks>
 public sealed class StderrLogParser : PgLogParser
 {
     private const string Levels = "DEBUG[1-5]|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION";
@@ -60,8 +67,17 @@ public sealed class StderrLogParser : PgLogParser
         Ignored,
     }
 
+    private readonly long? _fileStartMicros;
     private PgLogRecord? _current;
     private Part _part;
+    private bool _started;
+    private int _preamble;
+
+    /// <param name="fileStartMicros">The time in the file's name: where lines go that no record follows.</param>
+    public StderrLogParser(long? fileStartMicros = null)
+    {
+        _fileStartMicros = fileStartMicros;
+    }
 
     public override void Feed(string line, List<PgLogRecord> done)
     {
@@ -70,6 +86,12 @@ public sealed class StderrLogParser : PgLogParser
         {
             Continue(line);
             return;
+        }
+        var headTs = PgTime.Micros(head.Groups[1].ValueSpan);
+        if (!_started)
+        {
+            _started = true;
+            EndPreamble(headTs, done);
         }
         var rest = head.Groups[4].Value;
         string level, text, sqlState = "", session = "";
@@ -90,9 +112,10 @@ public sealed class StderrLogParser : PgLogParser
         }
         else
         {
-            // A prefix we do not know: the record cannot be classified, but it is not part of the one before.
-            Malformed++;
+            // A prefix we do not know: the record cannot be classified, but it is not part of the one before. It counts
+            // in its own window; its continuation lines count with it.
             Flush(done);
+            Unread(headTs, 1, preamble: false, done);
             _part = Part.Ignored;
             return;
         }
@@ -105,14 +128,11 @@ public sealed class StderrLogParser : PgLogParser
         }
 
         Flush(done);
-        var ts = PgTime.Micros(head.Groups[1].ValueSpan);
-        if (ts == null)
-        {
-            Malformed++;
-        }
+        // A time that cannot be read (a zone that is not UTC) is counted once, as the record's: the window reader counts a
+        // record with no time as unreadable.
         var record = new PgLogRecord
         {
-            TsMicros = ts ?? long.MinValue,
+            TsMicros = headTs ?? long.MinValue,
             Pid = pid,
             Level = level,
             SqlState = sqlState,
@@ -126,7 +146,40 @@ public sealed class StderrLogParser : PgLogParser
         _part = Part.Message;
     }
 
-    public override void Finish(List<PgLogRecord> done) => Flush(done);
+    public override void Finish(List<PgLogRecord> done)
+    {
+        Flush(done);
+        if (!_started)
+        {
+            EndPreamble(_fileStartMicros, done);
+        }
+    }
+
+    /// <summary>The lines before the file's first record, at <paramref name="ts"/> (that record's time, or the file's).</summary>
+    private void EndPreamble(long? ts, List<PgLogRecord> done)
+    {
+        if (_preamble > 0)
+        {
+            Unread(ts, _preamble, preamble: true, done);
+            _preamble = 0;
+        }
+    }
+
+    /// <summary>
+    /// Lines that are no record, counted in the window of <paramref name="ts"/>. With no time to place them, they are
+    /// counted as before: in <see cref="PgLogParser.Malformed"/>, by every window that reads the file.
+    /// </summary>
+    private void Unread(long? ts, int lines, bool preamble, List<PgLogRecord> done)
+    {
+        if (ts is { } at)
+        {
+            done.Add(new PgLogRecord { TsMicros = at, UnreadLines = lines, Preamble = preamble, Format = PgLogFormat.Stderr });
+        }
+        else
+        {
+            Malformed += lines;
+        }
+    }
 
     private void Flush(List<PgLogRecord> done)
     {
@@ -155,14 +208,17 @@ public sealed class StderrLogParser : PgLogParser
         }
     }
 
-    /// <summary>A line without the prefix continues the part before it: a statement over several lines, a DETAIL's second line.</summary>
+    /// <summary>
+    /// A line without the prefix continues the part before it: a statement over several lines, a DETAIL's second line.
+    /// Before the file's first record it is preamble; after a record we cannot read, that record's own text.
+    /// </summary>
     private void Continue(string line)
     {
         if (_current == null)
         {
-            if (line.Length > 0)
+            if (!_started && line.Length > 0)
             {
-                Malformed++;
+                _preamble++;
             }
             return;
         }
@@ -334,6 +390,7 @@ public sealed class CsvLogParser : PgLogParser
             Detail = f[14],
             Statement = f[19],
             ApplicationName = f[22],
+            BackendType = f.Count > 23 ? f[23] : "",
             Format = PgLogFormat.Csv,
         };
         SplitConnectionFrom(f[4], record);
@@ -393,6 +450,7 @@ public sealed class JsonLogParser : PgLogParser
                 Detail = Str(o, "detail"),
                 Statement = Str(o, "statement"),
                 ApplicationName = Str(o, "application_name"),
+                BackendType = Str(o, "backend_type"),
                 Format = PgLogFormat.Json,
             });
         }

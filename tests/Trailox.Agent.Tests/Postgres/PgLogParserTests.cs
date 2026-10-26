@@ -149,12 +149,56 @@ public class PgLogParserTests
     }
 
     [Fact]
-    public void A_zone_that_is_not_utc_cannot_be_read()
+    public void A_zone_that_is_not_utc_cannot_be_read_and_counts_once()
     {
         var records = Parse(PgLogFormat.Stderr, "2026-10-22 09:10:01 IDT:192.0.2.10(1):a@d:[1]:LOG:  connection received: host=192.0.2.10 port=1", out var malformed);
 
+        // The record with no time is the window's one unreadable record; the parser does not count it again.
         Assert.Equal(long.MinValue, records.Single().TsMicros);
+        Assert.Equal(0, malformed);
+    }
+
+    /// <summary>
+    /// 🔴 A new RDS replica's first file starts with its restore script's lines, which have no prefix. They
+    ///    are a preamble, not unreadable records, at the time of the file's first record, so one window counts them.
+    /// </summary>
+    [Fact]
+    public void Lines_before_the_first_record_are_a_preamble_at_its_time()
+    {
+        var done = Parse(PgLogFormat.Stderr, string.Join('\n',
+            "recovering 00000002.history",
+            "archive 000000010000000000000004 is not yet downloaded, exiting restore_command",
+            "2026-10-22 06:10:01 UTC::@:[431]:LOG:  database system is ready to accept read-only connections"), out var malformed);
+
+        Assert.Equal((2, true, T0), (done[0].UnreadLines, done[0].Preamble, done[0].TsMicros));
+        Assert.Equal("database system is ready to accept read-only connections", done[1].Message);
+        Assert.Equal(0, malformed);
+    }
+
+    [Fact]
+    public void A_file_of_preamble_only_takes_the_files_time_or_counts_as_before()
+    {
+        var parser = new StderrLogParser(fileStartMicros: T0 - 1_000_000);
+        var done = new List<PgLogRecord>();
+        parser.Feed("recovering 00000002.history", done);
+        parser.Finish(done);
+        Assert.Equal((1, true, T0 - 1_000_000), (done.Single().UnreadLines, done.Single().Preamble, done.Single().TsMicros));
+
+        // A name with no time (Red Hat's postgresql-Mon.log): no window to place the line in, so it counts as it did.
+        Assert.Empty(Parse(PgLogFormat.Stderr, "recovering 00000002.history", out var malformed));
         Assert.Equal(1, malformed);
+    }
+
+    [Fact]
+    public void A_record_with_a_prefix_we_do_not_know_counts_once_with_its_lines()
+    {
+        var done = Parse(PgLogFormat.Stderr, string.Join('\n',
+            "2026-10-22 06:10:01 UTC:192.0.2.10(1):a@d:[9]:SOMETHING ELSE",
+            "  its second line",
+            "  its third line"), out var malformed);
+
+        Assert.Equal((1, false, T0), (done.Single().UnreadLines, done.Single().Preamble, done.Single().TsMicros));
+        Assert.Equal(0, malformed);
     }
 
     private static string Csv(params string[] fields) =>
