@@ -623,7 +623,13 @@ replaced.
   are cut at 262,144 characters, with `truncated` true; with `storeRawQueryText: false` a DDL record's `message` is
   empty. The count row's `message` is JSON: `records`, `shipped`, `out_of_window`, `unreadable`, `counted` (per
   kind), `files`, `bytes`, `first_log` (the start of the oldest log found, when it starts after the window's start)
-  and `missing` (why the instance could not be read).
+  and `missing` (why the instance could not be read). From 1.13.0:
+  - `preamble`: lines before a file's first record (a new RDS replica's restore output), counted once, in the window
+    of that record's time.
+  - `counted.unrecognised`: on a server whose `lc_messages` is not English, LOG records of no kind the agent knows.
+  - `missing` for a log directory: `"deleted"` when no file started for the window within one `log_rotation_age` and
+    a newer file exists; `"stopped"` when that newer file's startup process wrote "database system was shut down
+    at" (jsonlog or csvlog only).
 - `pg_stat_snapshot`: the statement follows the version of the extension installed in `options.database`, not
   the server's (a major upgrade keeps the old version until `ALTER EXTENSION pg_stat_statements UPDATE`): before
   1.9 (PostgreSQL 13) `toplevel`, `dealloc` and `stats_reset` are null, and before 1.8 `total_exec_time` is read

@@ -139,6 +139,22 @@ public sealed class PgLogDirectory
         return first != null && first < beforeMicros ? lines : null;
     }
 
+    /// <summary>The first <paramref name="bytes"/> of a file as text, for a startup line near its start; "" when it cannot be read.</summary>
+    public string Head(PgLogFile file, int bytes)
+    {
+        try
+        {
+            using var stream = Open(file);
+            var buffer = new byte[Math.Min(bytes, Math.Max(file.Size, 0))];
+            var read = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            return Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch (Exception ex) when (ex is IOException or SourceException)
+        {
+            return "";
+        }
+    }
+
     /// <summary>The time of a jsonlog line, read from its <c>timestamp</c> key without parsing the line.</summary>
     private static long? JsonTime(string line)
     {

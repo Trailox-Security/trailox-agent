@@ -56,6 +56,13 @@ public sealed class PgLogRecord
     public string? ApplicationName { get; set; }
 
     public string SessionId { get; set; } = "";
+
+    /// <summary>
+    /// The process that wrote the record ("client backend", "startup", "checkpointer"...): csvlog (13 and later) and
+    /// jsonlog carry it, from the server; empty for stderr.
+    /// </summary>
+    public string BackendType { get; set; } = "";
+
     public string Message { get; set; } = "";
     public string Detail { get; set; } = "";
 
@@ -63,6 +70,19 @@ public sealed class PgLogRecord
     public string Statement { get; set; } = "";
 
     public PgLogFormat Format { get; set; }
+
+    /// <summary>
+    /// Not a record: this many lines the parser could not read, counted in the window that holds <see cref="TsMicros"/>
+    /// and in no other (stderr). RDS files are read from their start by every window, so a count taken per read would
+    /// count one line in each window that reads the file.
+    /// </summary>
+    public int UnreadLines { get; init; }
+
+    /// <summary>
+    /// The <see cref="UnreadLines"/> came before the file's first record: on a new RDS replica, the restore script's own
+    /// output ("recovering 00000002.history"), not a log record anyone can lose.
+    /// </summary>
+    public bool Preamble { get; init; }
 
     public PgRecordKind Kind => PgRecordKinds.Of(Level, Message);
 }

@@ -43,6 +43,69 @@ public class PgWindowReaderTests
 
     private static JsonElement Counts(List<JsonElement> rows) => JsonDocument.Parse(rows[^1].GetProperty("message").GetString()!).RootElement;
 
+    /// <summary>One stderr file read through its parser into one window, as the RDS reader does: the window's counts.</summary>
+    private static JsonElement ReadFile(long start, long end, params string[] lines)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var reader = new PgWindowReader("db1", start, end, true, new RowSink(buffer));
+        var parser = new StderrLogParser();
+        var done = new List<PgLogRecord>();
+        foreach (var line in lines)
+        {
+            parser.Feed(line, done);
+        }
+        parser.Finish(done);
+        done.ForEach(reader.Add);
+        reader.WriteCounts();
+        return Counts(Encoding.UTF8.GetString(buffer.WrittenSpan).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => JsonDocument.Parse(l).RootElement.Clone()).ToList()).Clone();
+    }
+
+    /// <summary>
+    /// 🔴 Every window that reads an RDS file reads it from its start, so the restore script's preamble
+    ///    reached each of them and warned for a day. It counts once, in the window of its time, apart from unreadable.
+    /// </summary>
+    [Fact]
+    public void A_files_preamble_counts_once_in_its_own_window_and_apart_from_unreadable()
+    {
+        string[] file =
+        {
+            "recovering 00000002.history",
+            "archive 000000010000000000000004 is not yet downloaded",
+            "2026-10-22 06:10:01 UTC::@:[431]:LOG:  database system is ready to accept read-only connections",
+            "2026-10-22 06:20:01 UTC::@:[431]:LOG:  checkpoint starting: time",
+        };
+
+        var first = ReadFile(Start, End, file);
+        var second = ReadFile(End, End + 600_000_000, file);
+
+        Assert.Equal((2L, 0L, 2L), (first.GetProperty("preamble").GetInt64(), first.GetProperty("unreadable").GetInt64(),
+            first.GetProperty("records").GetInt64()));
+        Assert.Equal((0L, 0L), (second.GetProperty("preamble").GetInt64(), second.GetProperty("unreadable").GetInt64()));
+    }
+
+    /// <summary>
+    /// 🔴 A server that writes German. Its sign-ins read as LOG records of no kind we know, so they are
+    ///    counted unrecognised. On an English server unknown LOG records (checkpoints) stay other;
+    ///    a translated level is no LOG record either way.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 1, 1)]
+    [InlineData(true, 0, 2)]
+    public void A_log_record_of_no_known_kind_is_unrecognised_only_where_the_server_is_not_english(bool english, int unrecognised, int other)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        var reader = new PgWindowReader("db1", Start, End, true, new RowSink(buffer), english: english);
+        reader.Add(R(Start, "LOG", "Verbindung autorisiert: Benutzer=app Datenbank=appdb"));
+        reader.Add(R(Start, "FEHLER", "Relation t existiert nicht"));
+        reader.WriteCounts();
+
+        var counted = Counts(Encoding.UTF8.GetString(buffer.WrittenSpan).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => JsonDocument.Parse(l).RootElement.Clone()).ToList()).GetProperty("counted");
+        Assert.Equal(unrecognised, counted.TryGetProperty("unrecognised", out var u) ? u.GetInt32() : 0);
+        Assert.Equal(other, counted.GetProperty("other").GetInt32());
+    }
+
     [Fact]
     public void Records_belong_to_the_window_by_their_own_time()
     {

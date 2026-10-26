@@ -235,11 +235,34 @@ public class PostgresEngineTests
     [Theory]
     [InlineData(0, 10, "fail")]
     [InlineData(144, 10, "ok")]
+    [InlineData(2, 12, "ok")]      // a reboot's irregular gap: it warned "up to 1 times"
+    [InlineData(72, 20, "warn")]
     [InlineData(24, 60, "warn")]
     [InlineData(3, 1440, "fail")]
     public void Files_longer_than_ten_minutes_warn_and_longer_than_an_hour_fail(int files, int minutes, string status)
     {
         Assert.Equal(status, PgProbeChecks.LogFiles("orders", files, minutes).Status);
+    }
+
+    /// <summary>
+    /// With no rotation by time, a deleted log file cannot be told from a quiet server; with a long one, a short deletion
+    /// is not told. A directory says so, and a check that already warns or fails keeps its own words.
+    /// </summary>
+    [Theory]
+    [InlineData(144, 10, 10, "ok")]
+    [InlineData(144, 10, 0, "warn")]
+    [InlineData(144, 10, 19, "ok")]
+    [InlineData(144, 10, 60, "warn")]
+    [InlineData(144, 10, 1440, "warn")]
+    [InlineData(3, 1440, 0, "fail")]
+    [InlineData(0, 0, 0, "fail")]
+    public void A_directory_with_no_rotation_by_time_warns(int files, int minutes, int rotationMinutes, string status)
+    {
+        var check = PgProbeChecks.LogFiles("orders", files, minutes, rotationMinutes);
+
+        Assert.Equal(status, check.Status);
+        Assert.Equal(status == "warn", check.Message.Contains("log_rotation_age is " + rotationMinutes + " ", StringComparison.Ordinal)
+            || check.Message.Contains("log_rotation_age is 0 or", StringComparison.Ordinal));
     }
 
     [Fact]
