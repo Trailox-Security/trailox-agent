@@ -213,8 +213,6 @@ public class PgAuditTests
         });
     }
 
-    // ------------------------------------------------------------------ review fixes ----
-
     /// <summary>🔴 INSERT ... SELECT reads one relation and writes another: one row each, so the read relation is never written.</summary>
     [Fact]
     public void A_statement_that_reads_and_writes_is_a_row_per_class()

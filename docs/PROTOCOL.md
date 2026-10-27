@@ -625,9 +625,10 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
   the application's place in the key. The row is the group's first statement, with `event_count` statements.
 - A statement's shape is its text with every string and number (hex, octal and binary ones too) replaced by `?`; a
   list of them is one `?`, and so is a list of rows (`VALUES (?), (?)`). Comments are removed and white space
-  collapsed; `$1` placeholders stay. A string that is cut ends the shape, and a plain string that holds a backslash
-  ends at the farther of its two possible ends. The shape is the row's `message`, cut at 16,384 characters, so no
-  value is shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's `detail`, with or without the text.
+  collapsed; `$1` placeholders stay. A string that is cut ends the shape, and so does a plain string that holds a
+  backslash when its two possible ends (with `standard_conforming_strings` on and off) differ. The shape is the row's
+  `message`, cut at 16,384 characters, so no value is shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's
+  `detail`, with or without the text.
 - Lines of other classes (`DDL`, `ROLE`, `FUNCTION`, `MISC`) are counted, not shipped: DDL and role changes come
   from `log_statement`.
 - Past 500 shapes of one user in one minute, that user's further statements are grouped without their shape: the
