@@ -567,7 +567,7 @@ cannot be passed on by a machine in between; a server or pooler that does not of
   |---|---|
   | `DescribeDBLogFiles`, `FileLastWritten` = the window's start, `FilenameContains` = `postgresql.log.<date>` of the window's start and end | each `pg_log` task, per instance (two calls when the window crosses midnight) |
   | `DownloadDBLogFilePortion`, `Marker` = `"0"` and then the marker returned, 3,000 lines a call | each file that can hold the window, from its start |
-  | `DownloadDBLogFilePortion` with no marker, 10,000 lines | once per task, on the newest file when the window starts inside it and it is over 1 MB: when those last lines reach back to the window's start, nothing else of that file is read |
+  | `DownloadDBLogFilePortion` with no marker, 10,000 lines | once per task, on the newest file when the window starts inside it and it is over 1 MB: when those last lines reach back to the window's start, nothing else of that file is read. From 1.14.0 a capped answer is asked again with half the lines, down to 300, before the file is read from its start |
   | `DescribeDBLogFiles`, every file | the probe, per instance: the oldest file and the files' length |
 
   At most 4 calls a second per source, 2 for a window that ended more than an hour ago. An answer of 1 MB, or one
@@ -597,6 +597,7 @@ one of these, by its level and the start of its message (English messages only):
 | connection | `LOG` `connection received:`, `connection authenticated:`, `connection authorized:`, `replication connection authorized:`, `disconnection:` |
 | failure | any `FATAL` or `PANIC`, with its `DETAIL` |
 | DDL | `LOG` `statement: ...` (the simple protocol) and `execute <name>: ...` (the extended protocol) |
+| pgaudit (from 1.14.0) | `LOG` `AUDIT: ...` of class `READ` or `WRITE`, grouped per minute (below) |
 
 Every other record is counted, not shipped. A record's `STATEMENT` is never shipped, nor the `DETAIL` of a DDL
 record (its parameters).
@@ -607,9 +608,35 @@ string after the word `PASSWORD` (also after `password =` and `password =>`) in 
 `postgresql://user:password@host` URI. When the string after `PASSWORD` is cut, everything from the keyword on is
 replaced.
 
+**pgaudit (from 1.14.0).** A pgaudit line is `AUDIT: AUDIT_TYPE,STATEMENT_ID,SUBSTATEMENT_ID,CLASS,COMMAND,OBJECT_TYPE,
+OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a double quote or a line break.
+- The `PARAMETER` field is never read or shipped.
+- A line with a `CONTEXT` was written from inside a function (`RAISE LOG`), not by pgaudit, which writes none: it is
+  counted, never shipped. A line of seven fields (`pgaudit.log_statement` off) is a statement with no text.
+- The lines of one backend with the same statement and substatement ids are one statement. Its objects are the
+  distinct `OBJECT_NAME`s of each class: one line per relation with `pgaudit.log_relation` on, and a relation under
+  both object and session audit written twice. A statement that reads some relations and writes others (`INSERT ...
+  SELECT`) is two statements, one per class.
+- A `COPY`'s command is `COPY TO` or `COPY FROM`, from its own text: with `pgaudit.log_relation` on, pgaudit names its
+  lines by the rights the copy uses (`SELECT`, `INSERT`).
+- Statements of class `READ` and `WRITE` are grouped per minute by (user, database, client address, application,
+  class, command, objects, shape), one row per group. On stderr, which carries no application name, the pid takes
+  the application's place in the key. The row is the group's first statement, with `event_count` statements.
+- A statement's shape is its text with every string and number (hex, octal and binary ones too) replaced by `?`; a
+  list of them is one `?`, and so is a list of rows (`VALUES (?), (?)`). Comments are removed and white space
+  collapsed; `$1` placeholders stay. A string that is cut ends the shape, and a plain string that holds a backslash
+  ends at the farther of its two possible ends. The shape is the row's `message`, cut at 16,384 characters, so no
+  value is shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's `detail`, with or without the text.
+- Lines of other classes (`DDL`, `ROLE`, `FUNCTION`, `MISC`) are counted, not shipped: DDL and role changes come
+  from `log_statement`.
+- Past 500 shapes of one user in one minute, that user's further statements are grouped without their shape: the
+  row's `message` is `<many shapes>`, and its user, database, class, command and objects stay.
+- Past 10,000 groups in one minute, that minute's further statements go into one row whose `audit_class` is
+  `__other__`, with only its count.
+
 | stream | rows | columns |
 |---|---|---|
-| `pg_log` | a shipped record; and per instance one count row, `level` = `summary` | `instance`, `ts`, `pid`, `user`, `database`, `remote_host`, `remote_port`, `level`, `sql_state`, `application_name`, `session_id`, `message`, `detail`, `command`, `format`, `truncated` |
+| `pg_log` | a shipped record or pgaudit group; and per instance one count row, `level` = `summary` | `instance`, `ts`, `pid`, `user`, `database`, `remote_host`, `remote_port`, `level`, `sql_state`, `application_name`, `session_id`, `message`, `detail`, `command`, `format`, `truncated`, and from 1.14.0 `audit_class`, `objects`, `event_count` |
 | `pg_stat_snapshot` | an entry of `pg_stat_statements`, per instance, taken when the task runs | `userid`, `user_name`, `dbid`, `database`, `queryid`, `toplevel`, `calls`, `rows`, `total_exec_time`, `shared_blks_hit`, `shared_blks_read`, `temp_blks_written`, `dealloc`, `stats_reset`, `instance`, `taken_at` |
 | `catalog_tables` | a table or view, per database | `schema_name`, `table_name`, `kind`, `row_estimate`, `approx_bytes`, `owner`, `snapshot_date`, `database` |
 | `catalog_columns` | a column, per database | `schema_name`, `table_name`, `position`, `column_name`, `data_type`, `snapshot_date`, `database` |
@@ -630,6 +657,15 @@ replaced.
   - `missing` for a log directory: `"deleted"` when no file started for the window within one `log_rotation_age` and
     a newer file exists; `"stopped"` when that newer file's startup process wrote "database system was shut down
     at" (jsonlog or csvlog only).
+
+  From 1.14.0, every row carries `audit_class` (pgaudit's class; empty on any other row), `objects` (the relations a
+  pgaudit statement names; empty on any other row) and `event_count` (the statements a pgaudit row stands for; 1 on
+  any other row). A pgaudit row's `command` is pgaudit's command. The count row adds `audit_lines` (the `READ` and
+  `WRITE` lines read), `audit_rows` (the pgaudit rows shipped), `audit_overflow` (statements in an `__other__` row),
+  `audit_shapeless` (statements grouped without their shape), `audit_late` (lines of a minute already shipped, which
+  open a second row for it), `counted.audit` (lines of other classes), `counted.audit_context` (lines written from
+  a function) and `counted.audit_unreadable` (lines whose first seven fields cannot be read). `log_bytes` is the size
+  of the window's own lines as the server wrote them (RDS API only; `bytes` is everything downloaded).
 - `pg_stat_snapshot`: the statement follows the version of the extension installed in `options.database`, not
   the server's (a major upgrade keeps the old version until `ALTER EXTENSION pg_stat_statements UPDATE`): before
   1.9 (PostgreSQL 13) `toplevel`, `dealloc` and `stats_reset` are null, and before 1.8 `total_exec_time` is read

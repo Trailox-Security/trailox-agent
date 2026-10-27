@@ -202,6 +202,10 @@ public sealed class StderrLogParser : PgLogParser
                 _current!.Statement = text;
                 _part = Part.Statement;
                 break;
+            case "CONTEXT":
+                _current!.HasContext = true;
+                _part = Part.Ignored;
+                break;
             default:
                 _part = Part.Ignored;
                 break;
@@ -391,6 +395,7 @@ public sealed class CsvLogParser : PgLogParser
             Statement = f[19],
             ApplicationName = f[22],
             BackendType = f.Count > 23 ? f[23] : "",
+            HasContext = f[18].Length > 0,
             Format = PgLogFormat.Csv,
         };
         SplitConnectionFrom(f[4], record);
@@ -451,6 +456,7 @@ public sealed class JsonLogParser : PgLogParser
                 Statement = Str(o, "statement"),
                 ApplicationName = Str(o, "application_name"),
                 BackendType = Str(o, "backend_type"),
+                HasContext = Str(o, "context").Length > 0,
                 Format = PgLogFormat.Json,
             });
         }

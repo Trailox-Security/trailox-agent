@@ -163,12 +163,15 @@ public sealed class RdsReadStats
 /// <item>the caller drops the lines before the window and stops reading once a line is past it.</item>
 /// </list>
 /// A page of 1 MB, or one that holds RDS's truncation note, may have lost lines: it is read again from the same marker
-/// with half the lines. Calls are paced to at most <c>callsPerSecond</c>.
+/// with half the lines. Calls are paced to at most <c>callsPerSecond</c>, and to the Region's <see cref="RdsCallBudget"/>.
 /// </summary>
 public sealed class RdsLogReader
 {
     public const int PageLines = 3000;
     public const int TailLines = 10000;
+
+    /// <summary>The fewest lines an end read halves down to; below it the file is read from its start.</summary>
+    public const int MinTailLines = 300;
     public const int PageCapBytes = 1_000_000;
     public const string TruncatedNote = "[Your log message was truncated]";
 
@@ -176,14 +179,18 @@ public sealed class RdsLogReader
     private readonly string _instance;
     private readonly TimeSpan _interval;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly RdsCallBudget? _budget;
     private DateTime _nextCall = DateTime.MinValue;
 
-    public RdsLogReader(IRdsLogs api, string instance, double callsPerSecond, Func<TimeSpan, CancellationToken, Task>? delay = null)
+    /// <param name="budget">The calls of every reader in the Region; null for none.</param>
+    public RdsLogReader(IRdsLogs api, string instance, double callsPerSecond, Func<TimeSpan, CancellationToken, Task>? delay = null,
+        RdsCallBudget? budget = null)
     {
         _api = api;
         _instance = instance;
         _interval = TimeSpan.FromSeconds(1 / Math.Max(0.1, callsPerSecond));
         _delay = delay ?? Task.Delay;
+        _budget = budget;
     }
 
     public RdsReadStats Stats { get; } = new();
@@ -317,17 +324,28 @@ public sealed class RdsLogReader
     private async Task<string[]?> TailAsync(RdsLogFile file, long beforeMicros, Func<string, long?> timeOf, CancellationToken ct)
     {
         RdsPortion portion;
-        try
+        var count = TailLines;
+        while (true)
         {
-            portion = await DownloadAsync(file.Name, null, TailLines, ct);
-        }
-        catch (RdsLogFileGoneException)
-        {
-            return null;
-        }
-        if (Capped(portion.Data))
-        {
-            return null;
+            try
+            {
+                portion = await DownloadAsync(file.Name, null, count, ct);
+            }
+            catch (RdsLogFileGoneException)
+            {
+                return null;
+            }
+            // 🔴 A CAPPED END READ IS READ AGAIN WITH HALF THE LINES, NOT THE WHOLE FILE. At pgaudit's volumes 10,000 lines
+            //    are more than a page holds, and reading the whole previous file instead downloaded every window twice.
+            if (!Capped(portion.Data))
+            {
+                break;
+            }
+            if (count <= MinTailLines)
+            {
+                return null;
+            }
+            count /= 2;
         }
         var lines = Lines(portion.Data);
         var firstTime = lines.Select(timeOf).FirstOrDefault(t => t != null);
@@ -346,12 +364,16 @@ public sealed class RdsLogReader
     private async Task PaceAsync(CancellationToken ct)
     {
         var now = DateTime.UtcNow;
-        if (_nextCall > now)
+        var at = _nextCall > now ? _nextCall : now;
+        if (_budget != null)
         {
-            await _delay(_nextCall - now, ct);
-            now = _nextCall;
+            at += _budget.Reserve(at);
         }
-        _nextCall = now + _interval;
+        if (at > now)
+        {
+            await _delay(at - now, ct);
+        }
+        _nextCall = at + _interval;
     }
 
     private static bool Capped(string data) =>

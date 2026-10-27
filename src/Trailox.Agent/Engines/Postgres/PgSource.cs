@@ -25,6 +25,9 @@ public sealed class PgSource : IEngineSource
     private readonly EndpointConfig _endpoint;
     private readonly PgCatalog _catalog;
     private readonly IRdsLogs? _rds;
+
+    /// <summary>The Region's RDS API calls, shared with this agent's other sources there; null without the RDS API.</summary>
+    private readonly RdsCallBudget? _budget;
     private readonly Func<DateTime> _utcNow;
     private readonly IReadOnlyList<PgInstance> _instances;
     private readonly string? _logDirectory;
@@ -53,6 +56,7 @@ public sealed class PgSource : IEngineSource
         {
             _instances = PostgresEngine.Instances(endpoint, out _);
             _rds = rds ?? new AwsRdsLogs(endpoint.Options["rds_region"]);
+            _budget = RdsCallBudget.For(endpoint.Options["rds_region"]);
         }
         else
         {
@@ -159,7 +163,7 @@ public sealed class PgSource : IEngineSource
                 _english, _rotationMinutes);
             if (_rds != null)
             {
-                await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond), ct);
+                await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond, budget: _budget), ct);
             }
             else
             {

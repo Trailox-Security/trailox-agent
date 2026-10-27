@@ -177,7 +177,7 @@ public static class PgPasswordRedactor
         return literal;
     }
 
-    private enum TokenKind
+    internal enum TokenKind
     {
         Space,
         Comment,
@@ -187,10 +187,10 @@ public static class PgPasswordRedactor
     }
 
     /// <param name="Plain">A standard string, '...' with no E or U&amp; prefix.</param>
-    private readonly record struct Token(TokenKind Kind, int End, string? Word = null, bool Terminated = true, bool Plain = false);
+    internal readonly record struct Token(TokenKind Kind, int End, string? Word = null, bool Terminated = true, bool Plain = false);
 
     /// <summary>Just enough of PostgreSQL's lexer to tell a password's string from the words and strings around it.</summary>
-    private static class Lexer
+    internal static class Lexer
     {
         public static Token Next(string s, int i)
         {
