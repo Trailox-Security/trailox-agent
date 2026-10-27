@@ -612,7 +612,8 @@ replaced.
 OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a double quote or a line break.
 - The `PARAMETER` field is never read or shipped.
 - A line with a `CONTEXT` was written from inside a function (`RAISE LOG`), not by pgaudit, which writes none: it is
-  counted, never shipped. A line of seven fields (`pgaudit.log_statement` off) is a statement with no text.
+  counted, never shipped. `log_error_verbosity = terse` writes no `CONTEXT` on any line, so the probe warns about it
+  wherever pgaudit is loaded. A line of seven fields (`pgaudit.log_statement` off) is a statement with no text.
 - The lines of one backend with the same statement and substatement ids are one statement. Its objects are the
   distinct `OBJECT_NAME`s of each class: one line per relation with `pgaudit.log_relation` on, and a relation under
   both object and session audit written twice. A statement that reads some relations and writes others (`INSERT ...
@@ -692,8 +693,8 @@ function, no reset of `pg_stat_statements`, and its text only in `catalog_statem
 **The probe** reports `caps.postgres` in the check-in: `platform` (`rds`, `aurora`, `self_managed`), `logSource`,
 `logFormat`, `serverVersionNum`, `statStatements`, `instances` (`id`, `role`, `oldestLogMicros`, `logFileMinutes`)
 and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `role`, `logging`, `lc_messages`, `log_timezone`,
-`logging_collector` (self-managed), `pg_stat_statements` (a warning before extension 1.8), `instances` (each replica
-signed in to once), `replicas`, `log_files`. A failed check does not fail the probe. `earliestEventMicros` and
+`logging_collector` (self-managed), `pg_stat_statements` (a warning before extension 1.8), `log_error_verbosity`
+(where pgaudit is loaded: a warning at `terse`), `instances` (each replica signed in to once), `replicas`, `log_files`. A failed check does not fail the probe. `earliestEventMicros` and
 `earliestSessionMicros` are the start of the oldest log file. A rejected password (SQLSTATE 28P01) fails the probe
 or the task, and the agent then does not sign in to that source again, for a probe or a task, until it restarts.
 

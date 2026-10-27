@@ -11,8 +11,9 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item>Strings in any quoting (<c>'...'</c>, <c>E'...'</c>, <c>U&amp;'...'</c>, <c>$tag$...$tag$</c>) and numbers (hex,
 ///   octal and binary ones too) become <c>?</c>; a list of them, as in <c>IN (?, ?, ?)</c>, becomes one <c>?</c>, and so
 ///   does a list of rows, as in <c>VALUES (?), (?)</c>.</item>
-/// <item>🔴 A plain string that holds a backslash ends at the farther of its two possible ends: with
-///   <c>standard_conforming_strings</c> off the backslash escapes a quote, so the nearer end could leave a value outside.</item>
+/// <item>🔴 A plain string that holds a backslash has two possible ends: with <c>standard_conforming_strings</c> off the
+///   backslash escapes a quote. Where they differ, the shape stops with <c>?</c>: lexing on from either end can read the
+///   other reading's value as words.</item>
 /// <item>Comments go, and each run of white space becomes one space. Words, quoted identifiers, operators and
 ///   <c>$1</c> placeholders stay.</item>
 /// <item>🔴 It fails closed: a string that never ends (a cut text) ends the shape with <c>?</c>.</item>
@@ -74,13 +75,13 @@ public static class PgStatementShape
                     }
                     if (token.Plain && sql.AsSpan(i, token.End - i).Contains('\\'))
                     {
+                        // Where the two readings end the string at different quotes, the text after either end can be a
+                        // value under the other, as in ('C:\', 'x'): the shape stops here.
                         var escaped = PgPasswordRedactor.Lexer.Quoted(sql, i + 1, backslashEscapes: true);
-                        if (!escaped.Terminated)
+                        if (!escaped.Terminated || escaped.End != token.End)
                         {
                             return Rows(output);
                         }
-                        i = Math.Max(token.End, escaped.End);
-                        continue;
                     }
                     break;
                 default:
@@ -97,8 +98,8 @@ public static class PgStatementShape
         System.Text.RegularExpressions.Regex.Replace(output.ToString(), @"\(\?\)(?:, ?\(\?\))+", "(?)");
 
     /// <summary>
-    /// The direction of a COPY: "TO" (out of the database) or "FROM", the first of the two words outside parentheses;
-    /// null when neither is there (a cut text).
+    /// The direction of a COPY: "TO" (out of the database) or "FROM", the first of the two unquoted words outside
+    /// parentheses; null when neither is there (a cut text).
     /// </summary>
     public static string? CopyDirection(string sql)
     {
@@ -107,7 +108,8 @@ public static class PgStatementShape
         while (i < sql.Length)
         {
             var token = PgPasswordRedactor.Lexer.Next(sql, i);
-            if (token.Kind == PgPasswordRedactor.TokenKind.Word && depth == 0
+            // TO and FROM are reserved words, so only a quoted name ("from", U&"to") can spell one: it is the table's.
+            if (token.Kind == PgPasswordRedactor.TokenKind.Word && depth == 0 && sql[i] != '"'
                 && (string.Equals(token.Word, "TO", StringComparison.OrdinalIgnoreCase) || string.Equals(token.Word, "FROM", StringComparison.OrdinalIgnoreCase)))
             {
                 return token.Word!.ToUpperInvariant();

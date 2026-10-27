@@ -242,6 +242,15 @@ public class PgAuditTests
         Assert.Equal(command, Assert.Single(AuditRows(rows)).GetProperty("command").GetString());
     }
 
+    /// <summary>🔴 Only a quoted name can spell TO or FROM, and it is the table's: COPY "from" TO is still an export.</summary>
+    [Theory]
+    [InlineData("""COPY "from" TO STDOUT""", "TO")]
+    [InlineData("""COPY "to" FROM STDIN""", "FROM")]
+    [InlineData("""COPY s."from" (a, "to") TO STDOUT""", "TO")]
+    [InlineData("""COPY U&"from" TO STDOUT""", "TO")]
+    public void A_quoted_name_is_never_a_copy_direction(string sql, string direction) =>
+        Assert.Equal(direction, PgStatementShape.CopyDirection(sql));
+
     /// <summary>🔴 Anyone can RAISE LOG 'AUDIT: ...' from a function; pgaudit's own lines carry no CONTEXT.</summary>
     [Fact]
     public void An_audit_line_written_from_a_function_is_never_shipped()
@@ -332,7 +341,9 @@ public class PgAuditTests
 
     [Theory]
     [InlineData("SELECT * FROM t WHERE id = 0xDEADBEEF OR m = 0o777 OR b = 0b1011", "SELECT * FROM t WHERE id = ? OR m = ? OR b = ?")]
-    [InlineData("SELECT 'it\\'s secret' FROM t", "SELECT ? FROM t")]
+    [InlineData("SELECT 'it\\'s secret' FROM t", "SELECT ?")]
+    [InlineData("""INSERT INTO t VALUES ('C:\', 'john secret')""", "INSERT INTO t VALUES (?")]
+    [InlineData("""SELECT * FROM t WHERE p = 'C:\temp' AND q = 'secret'""", "SELECT * FROM t WHERE p = ? AND q = ?")]
     [InlineData("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')", "INSERT INTO t VALUES (?)")]
     public void A_shape_keeps_no_value_in_any_form(string sql, string shape)
     {
