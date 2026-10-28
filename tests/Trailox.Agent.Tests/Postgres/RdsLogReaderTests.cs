@@ -134,6 +134,35 @@ public class RdsLogReaderTests
         Assert.Null(reader.Stats.FirstLogMicros);
     }
 
+    /// <summary>
+    /// 🔴 RDS can list a file as last written a few milliseconds before the window while it holds the window's first
+    ///    records: under load the log rotates every minute, and the logging collector writes records stamped at the
+    ///    window's first second into the previous file before it rotates. Listed from the window's start, that file was
+    ///    skipped, and its records fell in no window: the window before stops at its end.
+    /// </summary>
+    [Fact]
+    public async Task The_file_before_the_window_is_read_when_listed_as_written_just_before_it()
+    {
+        var rds = new FakeRds();
+        rds.Add("error/postgresql.log.2026-10-22-0609", Ms(At(6, 10).AddMilliseconds(-4)),
+            Lines(At(6, 9), At(6, 10), TimeSpan.FromSeconds(1))
+                .Append(Line(At(6, 10), 997, "statement: CREATE TABLE stamped_at_the_start_1 (a int)"))
+                .Append(Line(At(6, 10), 998, "statement: CREATE TABLE stamped_at_the_start_2 (a int)")));
+        rds.Add("error/postgresql.log.2026-10-22-0610", Ms(At(6, 11).AddMilliseconds(-9)), Lines(At(6, 10), At(6, 11), TimeSpan.FromSeconds(1)));
+        rds.Add("error/postgresql.log.2026-10-22-0611", Ms(At(6, 20)), Lines(At(6, 11), At(6, 20), TimeSpan.FromSeconds(1)));
+        rds.Add("error/postgresql.log.2026-10-22-0620", Ms(At(6, 30)), Lines(At(6, 20), At(6, 30), TimeSpan.FromSeconds(1)));
+
+        var (rows, reader) = await ReadAsync(rds, At(6, 10), At(6, 20));
+
+        Assert.Contains("statement: CREATE TABLE stamped_at_the_start_1 (a int)", Ddl(rows));
+        Assert.Contains("statement: CREATE TABLE stamped_at_the_start_2 (a int)", Ddl(rows));
+        Assert.Equal(12, Ddl(rows).Length);
+        // Its end, in one call: not the whole file.
+        Assert.Contains("download error/postgresql.log.2026-10-22-0609 tail 10000", rds.Calls);
+        Assert.DoesNotContain("download error/postgresql.log.2026-10-22-0609 0 3000", rds.Calls);
+        Assert.Equal(1, reader.Stats.TailHits);
+    }
+
     [Fact]
     public async Task An_hourly_file_whose_tail_reaches_the_window_is_read_in_one_call()
     {

@@ -200,7 +200,10 @@ public sealed class RdsLogReader
         [EnumeratorCancellation] CancellationToken ct)
     {
         var untilMicros = endMicros + marginMicros;
-        var listed = await FilesAsync(startMicros, untilMicros, ct);
+        // 🔴 LISTED FROM THE MARGIN BEFORE THE WINDOW, NOT FROM ITS START. RDS can list a file as last written a few
+        //    milliseconds before the window while it holds the window's first records (written into it just before it
+        //    rotated, below). Listed from the window's start, that file was skipped, and those records fell in no window.
+        var listed = await FilesAsync((startMicros - marginMicros) / 1000, startMicros, untilMicros, ct);
         if (listed.Count == 0)
         {
             // Nothing on the window's dates: RDS deleted them (retention), or the instance wrote nothing since. A later
@@ -284,11 +287,11 @@ public sealed class RdsLogReader
     }
 
     /// <summary>
-    /// The stderr files written since the window's start, on the window's dates and the hour before it (a file of the
-    /// day before can hold the first records after midnight), in order. RDS writes csvlog and jsonlog files beside stderr
-    /// when <c>log_destination</c> names them; the agent reads stderr only.
+    /// The stderr files written since <paramref name="sinceMs"/>, on the window's dates and the hour before it (a file of
+    /// the day before can hold the first records after midnight), in order. RDS writes csvlog and jsonlog files beside
+    /// stderr when <c>log_destination</c> names them; the agent reads stderr only.
     /// </summary>
-    private async Task<List<RdsLogFile>> FilesAsync(long startMicros, long untilMicros, CancellationToken ct)
+    private async Task<List<RdsLogFile>> FilesAsync(long sinceMs, long startMicros, long untilMicros, CancellationToken ct)
     {
         var dates = new SortedSet<string>(StringComparer.Ordinal)
         {
@@ -300,7 +303,7 @@ public sealed class RdsLogReader
         foreach (var date in dates)
         {
             await PaceAsync(ct);
-            foreach (var f in await _api.ListAsync(_instance, startMicros / 1000, "postgresql.log." + date, ct))
+            foreach (var f in await _api.ListAsync(_instance, sinceMs, "postgresql.log." + date, ct))
             {
                 found[f.Name] = f;
             }

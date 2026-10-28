@@ -565,10 +565,14 @@ cannot be passed on by a machine in between; a server or pooler that does not of
 
   | call | when |
   |---|---|
-  | `DescribeDBLogFiles`, `FileLastWritten` = the window's start, `FilenameContains` = `postgresql.log.<date>` of the window's start and end | each `pg_log` task, per instance (two calls when the window crosses midnight) |
+  | `DescribeDBLogFiles`, `FileLastWritten` = 5 s before the window's start (from 1.14.0; before, the window's start), `FilenameContains` = `postgresql.log.<date>` of the window's start and end | each `pg_log` task, per instance (two calls when the window crosses midnight) |
   | `DownloadDBLogFilePortion`, `Marker` = `"0"` and then the marker returned, 3,000 lines a call | each file that can hold the window, from its start |
   | `DownloadDBLogFilePortion` with no marker, 10,000 lines | once per task, on the newest file when the window starts inside it and it is over 1 MB: when those last lines reach back to the window's start, nothing else of that file is read. From 1.14.0 a capped answer is asked again with half the lines, down to 300, before the file is read from its start |
   | `DescribeDBLogFiles`, every file | the probe, per instance: the oldest file and the files' length |
+
+  RDS can list the file before the window as last written a few milliseconds before the window's start while it holds
+  the window's first records, written into it just before it rotated: listed from the window's start, those records
+  were read by no window.
 
   At most 4 calls a second per source, 2 for a window that ended more than an hour ago. An answer of 1 MB, or one
   that holds `[Your log message was truncated]`, may have lost lines: it is asked again from the same marker with
