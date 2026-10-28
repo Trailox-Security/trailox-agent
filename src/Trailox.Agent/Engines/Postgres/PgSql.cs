@@ -26,7 +26,7 @@ public static class PgSql
         SELECT name, setting FROM pg_settings
         WHERE name IN ('log_connections', 'log_disconnections', 'log_statement', 'log_line_prefix', 'log_destination',
                        'logging_collector', 'log_directory', 'log_filename', 'log_rotation_age', 'log_rotation_size',
-                       'log_file_mode', 'log_timezone', 'lc_messages', 'shared_preload_libraries', 'ssl',
+                       'log_file_mode', 'log_timezone', 'log_error_verbosity', 'lc_messages', 'shared_preload_libraries', 'ssl',
                        'password_encryption', 'pg_stat_statements.max', 'pg_stat_statements.track',
                        'server_version_num', 'rds.log_retention_period', 'rds.force_ssl')
            OR name LIKE 'pgaudit.%'

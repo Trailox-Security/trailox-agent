@@ -140,7 +140,7 @@ public class PgWindowReaderTests
             R(Start, "LOG", "disconnection: session time: 0:00:01.000 user=app database=appdb host=192.0.2.10 port=54170"),
             R(Start, "FATAL", "password authentication failed for user \"app\"", "Connection matched file \"/etc/postgresql/17/main/pg_hba.conf\" line 120: \"host all all all scram-sha-256\""),
             R(Start, "ERROR", "permission denied for table cards", statement: "SELECT number FROM cards WHERE id = 4111"),
-            R(Start, "LOG", "AUDIT: SESSION,1,1,READ,SELECT,,,SELECT 1,<not logged>"),
+            R(Start, "LOG", "AUDIT: SESSION,1,1,DDL,CREATE TABLE,,,CREATE TABLE t (a int),<not logged>"),
             R(Start, "LOG", "checkpoint starting: time"),
             new PgLogRecord { TsMicros = long.MinValue, Level = "LOG", Message = "unreadable time" });
 
@@ -193,7 +193,8 @@ public class PgWindowReaderTests
 
         var names = rows[0].EnumerateObject().Select(p => p.Name).ToArray();
         Assert.Equal(new[] { "instance", "ts", "pid", "user", "database", "remote_host", "remote_port", "level", "sql_state",
-            "application_name", "session_id", "message", "detail", "command", "format", "truncated" }, names);
+            "application_name", "session_id", "message", "detail", "command", "format", "truncated", "audit_class", "objects",
+            "event_count" }, names);
         Assert.Equal(names, rows[1].EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(JsonValueKind.Null, rows[0].GetProperty("application_name").ValueKind);
         Assert.Equal("2026-10-22T06:10:00.000000Z", rows[0].GetProperty("ts").GetString());

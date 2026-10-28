@@ -35,7 +35,8 @@ public sealed class PgRows
 /// <summary>
 /// The <c>pg_log</c> rows of one instance for one window [start, end). Each record belongs to the window by its own
 /// time. A record of a shipped kind (<see cref="PgRecordKinds.Shipped"/>) becomes a row, its text redacted and cut at
-/// <see cref="MaxTextChars"/>; every other record is only counted. One count row per instance and window closes the
+/// <see cref="MaxTextChars"/>. pgaudit's READ and WRITE lines become statements, one row per minute and shape
+/// (<see cref="PgAuditGroups"/>). Every other record is only counted. One count row per instance and window closes the
 /// read: what was counted, what could not be read, and whether the log before the window's start was found.
 /// </summary>
 /// <remarks>
@@ -65,9 +66,14 @@ public sealed class PgWindowReader
     private readonly RowSink _sink;
     private readonly PgRows? _rows;
     private readonly SortedDictionary<string, long> _counted = new(StringComparer.Ordinal);
+    private readonly PgAuditGroups _audit;
 
     private long _records;
     private long _shipped;
+    private long _auditRows;
+
+    /// <summary>The bytes of the lines whose time is in the window, as the server wrote them: what it logged, not what was read.</summary>
+    private long _logBytes;
     private long _outOfWindow;
     private long _unreadable;
     private long _malformed;
@@ -100,6 +106,7 @@ public sealed class PgWindowReader
         _rotationMicros = Math.Max(0, rotationMinutes) * 60_000_000L;
         _sink = sink;
         _rows = rows;
+        _audit = new PgAuditGroups(WriteAudit);
     }
 
     /// <summary>A record past the window's end and its margin was seen: nothing after it can belong to the window.</summary>
@@ -139,6 +146,12 @@ public sealed class PgWindowReader
             return;
         }
         var kind = r.Kind;
+        _audit.Advance(r.TsMicros);
+        if (kind == PgRecordKind.Audit)
+        {
+            AddAudit(r);
+            return;
+        }
         if (!PgRecordKinds.Shipped(kind))
         {
             var key = kind == PgRecordKind.Other && r.Level == "LOG" && !_english ? "unrecognised" : kind.ToString().ToLowerInvariant();
@@ -147,6 +160,24 @@ public sealed class PgWindowReader
         }
         Write(r, kind);
         _shipped++;
+    }
+
+    private void AddAudit(PgLogRecord r)
+    {
+        if (r.HasContext)
+        {
+            // Written from inside a function (RAISE LOG 'AUDIT: ...'): anyone's text, never pgaudit's.
+            _counted["audit_context"] = _counted.GetValueOrDefault("audit_context") + 1;
+        }
+        else if (PgAuditLine.Parse(r.Message) is not { } line)
+        {
+            _counted["audit_unreadable"] = _counted.GetValueOrDefault("audit_unreadable") + 1;
+        }
+        else if (!_audit.Add(r, line))
+        {
+            // Another class than READ and WRITE: DDL and role changes already come from log_statement.
+            _counted["audit"] = _counted.GetValueOrDefault("audit") + 1;
+        }
     }
 
     /// <summary>The instance could not be read for this window (a deleted replica); said in the count row.</summary>
@@ -297,10 +328,20 @@ public sealed class PgWindowReader
         PgLogParser? parser = null;
         string? file = null;
         var lines = 0L;
+        var inWindow = false;
         try
         {
             await foreach (var line in rds.LinesAsync(_start, _end, StopMarginMicros, StderrTime, ct))
             {
+                // A continuation line belongs where the line it continues does.
+                if (StderrTime(line.Text) is { } at)
+                {
+                    inWindow = at >= _start && at < _end;
+                }
+                if (inWindow)
+                {
+                    _logBytes += Encoding.UTF8.GetByteCount(line.Text) + 1;
+                }
                 if (line.File != file)
                 {
                     // A message never spans a rotation: the record in progress ends with its file.
@@ -334,10 +375,17 @@ public sealed class PgWindowReader
     /// <summary>The count row: <c>level</c> 'summary', and the counts as JSON in <c>message</c>.</summary>
     public void WriteCounts()
     {
+        _audit.Finish();
         var counts = new Dictionary<string, object?>
         {
             ["records"] = _records,
             ["shipped"] = _shipped,
+            ["audit_lines"] = _audit.Lines,
+            ["audit_rows"] = _auditRows,
+            ["audit_overflow"] = _audit.OverflowLines,
+            ["audit_shapeless"] = _audit.ShapelessLines,
+            ["audit_late"] = _audit.LateLines,
+            ["log_bytes"] = _logBytes,
             ["out_of_window"] = _outOfWindow,
             ["unreadable"] = _unreadable + _malformed,
             ["preamble"] = _preamble,
@@ -366,6 +414,7 @@ public sealed class PgWindowReader
         w.WriteString("command"u8, "");
         w.WriteString("format"u8, "");
         w.WriteBoolean("truncated"u8, false);
+        WriteAuditColumns(w, "", Array.Empty<string>(), 1);
         w.WriteEndObject();
         _sink.EndRow();
     }
@@ -440,8 +489,66 @@ public sealed class PgWindowReader
         w.WriteString("command"u8, command);
         w.WriteString("format"u8, FormatName(r.Format));
         w.WriteBoolean("truncated"u8, truncated);
+        WriteAuditColumns(w, "", Array.Empty<string>(), 1);
         w.WriteEndObject();
         _sink.EndRow();
+    }
+
+    /// <summary>
+    /// One row per minute group: the first statement's session, the shape as its text (or nothing without statement
+    /// text), pgaudit's class and command, the objects, and how many statements. The row of a minute's overflow keeps
+    /// only its count: its class is <see cref="MinuteAggregator.Other"/>.
+    /// </summary>
+    private void WriteAudit(MinuteGroup g)
+    {
+        var l = g.Labels;
+        var truncated = !g.IsOther && l[PgAuditGroups.Truncated].Length > 0;
+        var message = _shipText && !g.IsOther ? Cut(l[PgAuditGroups.Shape], ref truncated) : "";
+        var w = _sink.Writer;
+        w.WriteStartObject();
+        w.WriteString("instance"u8, _instance);
+        RowSink.Time(w, "ts"u8, g.FirstMicros);
+        w.WriteNumber("pid"u8, g.IsOther ? 0 : int.Parse(l[PgAuditGroups.Pid], CultureInfo.InvariantCulture));
+        w.WriteString("user"u8, g.IsOther ? "" : l[PgAuditGroups.User]);
+        w.WriteString("database"u8, g.IsOther ? "" : l[PgAuditGroups.Database]);
+        w.WriteString("remote_host"u8, g.IsOther ? "" : l[PgAuditGroups.RemoteHost]);
+        w.WriteString("remote_port"u8, g.IsOther ? "" : l[PgAuditGroups.RemotePort]);
+        w.WriteString("level"u8, "LOG");
+        w.WriteString("sql_state"u8, "");
+        if (g.IsOther || l[PgAuditGroups.App] == PgAuditGroups.NoApp)
+        {
+            w.WriteNull("application_name"u8);
+        }
+        else
+        {
+            w.WriteString("application_name"u8, l[PgAuditGroups.App]);
+        }
+        w.WriteString("session_id"u8, g.IsOther ? "" : l[PgAuditGroups.SessionId]);
+        w.WriteString("message"u8, message);
+        // The shape's hash, with or without the text: it tells apart two groups that differ in their shape alone.
+        w.WriteString("detail"u8, g.IsOther ? "" : l[PgAuditGroups.ShapeHash]);
+        w.WriteString("command"u8, g.IsOther ? "" : l[PgAuditGroups.Command]);
+        w.WriteString("format"u8, g.IsOther ? "" : l[PgAuditGroups.Format]);
+        w.WriteBoolean("truncated"u8, truncated);
+        WriteAuditColumns(w, g.IsOther ? MinuteAggregator.Other : l[PgAuditGroups.Class],
+            g.IsOther || l[PgAuditGroups.Objects].Length == 0 ? Array.Empty<string>() : l[PgAuditGroups.Objects].Split(PgAuditGroups.ObjectSeparator),
+            g.Count);
+        w.WriteEndObject();
+        _sink.EndRow();
+        _auditRows++;
+    }
+
+    /// <summary>pgaudit's class ('' when the row is no pgaudit statement), the objects it names, and the statements it stands for.</summary>
+    private static void WriteAuditColumns(Utf8JsonWriter w, string auditClass, IReadOnlyList<string> objects, long count)
+    {
+        w.WriteString("audit_class"u8, auditClass);
+        w.WriteStartArray("objects"u8);
+        foreach (var o in objects)
+        {
+            w.WriteStringValue(o);
+        }
+        w.WriteEndArray();
+        w.WriteNumber("event_count"u8, count);
     }
 
     private static string Cut(string text, ref bool truncated)

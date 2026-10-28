@@ -24,7 +24,7 @@ public enum PgRecordKind
     Statement,
     /// <summary><c>execute &lt;name&gt;: ...</c>, written by <c>log_statement</c> for a statement sent in the extended protocol.</summary>
     Execute,
-    /// <summary>A pgaudit <c>AUDIT:</c> line. Counted, not shipped.</summary>
+    /// <summary>A pgaudit <c>AUDIT:</c> line: its READ and WRITE statements ship grouped per minute (<see cref="PgAuditGroups"/>).</summary>
     Audit,
     Other,
 }
@@ -68,6 +68,12 @@ public sealed class PgLogRecord
 
     /// <summary>The STATEMENT part of an error. Never shipped: it holds the application's values.</summary>
     public string Statement { get; set; } = "";
+
+    /// <summary>
+    /// The record has a CONTEXT: it was written from inside a function (a PL/pgSQL RAISE, for one). pgaudit writes its
+    /// lines without one, so an AUDIT line with a CONTEXT is someone's own text, not pgaudit's.
+    /// </summary>
+    public bool HasContext { get; set; }
 
     public PgLogFormat Format { get; set; }
 

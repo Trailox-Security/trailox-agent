@@ -330,4 +330,74 @@ public class RdsLogReaderTests
         Assert.Equal(rds.Calls.Count - 1, waits.Count);
         Assert.All(waits, w => Assert.InRange(w.TotalMilliseconds, 1, 500));
     }
+
+    /// <summary>The Region's budget caps the sum of every reader there: three calls at one instant take three slots.</summary>
+    [Fact]
+    public void A_regions_budget_gives_each_call_its_own_slot()
+    {
+        var budget = new RdsCallBudget(callsPerSecond: 2);
+        var at = new DateTime(2026, 10, 22, 6, 10, 0, DateTimeKind.Utc);
+
+        Assert.Equal(new[] { 0.0, 500, 1000 }, new[] { budget.Reserve(at), budget.Reserve(at), budget.Reserve(at) }.Select(w => w.TotalMilliseconds));
+        Assert.Equal(TimeSpan.Zero, budget.Reserve(at.AddSeconds(5)));
+    }
+
+    /// <summary>A reader faster than its Region's budget waits for the budget.</summary>
+    [Fact]
+    public async Task A_reader_waits_for_its_regions_budget()
+    {
+        var rds = new FakeRds();
+        rds.Add("error/postgresql.log.2026-10-22-0610", Ms(At(6, 20)), Lines(At(6, 10), At(6, 20), TimeSpan.FromSeconds(10)));
+        var waits = new List<TimeSpan>();
+        var reader = new RdsLogReader(rds, "db1", callsPerSecond: 100, (d, _) =>
+        {
+            waits.Add(d);
+            return Task.CompletedTask;
+        }, new RdsCallBudget(callsPerSecond: 0.5));
+
+        await foreach (var _ in reader.LinesAsync(Micros(At(6, 10)), Micros(At(6, 20)), 0, PgWindowReader.StderrTime, CancellationToken.None))
+        {
+        }
+
+        Assert.NotEmpty(waits);
+        Assert.All(waits, w => Assert.True(w.TotalMilliseconds > 1000, w.ToString()));
+    }
+
+    /// <summary>
+    /// 🔴 At pgaudit's volumes the end of the file before a window is more than a page holds. The end is read again with
+    ///    half the lines until it fits, never the whole file from its start: that downloaded every window twice.
+    /// </summary>
+    [Fact]
+    public async Task A_capped_end_read_is_read_again_with_half_the_lines()
+    {
+        var rds = new FakeRds();
+        rds.Add("error/postgresql.log.2026-10-22-0600", Ms(At(6, 10).AddMilliseconds(400)),
+            Lines(At(6, 0), At(6, 10), TimeSpan.FromMilliseconds(100), padding: 200));
+        rds.Add("error/postgresql.log.2026-10-22-0610", Ms(At(6, 20)), Lines(At(6, 10), At(6, 20), TimeSpan.FromSeconds(10)));
+
+        var (rows, reader) = await ReadAsync(rds, At(6, 10), At(6, 20));
+
+        var tail = rds.Calls.Where(c => c.StartsWith("download error/postgresql.log.2026-10-22-0600 tail", StringComparison.Ordinal)).ToList();
+        Assert.Equal(new[] { "10000", "5000", "2500" }, tail.Select(c => c.Split(' ')[^1]));
+        Assert.DoesNotContain(rds.Calls, c => c.StartsWith("download error/postgresql.log.2026-10-22-0600 0 ", StringComparison.Ordinal));
+        Assert.Equal(1, reader.Stats.TailHits);
+        Assert.Equal(10, Ddl(rows).Length);
+    }
+
+    /// <summary>The count row's log_bytes are the window's own lines; bytes are everything downloaded, the end read included.</summary>
+    [Fact]
+    public async Task Log_bytes_are_the_windows_own_lines()
+    {
+        var rds = new FakeRds();
+        var before = Lines(At(6, 0), At(6, 10), TimeSpan.FromSeconds(10)).ToList();
+        var window = Lines(At(6, 10), At(6, 20), TimeSpan.FromSeconds(10)).ToList();
+        rds.Add("error/postgresql.log.2026-10-22-0600", Ms(At(6, 10).AddMilliseconds(400)), before);
+        rds.Add("error/postgresql.log.2026-10-22-0610", Ms(At(6, 20)), window);
+
+        var (rows, _) = await ReadAsync(rds, At(6, 10), At(6, 20));
+
+        var counts = JsonDocument.Parse(rows[^1].GetProperty("message").GetString()!).RootElement;
+        Assert.Equal(window.Sum(l => Encoding.UTF8.GetByteCount(l) + 1), counts.GetProperty("log_bytes").GetInt64());
+        Assert.True(counts.GetProperty("bytes").GetInt64() > counts.GetProperty("log_bytes").GetInt64());
+    }
 }

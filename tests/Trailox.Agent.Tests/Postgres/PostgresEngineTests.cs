@@ -184,6 +184,31 @@ public class PostgresEngineTests
         Assert.Equal(status, StatusOf(PgProbeChecks.Settings(Settings(connections, statement, lc, zone), "rds_api"), check));
     }
 
+    /// <summary>terse drops every CONTEXT, so a function's RAISE LOG 'AUDIT: ...' passes as pgaudit's line.</summary>
+    [Theory]
+    [InlineData("pg_stat_statements,pgaudit", "terse", "warn")]
+    [InlineData("pgaudit", "TERSE", "warn")]
+    [InlineData("pgaudit", "default", "ok")]
+    [InlineData("pgaudit", "verbose", "ok")]
+    public void Pgaudit_needs_more_than_terse_log_lines(string libraries, string verbosity, string status)
+    {
+        var settings = new Dictionary<string, string>(Settings())
+        {
+            ["shared_preload_libraries"] = libraries,
+            ["log_error_verbosity"] = verbosity,
+        };
+
+        Assert.Equal(status, StatusOf(PgProbeChecks.Settings(settings, "rds_api"), "log_error_verbosity"));
+    }
+
+    [Fact]
+    public void Without_pgaudit_the_log_verbosity_is_not_checked()
+    {
+        var settings = new Dictionary<string, string>(Settings()) { ["log_error_verbosity"] = "terse" };
+
+        Assert.DoesNotContain(PgProbeChecks.Settings(settings, "rds_api"), c => c.Name == "log_error_verbosity");
+    }
+
     [Fact]
     public void A_self_managed_server_without_the_logging_collector_fails()
     {

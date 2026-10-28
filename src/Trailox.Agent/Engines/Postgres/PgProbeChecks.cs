@@ -70,7 +70,21 @@ public static class PgProbeChecks
         {
             yield return Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart)");
         }
+
+        // A pgaudit line carries no CONTEXT, and a function's RAISE LOG 'AUDIT: ...' does; terse writes no CONTEXT at all.
+        if (Loads(s, "pgaudit"))
+        {
+            yield return string.Equals(s.GetValueOrDefault("log_error_verbosity", ""), "terse", StringComparison.OrdinalIgnoreCase)
+                ? Warn("log_error_verbosity", "log_error_verbosity is terse, so a line written by a function's RAISE LOG cannot be told "
+                    + "from pgaudit's own: set log_error_verbosity = 'default'")
+                : Ok("log_error_verbosity", "pgaudit's lines can be told from lines that functions write");
+        }
     }
+
+    private static bool Loads(IReadOnlyDictionary<string, string> s, string library) =>
+        s.GetValueOrDefault("shared_preload_libraries", "")
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Any(l => l.Trim('"') == library);
 
     /// <param name="extversion">The installed extension's version in <paramref name="database"/>; null when it is not created.</param>
     public static PostgresCheck StatStatements(string? extversion, IReadOnlyDictionary<string, string> s, string database)
@@ -82,10 +96,7 @@ public static class PgProbeChecks
                 : Warn("pg_stat_statements", $"pg_stat_statements {extversion} is older than this server's: read volume per user is collected, "
                     + $"but run ALTER EXTENSION pg_stat_statements UPDATE in database {database} to read it as the server counts it");
         }
-        var loaded = s.GetValueOrDefault("shared_preload_libraries", "")
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Any(l => l.Trim('"') == "pg_stat_statements");
-        return Warn("pg_stat_statements", loaded
+        return Warn("pg_stat_statements", Loads(s, "pg_stat_statements")
             ? $"pg_stat_statements is loaded but not created in database {database}: CREATE EXTENSION pg_stat_statements"
             : "pg_stat_statements is not loaded: add it to shared_preload_libraries (one restart), then CREATE EXTENSION pg_stat_statements. "
                 + "Until then there is no read volume per user");
