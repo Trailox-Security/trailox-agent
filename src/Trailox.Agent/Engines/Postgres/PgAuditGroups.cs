@@ -18,7 +18,9 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item>🔴 ONE STATEMENT CAN READ SOME RELATIONS AND WRITE OTHERS (INSERT ... SELECT, a data-modifying WITH). Its READ
 ///   lines and its WRITE lines stay apart: one row each, so a relation read is never filed as written.</item>
 /// <item>🔴 A COPY IS NAMED BY ITS DIRECTION. With <c>pgaudit.log_relation</c> on, pgaudit names a COPY's lines by the
-///   rights it uses (SELECT, INSERT), so the statement's own text says COPY TO or COPY FROM.</item>
+///   rights it uses (SELECT, INSERT), so the statement's own text says COPY TO or COPY FROM. COPY (query) TO adds a
+///   line of its own after the query's (command COPY, no object, the next substatement id): it joins the statement, so
+///   one export is one row.</item>
 /// <item>Only READ and WRITE are grouped and shipped; lines of other classes are only counted.</item>
 /// <item>On stderr a line carries no application name: only the session's connection line does, under the same pid.
 ///   There the pid is part of the key, so a group never spans two sessions.</item>
@@ -85,8 +87,7 @@ public sealed class PgAuditGroups
             return false;
         }
         Lines++;
-        if (_open.TryGetValue(r.Pid, out var open)
-            && (open.StatementId != line.StatementId || open.SubstatementId != line.SubstatementId))
+        if (_open.TryGetValue(r.Pid, out var open) && !open.Holds(line))
         {
             Close(open);
             open = null;
@@ -241,6 +242,14 @@ public sealed class PgAuditGroups
         public long SubstatementId { get; }
         public bool Truncated { get; set; }
         public IEnumerable<KeyValuePair<string, ClassPart>> Parts => _parts;
+
+        /// <summary>
+        /// Whether <paramref name="line"/> is one of this statement's lines: the same statement and substatement ids, or
+        /// the COPY's own line of a COPY (query) TO, which comes after the query's lines with the next substatement id.
+        /// </summary>
+        public bool Holds(PgAuditLine line) =>
+            line.StatementId == StatementId
+            && (line.SubstatementId == SubstatementId || (line.Command == "COPY" && PgCommand.Of(Statement) == "COPY"));
 
         /// <summary>The statement's lines of one class; the command is the first line's of that class.</summary>
         public ClassPart Part(string cls, string command)

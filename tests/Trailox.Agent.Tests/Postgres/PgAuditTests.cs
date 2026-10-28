@@ -240,6 +240,52 @@ public class PgAuditTests
         Assert.Equal(command, Assert.Single(AuditRows(rows)).GetProperty("command").GetString());
     }
 
+    /// <summary>
+    /// 🔴 COPY (query) TO writes the query's lines, then a line of its own: the next substatement id, command COPY, no
+    /// object. It is the same statement, one export naming the query's tables, not a second export naming none.
+    /// </summary>
+    [Fact]
+    public void A_copy_of_a_query_is_one_export_naming_its_tables()
+    {
+        const string sql = "COPY (SELECT * FROM cards) TO STDOUT";
+        var rows = Run(true,
+            A(Start, $"OBJECT,1,1,READ,SELECT,TABLE,public.cards,{sql},<not logged>"),
+            A(Start, $"SESSION,1,1,READ,SELECT,TABLE,public.cards,{sql},<not logged>"),
+            A(Start, $"SESSION,1,2,READ,COPY,,,{sql},<not logged>"));
+
+        var export = Assert.Single(AuditRows(rows));
+        Assert.Equal(("READ", "COPY TO", 1L), (export.GetProperty("audit_class").GetString(), export.GetProperty("command").GetString(),
+            export.GetProperty("event_count").GetInt64()));
+        Assert.Equal(new[] { "public.cards" }, Objects(export));
+        Assert.Equal(3, Counts(rows).GetProperty("audit_lines").GetInt64());
+    }
+
+    /// <summary>A statement that a function runs inside the query keeps its own row: only the COPY's own line joins it.</summary>
+    [Fact]
+    public void A_statement_run_inside_a_copy_of_a_query_stays_its_own_row()
+    {
+        const string sql = "COPY (SELECT export_cards()) TO STDOUT";
+        var rows = Run(true,
+            A(Start, $"SESSION,1,1,READ,SELECT,TABLE,public.cards,{sql},<not logged>"),
+            A(Start, "SESSION,1,2,READ,SELECT,TABLE,public.accounts,SELECT * FROM accounts,<not logged>"));
+
+        Assert.Equal(new[] { "READ COPY TO public.cards", "READ SELECT public.accounts" }, AuditRows(rows)
+            .Select(r => $"{r.GetProperty("audit_class").GetString()} {r.GetProperty("command").GetString()} {string.Join(",", Objects(r))}")
+            .Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>A COPY line joins only a COPY statement: after a function's own statement, it is the export it names.</summary>
+    [Fact]
+    public void A_copy_line_after_another_statement_is_its_own_export()
+    {
+        var rows = Run(true,
+            A(Start, "SESSION,1,1,READ,SELECT,,,SELECT export_cards(),<not logged>"),
+            A(Start, "SESSION,1,2,READ,COPY,,,COPY (SELECT * FROM cards) TO '/tmp/cards.csv',<not logged>"));
+
+        Assert.Equal(new[] { "COPY TO", "SELECT" }, AuditRows(rows).Select(r => r.GetProperty("command").GetString())
+            .Order(StringComparer.Ordinal));
+    }
+
     /// <summary>🔴 Only a quoted name can spell TO or FROM, and it is the table's: COPY "from" TO is still an export.</summary>
     [Theory]
     [InlineData("""COPY "from" TO STDOUT""", "TO")]
