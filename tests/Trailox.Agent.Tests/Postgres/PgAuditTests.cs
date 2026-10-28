@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Trailox.Agent.Engines.MongoDb;
@@ -274,16 +275,36 @@ public class PgAuditTests
             .Order(StringComparer.Ordinal));
     }
 
-    /// <summary>A COPY line joins only a COPY statement: after a function's own statement, it is the export it names.</summary>
+    /// <summary>🔴 A COPY line joins only a COPY statement: after any other statement, it is a row of its own.</summary>
     [Fact]
-    public void A_copy_line_after_another_statement_is_its_own_export()
+    public void A_copy_line_after_another_statement_is_its_own_row()
     {
+        const string sql = "SELECT export_cards()";
         var rows = Run(true,
-            A(Start, "SESSION,1,1,READ,SELECT,,,SELECT export_cards(),<not logged>"),
-            A(Start, "SESSION,1,2,READ,COPY,,,COPY (SELECT * FROM cards) TO '/tmp/cards.csv',<not logged>"));
+            A(Start, $"SESSION,1,1,READ,SELECT,,,{sql},<not logged>"),
+            A(Start, $"SESSION,1,2,READ,COPY,,,{sql},<not logged>"));
 
-        Assert.Equal(new[] { "COPY TO", "SELECT" }, AuditRows(rows).Select(r => r.GetProperty("command").GetString())
+        Assert.Equal(new[] { "COPY", "SELECT" }, AuditRows(rows).Select(r => r.GetProperty("command").GetString())
             .Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// 🔴 Only the COPY's own line joins it, exactly as pgaudit writes it. A line two substatements on, one that names an
+    /// object, one with other text, or one of another command is a row of its own, so nothing hides inside an export.
+    /// </summary>
+    [Theory]
+    [InlineData("SESSION,1,3,READ,COPY,,,{0}")]
+    [InlineData("SESSION,1,2,READ,COPY,TABLE,public.accounts,{0}")]
+    [InlineData("SESSION,1,2,READ,COPY,,,COPY (SELECT * FROM accounts) TO STDOUT")]
+    [InlineData("SESSION,1,2,READ,SELECT,,,{0}")]
+    public void Only_the_copys_own_line_joins_it(string second)
+    {
+        const string sql = "COPY (SELECT * FROM cards) TO STDOUT";
+        var rows = Run(true,
+            A(Start, $"SESSION,1,1,READ,SELECT,TABLE,public.cards,{sql},<not logged>"),
+            A(Start, string.Format(CultureInfo.InvariantCulture, second, sql) + ",<not logged>"));
+
+        Assert.Equal(2, AuditRows(rows).Count);
     }
 
     /// <summary>🔴 Only a quoted name can spell TO or FROM, and it is the table's: COPY "from" TO is still an export.</summary>

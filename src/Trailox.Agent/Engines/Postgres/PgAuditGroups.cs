@@ -19,8 +19,8 @@ namespace Trailox.Agent.Engines.Postgres;
 ///   lines and its WRITE lines stay apart: one row each, so a relation read is never filed as written.</item>
 /// <item>🔴 A COPY IS NAMED BY ITS DIRECTION. With <c>pgaudit.log_relation</c> on, pgaudit names a COPY's lines by the
 ///   rights it uses (SELECT, INSERT), so the statement's own text says COPY TO or COPY FROM. COPY (query) TO adds a
-///   line of its own after the query's (command COPY, no object, the next substatement id): it joins the statement, so
-///   one export is one row.</item>
+///   line of its own after the query's (command COPY, no object, the next substatement id, the same text): it joins
+///   the statement, so one export is one row.</item>
 /// <item>Only READ and WRITE are grouped and shipped; lines of other classes are only counted.</item>
 /// <item>On stderr a line carries no application name: only the session's connection line does, under the same pid.
 ///   There the pid is part of the key, so a group never spans two sessions.</item>
@@ -245,11 +245,19 @@ public sealed class PgAuditGroups
 
         /// <summary>
         /// Whether <paramref name="line"/> is one of this statement's lines: the same statement and substatement ids, or
-        /// the COPY's own line of a COPY (query) TO, which comes after the query's lines with the next substatement id.
+        /// the COPY's own line of a COPY (query) TO (<see cref="IsCopysOwnLine"/>).
         /// </summary>
         public bool Holds(PgAuditLine line) =>
-            line.StatementId == StatementId
-            && (line.SubstatementId == SubstatementId || (line.Command == "COPY" && PgCommand.Of(Statement) == "COPY"));
+            line.StatementId == StatementId && (line.SubstatementId == SubstatementId || IsCopysOwnLine(line));
+
+        /// <summary>
+        /// 🔴 ONLY THE SHAPE PGAUDIT WRITES: command COPY, the next substatement id, no object, and this statement's own
+        ///    text, which is a COPY. Any other line closes the statement and is a row of its own, so no statement can be
+        ///    hidden inside an export.
+        /// </summary>
+        private bool IsCopysOwnLine(PgAuditLine line) =>
+            line.Command == "COPY" && line.SubstatementId == SubstatementId + 1 && line.ObjectName.Length == 0
+            && line.Statement == Statement && PgCommand.Of(Statement) == "COPY";
 
         /// <summary>The statement's lines of one class; the command is the first line's of that class.</summary>
         public ClassPart Part(string cls, string command)
