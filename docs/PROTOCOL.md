@@ -376,7 +376,11 @@ names in lower case (`QUERY_ID` becomes `query_id`).
 
 From 1.15.0, `access_history` and `sessions` are cut by the statements that ended in the window, as `events` is: the
 access row of a statement that ran for hours comes once the statement is complete, and a statement's session comes
-however long ago it opened. Each of the two reads names the window's statements in `QUERY_HISTORY` once.
+however long ago it opened. Each of the two reads names the window's statements in `QUERY_HISTORY` once, and the access
+read first reads their oldest start in a statement of its own. An access row that belongs to no statement in
+`QUERY_HISTORY` is not sent. The sessions read has no time bound for those ids, so it may read the whole `SESSIONS` view
+(a year of sessions) each window, and a session comes again, with `ACCESS_TIME`, `IS_OPEN` and `CLOSED_REASON` as they
+are at that read, in each window that has its statements.
 
 `BIND_VALUES`, the values a statement was run with, is never read (from 1.15.0; before, it was sent when
 `storeRawQueryText` was true). With `storeRawQueryText` false, `QUERY_TEXT` is excluded too.
@@ -398,9 +402,13 @@ SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(EVENT_TIMESTAMP)), 0) FROM SNOW
 
 -- streams (window bound = TO_TIMESTAMP_LTZ(<n>, 6))
 SELECT * EXCLUDE ([QUERY_TEXT, ]BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
-WITH wq AS (SELECT QUERY_ID, START_TIME FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>)
-SELECT a.* FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a WHERE a.QUERY_START_TIME > <start - 24 h> AND a.QUERY_START_TIME <= <end>
-  AND a.QUERY_START_TIME >= (SELECT DATEADD('minute', -1, MIN(wq.START_TIME)) FROM wq) AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)
+-- access_history: first the oldest start of the window's statements, then their rows from <from> = that start
+-- less a minute (a day before the window at most; the window's end when it has no statement; <start - 24 h> when
+-- the answer is not a whole number)
+SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(START_TIME)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
+WITH wq AS (SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>)
+SELECT a.* FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a WHERE a.QUERY_START_TIME >= <from> AND a.QUERY_START_TIME <= <end>
+  AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)
 SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE EVENT_TIMESTAMP > <start> AND EVENT_TIMESTAMP <= <end>
 WITH wq AS (SELECT DISTINCT SESSION_ID FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>)
 SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS WHERE CREATED_ON > <start> AND CREATED_ON <= <end>

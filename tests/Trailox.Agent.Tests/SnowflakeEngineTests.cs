@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Trailox.Agent.Config;
 using Trailox.Agent.Engines;
 using Trailox.Agent.Engines.Snowflake;
@@ -160,20 +161,54 @@ public class SnowflakeEngineTests
 
     /// <summary>
     /// 1.15: access history is the rows of the statements that ENDED in the window, so a statement that ran for hours has
-    /// them once it is complete. It goes back a day at most, and no further than the window's first statement started.
+    /// them once it is complete, from a literal start.
     /// </summary>
     [Fact]
     public void Access_history_is_the_rows_of_the_statements_that_ended_in_the_window()
     {
         Assert.Equal(
-            string.Format(WindowStatementsSql, "QUERY_ID, START_TIME") +
+            string.Format(WindowStatementsSql, "QUERY_ID") +
             "SELECT a.* FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a " +
-            "WHERE a.QUERY_START_TIME > TO_TIMESTAMP_LTZ(1789913600000000, 6) AND a.QUERY_START_TIME <= TO_TIMESTAMP_LTZ(1790003600000000, 6) " +
-            "AND a.QUERY_START_TIME >= (SELECT DATEADD('minute', -1, MIN(wq.START_TIME)) FROM wq) " +
+            "WHERE a.QUERY_START_TIME >= TO_TIMESTAMP_LTZ(1789999000000000, 6) AND a.QUERY_START_TIME <= TO_TIMESTAMP_LTZ(1790003600000000, 6) " +
             "AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)",
-            SfRawSelects.AccessHistory(Start, End));
-        Assert.Equal(SfRawSelects.AccessHistory(Start, End),
-            SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.AccessHistory, StartMicros = Start, EndMicros = End }));
+            SfRawSelects.AccessHistory(Start, End, 1_789_999_000_000_000));
+        Assert.Equal("SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(START_TIME)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY " +
+                     "WHERE END_TIME > TO_TIMESTAMP_LTZ(1790000000000000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(1790003600000000, 6)",
+            SfRawSelects.StatementsEarliestStart(Start, End));
+    }
+
+    /// <summary>
+    /// The read starts a minute before the window's first statement, a day before the window at most, at its end when it
+    /// has none, and a day before it when the first start is not known.
+    /// </summary>
+    [Theory]
+    [InlineData(Start + 600_000_000, Start + 540_000_000)]                    // short statements only: about the window itself
+    [InlineData(Start - 600_000_000, Start - 660_000_000)]                    // a 10-minute statement: a minute before it
+    [InlineData(Start - 5 * 3_600_000_000L, Start - 5 * 3_600_000_000L - 60_000_000)]   // a 5-hour one
+    [InlineData(Start - 24 * 3_600_000_000L + 60_000_001, Start - 24 * 3_600_000_000L + 1)]   // just inside the day
+    [InlineData(Start - 30 * 3_600_000_000L, Start - 24 * 3_600_000_000L)]   // 30 hours: a day at most
+    [InlineData(0L, End)]                                                     // no statement: nothing to read
+    [InlineData(null, Start - 24 * 3_600_000_000L)]                           // not known: the whole day, never nothing
+    public void The_access_read_starts_at_the_windows_first_statement(long? earliestStart, long from)
+    {
+        Assert.Equal(from, SfRawSelects.AccessFrom(Start, End, earliestStart));
+    }
+
+    /// <summary>An access history task first asks for the window's first statement start, then reads from that literal.</summary>
+    [Theory]
+    [InlineData("1789999400000000", Start - 660_000_000)]          // a minute before the first statement
+    [InlineData("0", End)]                                         // no statement: reads nothing
+    [InlineData("1.7899994E+15", Start - 24 * 3_600_000_000L)]     // not a whole number: the whole day, never nothing
+    public async Task An_access_history_task_reads_from_its_first_statement_start(string earliest, long from)
+    {
+        var api = new FakeSqlApi(sql => sql.Contains("MIN(START_TIME)") ? Rows(earliest) : Rows("x"));
+        var source = Source(api, TimeProvider.System);
+
+        await using var rows = await source.OpenAsync(new AgentTask { Stream = ProtocolInfo.Streams.AccessHistory, StartMicros = Start, EndMicros = End }, CancellationToken.None);
+
+        Assert.Equal(2, api.Statements.Count);
+        Assert.Equal(SfRawSelects.StatementsEarliestStart(Start, End), api.Statements[0]);
+        Assert.Equal(SfRawSelects.AccessHistory(Start, End, from), api.Statements[1]);
     }
 
     /// <summary>
@@ -190,6 +225,8 @@ public class SnowflakeEngineTests
             "UNION ALL SELECT s.* FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS s WHERE s.CREATED_ON <= TO_TIMESTAMP_LTZ(1790000000000000, 6) " +
             "AND s.SESSION_ID IN (SELECT wq.SESSION_ID FROM wq)",
             SfRawSelects.Sessions(Start, End));
+        Assert.Equal(SfRawSelects.Sessions(Start, End),
+            SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.Sessions, StartMicros = Start, EndMicros = End }));
     }
 
     /// <summary>
@@ -292,7 +329,7 @@ public class SnowflakeEngineTests
     }
 
     [Fact]
-    public void Every_stream_the_profile_names_has_a_select_and_nothing_is_joined_or_classified()
+    public void Every_stream_reads_only_its_own_views_and_nothing_is_joined_flattened_or_classified()
     {
         var streams = new[]
         {
@@ -305,6 +342,17 @@ public class SnowflakeEngineTests
             var sql = SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = stream, StartMicros = 1, EndMicros = 2 });
             Assert.NotNull(sql);
             Assert.Matches(@"^(SELECT |WITH wq AS \(SELECT )", sql);
+            // The window's statements are the only second view a read may name: access history and sessions keep to them.
+            var views = Regex.Matches(sql!, @"ACCOUNT_USAGE\.([A-Z_]+)").Select(m => m.Groups[1].Value).Distinct().Order().ToArray();
+            var expected = stream switch
+            {
+                ProtocolInfo.Streams.Events => new[] { "QUERY_HISTORY" },
+                ProtocolInfo.Streams.AccessHistory => new[] { "ACCESS_HISTORY", "QUERY_HISTORY" },
+                ProtocolInfo.Streams.Logins => new[] { "LOGIN_HISTORY" },
+                ProtocolInfo.Streams.Sessions => new[] { "QUERY_HISTORY", "SESSIONS" },
+                _ => views.Length == 1 ? views : new[] { "one view" },
+            };
+            Assert.Equal(expected, views);
             Assert.DoesNotContain("JOIN", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("FLATTEN", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("CASE", sql);
