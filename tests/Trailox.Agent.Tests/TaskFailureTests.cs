@@ -141,6 +141,24 @@ public class TaskFailureTests
         Assert.Empty(errors.Snapshot());
     }
 
+    /// <summary>
+    /// Agent 1.15: a read the database stopped at its time limit (Snowflake's statement timeout) is reported with reason
+    /// window_too_long, so Trailox asks for shorter windows, and is still listed among the agent's errors.
+    /// </summary>
+    [Fact]
+    public async Task A_read_stopped_at_the_databases_time_limit_is_reported_as_too_long_and_listed()
+    {
+        var (executor, gateway, errors) = Runner();
+        var session = Session(new ScriptedSource((_, _) =>
+            throw new SourceException("000630 Statement reached its statement or warehouse timeout of 1,800 second(s) and was canceled.") { WindowTooLong = true }));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-t"), session, CancellationToken.None));
+
+        var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-t/failed", StringComparison.Ordinal));
+        Assert.Contains("\"reason\":\"window_too_long\"", failed.Body);
+        Assert.Contains("000630", Assert.Single(errors.Snapshot()).Message);
+    }
+
     /// <summary>Other failures carry no reason: the field is left out, as for every agent before 1.8.</summary>
     [Fact]
     public async Task Other_failures_send_no_reason()

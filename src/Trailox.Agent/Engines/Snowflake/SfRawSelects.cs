@@ -46,14 +46,18 @@ public static class SfRawSelects
     // ---- streams ----
 
     /// <summary>
-    /// One window of statements on END_TIME (a statement is complete only once finished). When
-    /// the customer keeps statement text at home, the text AND the bind values - which carry the
-    /// same literals - are not selected.
+    /// One window of statements on END_TIME (a statement is complete only once finished). BIND_VALUES -
+    /// the values a statement was run with - is never selected. When the customer keeps statement text
+    /// at home, the text is not selected either.
     /// </summary>
+    /// <remarks>
+    /// ⚠ Not even with storeRawQueryText on, as it was before 1.15.0: bound values are the customer's data,
+    ///   not the statement's text.
+    /// </remarks>
     public static string Events(EndpointConfig endpoint, long startMicros, long endMicros)
     {
-        var columns = endpoint.StoreRawQueryText ? "*" : "* EXCLUDE (QUERY_TEXT, BIND_VALUES)";
-        return $"SELECT {columns} FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
+        var excluded = endpoint.StoreRawQueryText ? "BIND_VALUES" : "QUERY_TEXT, BIND_VALUES";
+        return $"SELECT * EXCLUDE ({excluded}) FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
     }
 
     public static string AccessHistory(long startMicros, long endMicros) =>

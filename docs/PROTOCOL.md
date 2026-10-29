@@ -143,7 +143,10 @@ report cannot be delivered, the task stays unanswered and is handed back at a la
 
 `reason` is sent only when the agent knows it (from 1.8.0): `not_yet_published` means the source has not
 published the whole window yet (MongoDB Atlas log files arrive minutes late). Trailox re-issues the
-same window at a later poll, and the agent does not list it among its errors.
+same window at a later poll, and the agent does not list it among its errors. From 1.15.0,
+`window_too_long` means the database stopped the read at its time limit (Snowflake's statement timeout,
+error `000630`): the same window would stop the same way, so Trailox issues shorter ones. The agent still
+lists it among its errors.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
@@ -344,7 +347,17 @@ then `GET .../statements/{handle}?partition=<n>` for each further result partiti
 key-pair JWT signed by the agent: `iss = <ACCOUNT>.<USER>.SHA256:<fingerprint of the public key>`,
 `sub = <ACCOUNT>.<USER>`, lifetime under one hour, header
 `X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT`. Each statement names the configured
-warehouse and role and has a 30-minute timeout.
+warehouse and role and has a 30-minute timeout. An answer of 429, 503 or 504 (from 1.15.0 also 500 and
+502) is retried up to four times (2, 4, 8, 16 s) under the same `requestId`; from 1.15.0 the resubmit
+adds `retry=true`, so Snowflake does not run a statement it has already run. A statement that runs past
+a time limit - the request's own 30 minutes (the API answers 408) or a lower statement timeout of the
+warehouse, the user or the account (error `000630`) - is reported with reason `window_too_long` from
+1.15.0.
+
+`host` is the account identifier. Snowsight's data-sharing form `myorg.myaccount` names no host, so from
+1.15.0 it is read as `myorg-myaccount` (and `myorg.myaccount.privatelink` as `myorg-myaccount.privatelink`); a
+legacy locator keeps its region, cloud and `privatelink` parts, up to five in all
+(`xy12345.fhplus.us-gov-west-1.aws.privatelink`).
 
 The SQL API returns every value as a string or null. The agent sends them unchanged, with column
 names in lower case (`QUERY_ID` becomes `query_id`).
@@ -361,7 +374,8 @@ names in lower case (`QUERY_ID` becomes `query_id`).
 | `catalog_grants` | `GRANTS_TO_ROLES` (current, on tables, views, databases and schemas) | | yes |
 | `catalog_credentials` | `CREDENTIALS` (from 1.11.0) | | yes |
 
-With `storeRawQueryText` false, `QUERY_TEXT` and `BIND_VALUES` are excluded from `events`.
+`BIND_VALUES`, the values a statement was run with, is never read (from 1.15.0; before, it was sent when
+`storeRawQueryText` was true). With `storeRawQueryText` false, `QUERY_TEXT` is excluded too.
 `excludedDatabases` are left out of the catalog streams.
 
 From 1.11.0, `catalog_users` also reads `HAS_WORKLOAD_IDENTITY`, `PASSWORD_LAST_SET_TIME`, `DISPLAY_NAME` and
@@ -374,11 +388,12 @@ MFA methods and workload identities, with their owner, status, role restriction 
 -- probe
 SELECT CURRENT_VERSION()
 SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE EVENT_TIMESTAMP > DATEADD(hour, -24, CURRENT_TIMESTAMP())
+-- the oldest rows: from 1.15.0 once per agent run, not at every probe (a failed read is tried again)
 SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(END_TIME)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(EVENT_TIMESTAMP)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
 
 -- streams (window bound = TO_TIMESTAMP_LTZ(<n>, 6))
-SELECT * [EXCLUDE (QUERY_TEXT, BIND_VALUES)] FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
+SELECT * EXCLUDE ([QUERY_TEXT, ]BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
 SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY WHERE QUERY_START_TIME > <start> AND QUERY_START_TIME <= <end>
 SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE EVENT_TIMESTAMP > <start> AND EVENT_TIMESTAMP <= <end>
 SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS WHERE CREATED_ON > <start> AND CREATED_ON <= <end>

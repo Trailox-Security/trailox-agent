@@ -92,13 +92,16 @@ public sealed class SfStatements
         rows.ValueKind == JsonValueKind.Array ? rows.EnumerateArray() : Enumerable.Empty<JsonElement>();
 
     /// <summary>
-    /// One request, with the documented transient answers (429, 503, 504) retried with backoff.
+    /// One request, with the transient answers (429, 500, 502, 503, 504) retried with backoff.
     /// Anything else that is not 200/202 becomes an <see cref="SfException"/> with Snowflake's message.
     /// </summary>
     /// <remarks>
     /// Every way a request can fail ends as an <see cref="SfException"/>: a request that ran out of
     /// time, or an answer that is not JSON - a proxy's page answered with 200, say - is named as
     /// such. Only the caller's own cancellation, the agent stopping, is left as it is.
+    /// ⚠ A RESUBMITTED STATEMENT SAYS SO (from 1.15.0): the same requestId with <c>retry=true</c>, as the SQL API asks of
+    ///   a resubmit, so a statement that already ran is not run again. Every statement here is a SELECT, so one that
+    ///   was still running when the answer failed costs warehouse time at worst, never a second write.
     /// </remarks>
     private async Task<(HttpStatusCode Status, JsonElement Root)> SendAsync(HttpMethod method, string pathAndQuery, string? body, CancellationToken ct)
     {
@@ -108,7 +111,8 @@ public sealed class SfStatements
             HttpStatusCode status;
             try
             {
-                using var request = new HttpRequestMessage(method, $"https://{_host}{pathAndQuery}");
+                var target = attempt > 0 && method == HttpMethod.Post ? pathAndQuery + RetryFlag(pathAndQuery) : pathAndQuery;
+                using var request = new HttpRequestMessage(method, $"https://{_host}{target}");
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _auth.Token());
                 request.Headers.Add("X-Snowflake-Authorization-Token-Type", "KEYPAIR_JWT");
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -126,7 +130,8 @@ public sealed class SfStatements
                 throw new SfException(0, "the SQL API did not answer in time (" + ex.Message + ")");
             }
 
-            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
+            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway
+                    or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
                 && attempt < MaxRetries)
             {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)), ct);
@@ -134,7 +139,7 @@ public sealed class SfStatements
             }
             if (status is not (HttpStatusCode.OK or HttpStatusCode.Accepted))
             {
-                throw new SfException((int)status, ErrorText(payload));
+                throw new SfException((int)status, ErrorText(payload)) { WindowTooLong = IsStatementTimeout(status, payload) };
             }
             try
             {
@@ -149,6 +154,38 @@ public sealed class SfStatements
     }
 
     private static string Trim(string payload) => payload.Length > 600 ? payload[..600] : payload;
+
+    private static string RetryFlag(string pathAndQuery) => (pathAndQuery.Contains('?') ? "&" : "?") + "retry=true";
+
+    /// <summary>Snowflake's error code for a statement it cancelled at a statement or warehouse timeout.</summary>
+    internal const string StatementTimeoutCode = "000630";
+
+    /// <summary>
+    /// Whether the answer is Snowflake cancelling the statement at a time limit: the SQL API's 408 for a statement that
+    /// ran past the request's timeout, or the timeout's error code under any status (a warehouse's, user's or account's
+    /// limit). The window was more than one statement may read there, and the same window fails the same way: the task
+    /// says so, so that a shorter window is asked for.
+    /// </summary>
+    /// <remarks>⚠ Only an answer from Snowflake itself, a JSON object: a proxy's own 408 page is no statement timeout.</remarks>
+    internal static bool IsStatementTimeout(HttpStatusCode status, string payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+            var hasCode = root.TryGetProperty("code", out var code);
+            return (hasCode && code.ToString() == StatementTimeoutCode)
+                   || (status == HttpStatusCode.RequestTimeout && (hasCode || root.TryGetProperty("statementHandle", out _)));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// A field the answer must have. Missing, it ends as an <see cref="SfException"/> that names it,

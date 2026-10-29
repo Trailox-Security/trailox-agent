@@ -95,6 +95,13 @@ public class SourceException : Exception
     public bool NotYetPublished { get; init; }
 
     /// <summary>
+    /// The database stopped the window's read at its time limit (agent 1.15: Snowflake's statement timeout). Reported
+    /// with reason "window_too_long", so Trailox asks for shorter windows; the same window would fail the same way.
+    /// Still listed among the agent's errors: a limit that also stops the shortest window needs the customer.
+    /// </summary>
+    public bool WindowTooLong { get; init; }
+
+    /// <summary>
     /// The database rejected the password (agent 1.12: PostgreSQL's SQLSTATE 28P01). The agent stops signing in to the
     /// source until it restarts: it reads its secrets only at start, so a fixed password needs a restart anyway, and each
     /// attempt would write one more failed sign-in into the database's own log.
