@@ -5,7 +5,7 @@ using Trailox.Agent.Protocol;
 namespace Trailox.Agent.Engines.Snowflake;
 
 /// <summary>
-/// One Snowflake account: probes what the role can see, and turns each task into one statement
+/// One Snowflake account: probes what the role can see, and turns each task into one statement (an access history task into two)
 /// whose partitions are re-emitted as NDJSON straight into the upload, keyed by the LOWER-CASED
 /// column names docs/PROTOCOL.md lists. Values are forwarded as the API returns them (strings or null).
 /// </summary>
@@ -92,7 +92,8 @@ public sealed class SfSource : IEngineSource
 
     public async Task<RowStream?> OpenAsync(AgentTask task, CancellationToken ct)
     {
-        var sql = SfRawSelects.ForTask(_endpoint, task);
+        var accessFrom = task.Stream == ProtocolInfo.Streams.AccessHistory ? await AccessFromAsync(task, ct) : 0;
+        var sql = SfRawSelects.ForTask(_endpoint, task, accessFrom);
         if (sql == null)
         {
             return null;
@@ -102,6 +103,16 @@ public sealed class SfSource : IEngineSource
         var columns = result.Columns.Select(c => c.ToLowerInvariant()).ToList();
         var body = new NdjsonRowStream(columns, Statements.RowsAsync(result, ct), ct);
         return new RowStream(body, body);
+    }
+
+    /// <summary>
+    /// Where an access history read starts, from the oldest start of the window's statements (SfRawSelects.AccessFrom).
+    /// An answer that is not a whole number reads the whole day before the window: more rows, never none.
+    /// </summary>
+    private async Task<long> AccessFromAsync(AgentTask task, CancellationToken ct)
+    {
+        var earliest = await Statements.ScalarAsync(SfRawSelects.StatementsEarliestStart(task.StartMicros, task.EndMicros), ct);
+        return SfRawSelects.AccessFrom(task.StartMicros, task.EndMicros, long.TryParse(earliest, out var micros) ? micros : null);
     }
 
     private async Task<bool> ReadableAsync(string sql, CancellationToken ct)

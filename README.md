@@ -33,7 +33,8 @@ can read any number of endpoints across them.
 ## What leaves your network
 
 - The rows of the audit views for the requested windows: statements run, and logins and sessions
-  where the database records them. See each engine below for the exact views.
+  where the database records them (on Snowflake, also the older sessions of a window's statements). See
+  each engine below for the exact views.
 - Once a day, a catalog snapshot: tables, columns, users and grants. On Databricks (from 1.6.0)
   it also includes the names of the workspace's service principals. On MongoDB Atlas (from 1.9.0) it is
   each database's size, and with the optional catalog user each collection's name, document count and
@@ -101,7 +102,7 @@ be committed. Any other value can be written in the file or taken from the envir
 | `password_env` / `password_file` | Where the credential comes from: an environment variable or a mounted file |
 | `catalog_username`, `catalog_password_env` / `catalog_password_file` | MongoDB Atlas only, optional (1.9.0): the catalog user that lists collections and their sizes, and exactly one place its password comes from. See [MongoDB Atlas](#mongodb-atlas) |
 | `options` | Engine-specific extras (see below) |
-| `collectSessionLog` | Show the source's sign-ins in Trailox (default `true`). With `false`, ClickHouse, Databricks and Redshift sign-ins are not read. Snowflake's `LOGIN_HISTORY` and `SESSIONS`, MongoDB Atlas's connection lines and the PostgreSQL log are still read, because statements take their client address, application and sign-in method from them |
+| `collectSessionLog` | Show the source's sign-ins in Trailox (default `true`). With `false`, Trailox shows none: on ClickHouse, Databricks and Redshift the agent is not asked for them, and on Snowflake (`LOGIN_HISTORY`, `SESSIONS`), MongoDB Atlas (connection lines) and PostgreSQL (the server log) it still reads them, so that Trailox can show which client and sign-in method each statement came from |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
 | `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
 | `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse and MongoDB, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
@@ -273,7 +274,9 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
   over a shorter window.
 - From 1.15.0, the access history and sessions are read for the statements that ended in each window. A
   statement that ran for hours still gets its tables and columns (up to a day), and a statement in a
-  session that opened long before gets its application. Each sessions read scans `SESSIONS` once.
+  session that opened long before gets its application. The access read goes back to a minute before
+  the window's first statement started (a day at most). The sessions read has no time bound for those
+  older sessions, so it may read the whole `SESSIONS` view, a year of sessions, each window.
 
 ### MongoDB Atlas
 

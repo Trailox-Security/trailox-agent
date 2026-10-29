@@ -64,23 +64,46 @@ public static class SfRawSelects
     /// <summary>How far before a window a statement that ended in it may have started, and still be attributed.</summary>
     internal const long StatementLookbackMicros = 24L * 3600 * 1_000_000;
 
+    /// <summary>How long before the window's first statement started its access history read starts.</summary>
+    internal const long StatementStartSlackMicros = 60L * 1_000_000;
+
     /// <summary>The statements that ended in a window: the rows that the access history and session reads keep to.</summary>
     private static string WindowStatements(string columns, long startMicros, long endMicros) =>
         $"WITH wq AS (SELECT {columns} FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}) ";
 
+    /// <summary>The oldest START_TIME of the statements that ended in a window, in epoch microseconds; 0 when it has none.</summary>
+    public static string StatementsEarliestStart(long startMicros, long endMicros) =>
+        $"SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(START_TIME)), 0) FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
+
     /// <summary>
-    /// The ACCESS_HISTORY rows of the statements that ENDED in the window (from 1.15.0), as the events stream reads them.
+    /// Where a window's access history read starts: a minute before its first statement started, and a day before the
+    /// window at most. A window with no statement (0) reads from its end, which finds nothing. A first start that is
+    /// not known (null) reads the whole day before the window, never nothing.
+    /// </summary>
+    public static long AccessFrom(long startMicros, long endMicros, long? earliestStartMicros) => earliestStartMicros switch
+    {
+        null => startMicros - StatementLookbackMicros,
+        <= 0 => endMicros,
+        long earliest => Math.Max(startMicros - StatementLookbackMicros, earliest - StatementStartSlackMicros),
+    };
+
+    /// <summary>
+    /// The ACCESS_HISTORY rows of the statements that ENDED in the window (from 1.15.0), as the events stream reads them,
+    /// from <paramref name="fromMicros"/> on (<see cref="AccessFrom"/>).
     /// </summary>
     /// <remarks>
     /// ⚠ BY THE STATEMENT'S END, NOT ITS START. ACCESS_HISTORY has only QUERY_START_TIME, and Snowflake writes a row
-    ///   once its statement is complete. Read by start time, a window was read before its long statements ended, so a
-    ///   statement that ran over about 3 hours never had its tables. A statement may have started up to a day before
-    ///   the window, and the read goes back no further than the window's first statement started, less a minute.
+    ///   once its statement is complete. Read by start time, a window was read before its long statements ended, and
+    ///   those statements never had their tables. A statement may have started up to a day before the window.
+    /// ⚠ THE START IS A LITERAL, read first with <see cref="StatementsEarliestStart"/>, as every other read's bounds are.
+    ///   A bound that a subquery computes is known only while the read runs, so Snowflake may not use it to skip older
+    ///   rows. A window of short statements reads a range about as long as itself; only a long statement makes it longer.
+    /// ⚠ THE TWO STATEMENTS SEE THE SAME STATEMENTS: the windows Trailox asks for end hours before they are read, past
+    ///   QUERY_HISTORY's latency, so no statement of the window lands between the two.
     /// </remarks>
-    public static string AccessHistory(long startMicros, long endMicros) =>
-        WindowStatements("QUERY_ID, START_TIME", startMicros, endMicros) +
-        $"SELECT a.* FROM {AccountUsage}.ACCESS_HISTORY a WHERE {Window("a.QUERY_START_TIME", startMicros - StatementLookbackMicros, endMicros)} " +
-        "AND a.QUERY_START_TIME >= (SELECT DATEADD('minute', -1, MIN(wq.START_TIME)) FROM wq) " +
+    public static string AccessHistory(long startMicros, long endMicros, long fromMicros) =>
+        WindowStatements("QUERY_ID", startMicros, endMicros) +
+        $"SELECT a.* FROM {AccountUsage}.ACCESS_HISTORY a WHERE a.QUERY_START_TIME >= {Ts(fromMicros)} AND a.QUERY_START_TIME <= {Ts(endMicros)} " +
         "AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)";
 
     public static string Logins(long startMicros, long endMicros) =>
@@ -90,9 +113,11 @@ public static class SfRawSelects
     /// The sessions created in the window, and (from 1.15.0) the older sessions of the statements that ended in it.
     /// </summary>
     /// <remarks>
-    /// ⚠ A STATEMENT NEEDS ITS SESSION, HOWEVER OLD. A pooled connection can keep one session for weeks, and a session
-    ///   opened before the first window was never read: its statements had no client application. The second half reads
-    ///   each such session by its id, every time a window has its statements, so it costs one scan of SESSIONS per window.
+    /// ⚠ A STATEMENT'S SESSION IS SENT, HOWEVER OLD. A pooled connection can keep one session for weeks, and a session
+    ///   opened before the first window was never sent, though its statements were. The second half reads each such
+    ///   session by its id, every time a window has its statements. That half has no time bound, so it may read the
+    ///   whole SESSIONS view (a year of sessions) each window; and a session comes again with each window that has
+    ///   its statements.
     /// </remarks>
     public static string Sessions(long startMicros, long endMicros) =>
         WindowStatements("DISTINCT SESSION_ID", startMicros, endMicros) +
@@ -137,10 +162,12 @@ public static class SfRawSelects
         "WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')";
 
     /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
-    public static string? ForTask(EndpointConfig endpoint, AgentTask task) => task.Stream switch
+    /// <param name="accessFromMicros">For an access history task, where the read starts (<see cref="AccessFrom"/>); without it, the whole day before the window.</param>
+    public static string? ForTask(EndpointConfig endpoint, AgentTask task, long? accessFromMicros = null) => task.Stream switch
     {
         ProtocolInfo.Streams.Events => Events(endpoint, task.StartMicros, task.EndMicros),
-        ProtocolInfo.Streams.AccessHistory => AccessHistory(task.StartMicros, task.EndMicros),
+        ProtocolInfo.Streams.AccessHistory => AccessHistory(task.StartMicros, task.EndMicros,
+            accessFromMicros ?? task.StartMicros - StatementLookbackMicros),
         ProtocolInfo.Streams.Logins => Logins(task.StartMicros, task.EndMicros),
         ProtocolInfo.Streams.Sessions => Sessions(task.StartMicros, task.EndMicros),
         ProtocolInfo.Streams.CatalogTables => CatalogTables(endpoint),
