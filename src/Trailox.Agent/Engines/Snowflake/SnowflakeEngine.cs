@@ -8,8 +8,9 @@ namespace Trailox.Agent.Engines.Snowflake;
 /// whose private half only this agent holds. Everything it runs is in <see cref="SfRawSelects"/>.
 /// </summary>
 /// <remarks>
-/// agent.yaml: <c>host</c> = the account identifier (<c>myorg-myaccount</c>, or a legacy
-/// <c>locator.region</c>; a trailing <c>.snowflakecomputing.com</c> is accepted),
+/// agent.yaml: <c>host</c> = the account identifier (<c>myorg-myaccount</c>, Snowsight's <c>myorg.myaccount</c>, or a
+/// legacy <c>locator.region.cloud</c>, each with an optional <c>.privatelink</c>; a trailing
+/// <c>.snowflakecomputing.com</c> is accepted),
 /// <c>clusterName</c> = the warehouse, <c>username</c> = the service user, the password reference
 /// = its PKCS#8 PEM private key, <c>options.role</c> = the role (default <c>TRAILOX_MONITOR</c>).
 /// <c>port</c>/<c>tls</c> are ignored: the API is HTTPS on 443 only.
@@ -21,8 +22,10 @@ public sealed class SnowflakeEngine : IEngine
     public const string DefaultWarehouse = "TRAILOX_MONITOR_WH";
     public const string DomainSuffix = ".snowflakecomputing.com";
 
-    // \z, not $: in .NET $ also matches just before a final newline.
-    private static readonly Regex AccountPattern = new(@"^[A-Za-z0-9_-]{1,255}(\.[A-Za-z0-9_-]{1,64}){0,2}\z", RegexOptions.Compiled);
+    // \z, not $: in .NET $ also matches just before a final newline. Up to five parts: the longest form is a legacy
+    // locator in a government region over private link, locator.gov_compliance.region.cloud.privatelink.
+    private static readonly Regex AccountPattern = new(@"^[A-Za-z0-9_-]{1,255}(\.[A-Za-z0-9_-]{1,64}){0,4}\z", RegexOptions.Compiled);
+    private const string PrivateLink = "privatelink";
     // Within the Trailox gateway's limits for clusterName and username: no $, at most 64 characters.
     private static readonly Regex IdentPattern = new(@"^[A-Za-z_][A-Za-z0-9_]{0,63}\z", RegexOptions.Compiled);
 
@@ -36,6 +39,7 @@ public sealed class SnowflakeEngine : IEngine
         {
             e.Host = e.Host[..^DomainSuffix.Length];
         }
+        e.Host = AccountIdentifier(e.Host);
         e.ClusterName = string.IsNullOrWhiteSpace(e.ClusterName) ? DefaultWarehouse : e.ClusterName.Trim().ToUpperInvariant();
         e.Username = e.Username.Trim().ToUpperInvariant();
         e.Port = 443;
@@ -61,6 +65,25 @@ public sealed class SnowflakeEngine : IEngine
             problems.Add("options.role: a role name - letters, digits and '_', starting with a letter or '_', up to 64 characters");
         }
         return problems;
+    }
+
+    /// <summary>
+    /// The account identifier in a form that names a host. Snowsight also shows <c>org.account</c>, the identifier
+    /// used for data sharing, which has no host of its own: it becomes <c>org-account</c> (from 1.15.0; before, it
+    /// signed in as the organization and failed).
+    /// </summary>
+    /// <remarks>
+    /// A region always has a '-' in it (eu-central-1), and an organization or account name never does, so the
+    /// sharing form is exactly two parts with no '-' in either, before any <c>.privatelink</c>: <c>myorg.myaccount.privatelink</c>
+    /// becomes <c>myorg-myaccount.privatelink</c>, and <c>xy12345.privatelink</c> stays as it is.
+    /// </remarks>
+    public static string AccountIdentifier(string host)
+    {
+        var suffix = host.EndsWith("." + PrivateLink, StringComparison.OrdinalIgnoreCase) ? host[^(PrivateLink.Length + 1)..] : "";
+        var parts = host[..^suffix.Length].Split('.');
+        return parts.Length == 2 && parts.All(p => p.Length > 0 && !p.Contains('-'))
+            ? parts[0] + "-" + parts[1] + suffix
+            : host;
     }
 
     /// <summary>The API hostname: the identifier lower-cased, with '_' as '-' (the form Snowflake serves certificates for).</summary>

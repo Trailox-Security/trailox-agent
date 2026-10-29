@@ -95,7 +95,7 @@ endpoints:
   #   options:
   #     role: TRAILOX_MONITOR                          # the role the setup script creates
   #   collectSessionLog: true                          # sign-ins from LOGIN_HISTORY and SESSIONS
-  #   storeRawQueryText: true                          # false = QUERY_TEXT and BIND_VALUES are never shipped
+  #   storeRawQueryText: true                          # false = QUERY_TEXT is never shipped (BIND_VALUES never is)
   #   excludedDatabases: []                            # databases never inventoried (SNOWFLAKE always excluded)
   #   pollMinutes: 60                                  # IMPORTANT: a shorter poll needs a larger daily credit cap
   #                                                    #   than the setup script sets (60 min: 6 credits; 30: 12;

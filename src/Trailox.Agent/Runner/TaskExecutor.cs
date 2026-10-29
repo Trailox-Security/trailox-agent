@@ -66,10 +66,13 @@ public sealed class TaskExecutor
         catch (Exception ex) when (ex is SourceException or HttpRequestException)
         {
             // The database refused the statement or was unreachable mid-task. Report it; the
-            // probe will say more at the next check-in.
+            // probe will say more at the next check-in. A read stopped at the database's time limit
+            // (agent 1.15) says so, and Trailox asks for shorter windows.
+            var tooLong = ex is SourceException { WindowTooLong: true };
             _errors.Add(alias, $"{task.Stream} {Describe(task)}: {ex.Message}");
-            _logger.LogWarning("endpoint {Alias}: {Stream} {Window} failed on the database: {Message}", alias, task.Stream, Describe(task), EndpointSession.Trim(ex.Message));
-            await ReportFailureAsync(task, alias, ex.Message, ct);
+            _logger.LogWarning("endpoint {Alias}: {Stream} {Window} failed on the database{Shorter}: {Message}", alias, task.Stream, Describe(task),
+                tooLong ? " at its time limit; shorter windows will be asked for" : "", EndpointSession.Trim(ex.Message));
+            await ReportFailureAsync(task, alias, ex.Message, ct, tooLong ? ChunkFailed.WindowTooLong : null);
             return true;
         }
         catch (GatewayException ex) when (ex.IsUnauthorized)

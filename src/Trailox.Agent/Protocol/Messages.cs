@@ -282,9 +282,12 @@ public sealed class ChunkFailed
     /// <summary>The source has not published the whole window yet; Trailox plans it again later (agent 1.8).</summary>
     public const string NotYetPublished = "not_yet_published";
 
+    /// <summary>The database stopped the read at its time limit; Trailox asks for shorter windows (agent 1.15).</summary>
+    public const string WindowTooLong = "window_too_long";
+
     public string Message { get; set; } = "";
 
-    /// <summary>Why, when the agent knows: <see cref="NotYetPublished"/>. Null, and not sent, otherwise.</summary>
+    /// <summary>Why, when the agent knows: <see cref="NotYetPublished"/> or <see cref="WindowTooLong"/>. Null, and not sent, otherwise.</summary>
     public string? Reason { get; set; }
 }
 

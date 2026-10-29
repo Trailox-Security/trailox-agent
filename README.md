@@ -254,18 +254,23 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 
 - **Reads:** `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, `ACCESS_HISTORY`, `LOGIN_HISTORY`,
   `SESSIONS`, and daily `TABLES`, `COLUMNS`, `USERS`, `GRANTS_TO_ROLES` and (from 1.11.0) `CREDENTIALS`.
-  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it.
+  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it. Never `BIND_VALUES`, the
+  values a statement was run with (from 1.15.0; before, they were sent with the statement text).
 - **Account:** a `TYPE = SERVICE` user with a key pair you generate. The private key stays with
   the agent; Trailox never sees either half. Its role needs the `SNOWFLAKE.GOVERNANCE_VIEWER`,
   `SNOWFLAKE.SECURITY_VIEWER` and `SNOWFLAKE.OBJECT_VIEWER` database roles and `USAGE` on a
-  warehouse. The setup script also caps that warehouse at 2 credits a day with a resource monitor.
-- **agent.yaml:** `host` = the account identifier (`myorg-myaccount`); `clusterName` = the
+  warehouse. The setup script also caps that warehouse's daily credits with a resource monitor, sized for
+  the poll interval: 6 credits a day at the hourly default (see `pollMinutes`).
+- **agent.yaml:** `host` = the account identifier (`myorg-myaccount`; Snowsight's `myorg.myaccount` is read
+  the same from 1.15.0, and a legacy `locator.region[.cloud][.privatelink]` works too); `clusterName` = the
   warehouse; `username` = the service user; `password_file` (or `password_env`) = its
   unencrypted PKCS#8 PEM private key; `options.role` = the role (default `TRAILOX_MONITOR`).
   `port`/`tls` are ignored (HTTPS 443).
 - Every read resumes the warehouse (60-second minimum billing), so reads are scheduled hourly by
   default. Enterprise Edition or higher is required for table and column attribution
-  (`ACCESS_HISTORY`).
+  (`ACCESS_HISTORY`). From 1.15.0, a read that runs into a time limit (the agent's own 30 minutes per
+  statement, or a lower statement timeout of the warehouse, the user or the account) is asked for again
+  over a shorter window.
 
 ### MongoDB Atlas
 

@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -62,14 +63,44 @@ public class SnowflakeEngineTests
         Assert.StartsWith(field + ":", problems[0]);
     }
 
+    /// <summary>
+    /// 1.15: Snowsight's data-sharing form org.account names no host, so it is read as org-account; a region, which
+    /// always has a '-', and a private-link suffix are left as they are, and the legacy Azure private-link form fits.
+    /// </summary>
     [Theory]
+    [InlineData("myorg.myaccount", "myorg-myaccount")]
+    [InlineData("MyOrg.My_Account.snowflakecomputing.com", "MyOrg-My_Account")]
+    [InlineData("myorg-myaccount", "myorg-myaccount")]
+    [InlineData("myorg-myaccount.privatelink", "myorg-myaccount.privatelink")]
+    [InlineData("myorg.myaccount.privatelink", "myorg-myaccount.privatelink")]
+    [InlineData("xy12345.fhplus.us-gov-west-1.aws.privatelink", "xy12345.fhplus.us-gov-west-1.aws.privatelink")]
+    [InlineData("xy12345", "xy12345")]
+    [InlineData("xy12345.privatelink", "xy12345.privatelink")]
+    [InlineData("xy12345.eu-central-1", "xy12345.eu-central-1")]
+    [InlineData("xy12345.east-us-2.azure", "xy12345.east-us-2.azure")]
+    [InlineData("xy12345.west-europe.azure.privatelink", "xy12345.west-europe.azure.privatelink")]
+    public void Validate_reads_every_account_form_snowsight_shows(string host, string normalized)
+    {
+        var e = Endpoint();
+        e.Host = host;
+        Assert.Empty(new SnowflakeEngine().Validate(e));
+        Assert.Equal(normalized, e.Host);
+    }
+
+    [Theory]
+    [InlineData("myorg.myaccount", "myorg-myaccount.snowflakecomputing.com", "MYORG-MYACCOUNT")]
+    [InlineData("myorg.myaccount.privatelink", "myorg-myaccount.privatelink.snowflakecomputing.com", "MYORG-MYACCOUNT")]
+    [InlineData("xy12345.west-europe.azure.privatelink", "xy12345.west-europe.azure.privatelink.snowflakecomputing.com", "XY12345")]
     [InlineData("MYORG-MYACCOUNT", "myorg-myaccount.snowflakecomputing.com", "MYORG-MYACCOUNT")]
     [InlineData("myorg-my_account", "myorg-my-account.snowflakecomputing.com", "MYORG-MY_ACCOUNT")]
     [InlineData("xy12345.eu-central-1", "xy12345.eu-central-1.snowflakecomputing.com", "XY12345")]
     public void Account_forms_map_to_the_api_host_and_the_jwt_account(string account, string host, string jwt)
     {
-        Assert.Equal(host, SnowflakeEngine.ApiHost(account));
-        Assert.Equal(jwt, SnowflakeEngine.JwtAccount(account));
+        var e = Endpoint();
+        e.Host = account;
+        Assert.Empty(new SnowflakeEngine().Validate(e));
+        Assert.Equal(host, SnowflakeEngine.ApiHost(e.Host));
+        Assert.Equal(jwt, SnowflakeEngine.JwtAccount(e.Host));
     }
 
     [Fact]
@@ -113,12 +144,112 @@ public class SnowflakeEngineTests
         await Assert.ThrowsAsync<SfException>(() => source.ProbeAsync(CancellationToken.None));
     }
 
+    /// <summary>1.15: the values a statement was bound to are never read; the text only when the customer sends it.</summary>
     [Fact]
-    public void Events_windows_on_end_time_and_drops_text_and_binds_when_the_customer_said_so()
+    public void Events_windows_on_end_time_never_reads_bind_values_and_drops_text_when_the_customer_said_so()
     {
-        Assert.Equal("SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > TO_TIMESTAMP_LTZ(1000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(2000, 6)",
+        Assert.Equal("SELECT * EXCLUDE (BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > TO_TIMESTAMP_LTZ(1000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(2000, 6)",
             SfRawSelects.Events(Endpoint(), 1000, 2000));
         Assert.StartsWith("SELECT * EXCLUDE (QUERY_TEXT, BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", SfRawSelects.Events(Endpoint(text: false), 1000, 2000));
+    }
+
+    /// <summary>
+    /// 1.15: the oldest statement and sign-in are each a scan of a whole view, read at most once a day rather than at
+    /// every probe. A failed read waits for the next day as well, and keeps the last value read.
+    /// </summary>
+    [Fact]
+    public async Task The_oldest_rows_are_read_at_most_once_a_day_and_a_failed_read_keeps_the_last_value()
+    {
+        var (failEvent, failSession) = (false, true);
+        var api = new FakeSqlApi(sql => sql switch
+        {
+            _ when sql.Contains("CURRENT_VERSION") => Rows("9.30.1"),
+            _ when sql.Contains("MIN(END_TIME)") && failEvent => Refused("000630", "Statement reached its statement or warehouse timeout"),
+            _ when sql.Contains("MIN(END_TIME)") => Rows("1700000000000000"),
+            _ when sql.Contains("MIN(EVENT_TIMESTAMP)") && failSession => Refused("000630", "Statement reached its statement or warehouse timeout"),
+            _ when sql.Contains("MIN(EVENT_TIMESTAMP)") => Rows("1690000000000000"),
+            _ => Rows("5"),
+        });
+        var clock = new ManualClock(DateTimeOffset.Parse("2030-01-01T00:00:00Z"));
+        var source = Source(api, clock);
+        async Task<(long, long)> Probe()
+        {
+            var caps = await source.ProbeAsync(CancellationToken.None);
+            return (caps.EarliestEventMicros, caps.EarliestSessionMicros);
+        }
+
+        var first = await Probe();
+        failSession = false;
+        clock.Now += TimeSpan.FromHours(1);
+        var anHourLater = await Probe();
+        clock.Now += TimeSpan.FromDays(1);
+        var aDayLater = await Probe();
+        failEvent = true;
+        clock.Now += TimeSpan.FromDays(1);
+        var failedNext = await Probe();
+
+        Assert.Equal((1700000000000000L, 0L), first);
+        Assert.Equal((1700000000000000L, 0L), anHourLater);                              // nothing read again within the day
+        Assert.Equal((1700000000000000L, 1690000000000000L), aDayLater);
+        Assert.Equal((1700000000000000L, 1690000000000000L), failedNext);                // the last value read is kept
+        Assert.Equal(3, api.Statements.Count(s => s.Contains("MIN(END_TIME)")));
+        Assert.Equal(3, api.Statements.Count(s => s.Contains("MIN(EVENT_TIMESTAMP)")));
+        Assert.Equal(4, api.Statements.Count(s => s.Contains("CURRENT_VERSION")));
+    }
+
+    /// <summary>1.15: a 500 or 502 is retried like the other transient answers, and the resubmit says it is one.</summary>
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    public async Task A_transient_failure_is_resubmitted_under_the_same_request_id_with_retry_set(HttpStatusCode transient)
+    {
+        var calls = 0;
+        var api = new FakeSqlApi(_ => ++calls == 1 ? new HttpResponseMessage(transient) { Content = new StringContent("try again") } : Rows("1"));
+
+        Assert.Equal("1", await Statements(api).ScalarAsync("SELECT 1", CancellationToken.None));
+
+        Assert.Equal(2, api.Posts.Count);
+        var (first, resubmit) = (api.Posts[0].Query, api.Posts[1].Query);
+        Assert.StartsWith("?requestId=", first);
+        Assert.DoesNotContain("retry=true", first);
+        Assert.Equal(first + "&retry=true", resubmit);
+    }
+
+    /// <summary>
+    /// 1.15: Snowflake stopping a statement at a time limit marks the failure, so a shorter window is asked for: the API's
+    /// 408 for the request's own timeout, and the timeout's error code for a warehouse's, user's or account's. A proxy's
+    /// own 408 page and any other refusal are not.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpStatusCode.RequestTimeout, "{\"code\":\"000630\",\"message\":\"Statement reached its statement or warehouse timeout of 1,800 second(s) and was canceled.\",\"statementHandle\":\"01c7-0000\"}", true)]
+    [InlineData(HttpStatusCode.RequestTimeout, "{\"message\":\"timeout\",\"statementHandle\":\"01c7-0000\"}", true)]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "{\"code\":\"000630\",\"message\":\"Statement reached its statement or warehouse timeout of 600 second(s) and was canceled.\"}", true)]
+    [InlineData(HttpStatusCode.RequestTimeout, "<html><body>408 Request Time-out</body></html>", false)]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "{\"code\":\"002003\",\"message\":\"SQL compilation error: Object does not exist\"}", false)]
+    public async Task A_statement_stopped_at_its_time_limit_says_the_window_was_too_long(HttpStatusCode status, string body, bool tooLong)
+    {
+        var ex = await Assert.ThrowsAsync<SfException>(() => Statements(new FakeSqlApi(_ =>
+            new HttpResponseMessage(status) { Content = new StringContent(body) })).ExecuteAsync("SELECT 1", CancellationToken.None));
+
+        Assert.Equal(tooLong, ex.WindowTooLong);
+    }
+
+    /// <summary>A statement still running (202) is polled by GET: a timeout there is flagged too, and a GET never says retry.</summary>
+    [Fact]
+    public async Task A_statement_that_times_out_while_polled_says_so_and_a_poll_never_says_retry()
+    {
+        var api = new FakeSqlApi(_ => new HttpResponseMessage(HttpStatusCode.Accepted)
+        {
+            Content = new StringContent("{\"statementHandle\":\"01c7-0000\",\"message\":\"Asynchronous execution in progress.\"}"),
+        })
+        {
+            OnGet = () => Refused("000630", "Statement reached its statement or warehouse timeout of 1,800 second(s) and was canceled."),
+        };
+
+        var ex = await Assert.ThrowsAsync<SfException>(() => Statements(api).ExecuteAsync("SELECT 1", CancellationToken.None));
+
+        Assert.True(ex.WindowTooLong);
+        Assert.Equal("/api/v2/statements/01c7-0000", Assert.Single(api.Gets));
     }
 
     [Fact]
@@ -212,5 +343,68 @@ public class SnowflakeEngineTests
     private sealed class NoHttp : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new();
+    }
+
+    private static string Pem()
+    {
+        using var rsa = RSA.Create(2048);
+        return rsa.ExportPkcs8PrivateKeyPem();
+    }
+
+    private static SfSource Source(FakeSqlApi api, TimeProvider clock)
+    {
+        var e = Endpoint();
+        e.Password = Pem();
+        return new SfSource(new HttpClient(api), e, clock);
+    }
+
+    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = start;
+
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    private static SfStatements Statements(FakeSqlApi api) =>
+        new(new HttpClient(api), new SfAuth("myorg-myaccount", "trailox_agent", Pem()), "myorg-myaccount.snowflakecomputing.com", "TRAILOX_WH", "TRAILOX_MONITOR");
+
+    /// <summary>A settled one-column result whose single row holds <paramref name="value"/>.</summary>
+    private static HttpResponseMessage Rows(string value) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent($$"""{"resultSetMetaData":{"numRows":1,"rowType":[{"name":"V"}]},"data":[["{{value}}"]],"statementHandle":"01c7-0000"}""",
+            Encoding.UTF8, "application/json"),
+    };
+
+    private static HttpResponseMessage Refused(string code, string message) => new(HttpStatusCode.UnprocessableEntity)
+    {
+        Content = new StringContent($$"""{"code":"{{code}}","message":"{{message}}","sqlState":"57014"}""", Encoding.UTF8, "application/json"),
+    };
+
+    /// <summary>Plays the SQL API: answers each submitted statement as a test says, and records what was sent.</summary>
+    private sealed class FakeSqlApi : HttpMessageHandler
+    {
+        private readonly Func<string, HttpResponseMessage> _answer;
+        public FakeSqlApi(Func<string, HttpResponseMessage> answer) => _answer = answer;
+
+        public List<string> Statements { get; } = new();
+        public List<(string Query, string Statement)> Posts { get; } = new();
+        public List<string> Gets { get; } = new();
+
+        /// <summary>The answer to a poll of a running statement (a GET of its handle).</summary>
+        public Func<HttpResponseMessage>? OnGet { get; init; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                Gets.Add(request.RequestUri!.PathAndQuery);
+                return OnGet!();
+            }
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var statement = body.RootElement.GetProperty("statement").GetString()!;
+            Statements.Add(statement);
+            Posts.Add((request.RequestUri!.Query, statement));
+            return _answer(statement);
+        }
     }
 }
