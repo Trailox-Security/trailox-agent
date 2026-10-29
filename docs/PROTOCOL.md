@@ -388,7 +388,7 @@ MFA methods and workload identities, with their owner, status, role restriction 
 -- probe
 SELECT CURRENT_VERSION()
 SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE EVENT_TIMESTAMP > DATEADD(hour, -24, CURRENT_TIMESTAMP())
--- the oldest rows: from 1.15.0 once per agent run, not at every probe (a failed read is tried again)
+-- the oldest rows: from 1.15.0 at most once a day, not at every probe (a failed read waits a day; the last value is kept)
 SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(END_TIME)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(EVENT_TIMESTAMP)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
 
