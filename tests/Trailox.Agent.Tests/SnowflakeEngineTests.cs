@@ -153,6 +153,45 @@ public class SnowflakeEngineTests
         Assert.StartsWith("SELECT * EXCLUDE (QUERY_TEXT, BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", SfRawSelects.Events(Endpoint(text: false), 1000, 2000));
     }
 
+    private const long Start = 1_790_000_000_000_000;
+    private const long End = Start + 3_600_000_000;
+    private const string WindowStatementsSql = "WITH wq AS (SELECT {0} FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY " +
+        "WHERE END_TIME > TO_TIMESTAMP_LTZ(1790000000000000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(1790003600000000, 6)) ";
+
+    /// <summary>
+    /// 1.15: access history is the rows of the statements that ENDED in the window, so a statement that ran for hours has
+    /// them once it is complete. It goes back a day at most, and no further than the window's first statement started.
+    /// </summary>
+    [Fact]
+    public void Access_history_is_the_rows_of_the_statements_that_ended_in_the_window()
+    {
+        Assert.Equal(
+            string.Format(WindowStatementsSql, "QUERY_ID, START_TIME") +
+            "SELECT a.* FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a " +
+            "WHERE a.QUERY_START_TIME > TO_TIMESTAMP_LTZ(1789913600000000, 6) AND a.QUERY_START_TIME <= TO_TIMESTAMP_LTZ(1790003600000000, 6) " +
+            "AND a.QUERY_START_TIME >= (SELECT DATEADD('minute', -1, MIN(wq.START_TIME)) FROM wq) " +
+            "AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)",
+            SfRawSelects.AccessHistory(Start, End));
+        Assert.Equal(SfRawSelects.AccessHistory(Start, End),
+            SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.AccessHistory, StartMicros = Start, EndMicros = End }));
+    }
+
+    /// <summary>
+    /// 1.15: the sessions created in the window, and the older sessions of the statements that ended in it, whatever
+    /// their age: a session opened before the first window, or a pooled one kept for weeks.
+    /// </summary>
+    [Fact]
+    public void Sessions_are_those_created_in_the_window_and_those_of_its_statements()
+    {
+        Assert.Equal(
+            string.Format(WindowStatementsSql, "DISTINCT SESSION_ID") +
+            "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS " +
+            "WHERE CREATED_ON > TO_TIMESTAMP_LTZ(1790000000000000, 6) AND CREATED_ON <= TO_TIMESTAMP_LTZ(1790003600000000, 6) " +
+            "UNION ALL SELECT s.* FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS s WHERE s.CREATED_ON <= TO_TIMESTAMP_LTZ(1790000000000000, 6) " +
+            "AND s.SESSION_ID IN (SELECT wq.SESSION_ID FROM wq)",
+            SfRawSelects.Sessions(Start, End));
+    }
+
     /// <summary>
     /// 1.15: the oldest statement and sign-in are each a scan of a whole view, read at most once a day rather than at
     /// every probe. A failed read waits for the next day as well, and keeps the last value read.
@@ -265,7 +304,7 @@ public class SnowflakeEngineTests
         {
             var sql = SfRawSelects.ForTask(Endpoint(), new AgentTask { Stream = stream, StartMicros = 1, EndMicros = 2 });
             Assert.NotNull(sql);
-            Assert.StartsWith("SELECT ", sql);
+            Assert.Matches(@"^(SELECT |WITH wq AS \(SELECT )", sql);
             Assert.DoesNotContain("JOIN", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("FLATTEN", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("CASE", sql);

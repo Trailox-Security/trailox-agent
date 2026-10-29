@@ -4,9 +4,10 @@ using Trailox.Agent.Protocol;
 namespace Trailox.Agent.Engines.Snowflake;
 
 /// <summary>
-/// The whole of the SQL this agent runs on a Snowflake account. Every statement reads one
-/// SNOWFLAKE.ACCOUNT_USAGE view; nothing is joined, flattened or classified. docs/PROTOCOL.md 6d is the
-/// human-readable copy.
+/// The whole of the SQL this agent runs on a Snowflake account. Each statement reads SNOWFLAKE.ACCOUNT_USAGE
+/// views and sends their rows as they are: nothing is flattened or classified. Two reads (access history and
+/// sessions) also name the window's statements in QUERY_HISTORY, to keep to their rows. docs/PROTOCOL.md 6d is
+/// the human-readable copy.
 /// </summary>
 public static class SfRawSelects
 {
@@ -60,14 +61,44 @@ public static class SfRawSelects
         return $"SELECT * EXCLUDE ({excluded}) FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
     }
 
+    /// <summary>How far before a window a statement that ended in it may have started, and still be attributed.</summary>
+    internal const long StatementLookbackMicros = 24L * 3600 * 1_000_000;
+
+    /// <summary>The statements that ended in a window: the rows that the access history and session reads keep to.</summary>
+    private static string WindowStatements(string columns, long startMicros, long endMicros) =>
+        $"WITH wq AS (SELECT {columns} FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}) ";
+
+    /// <summary>
+    /// The ACCESS_HISTORY rows of the statements that ENDED in the window (from 1.15.0), as the events stream reads them.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ BY THE STATEMENT'S END, NOT ITS START. ACCESS_HISTORY has only QUERY_START_TIME, and Snowflake writes a row
+    ///   once its statement is complete. Read by start time, a window was read before its long statements ended, so a
+    ///   statement that ran over about 3 hours never had its tables. A statement may have started up to a day before
+    ///   the window, and the read goes back no further than the window's first statement started, less a minute.
+    /// </remarks>
     public static string AccessHistory(long startMicros, long endMicros) =>
-        $"SELECT * FROM {AccountUsage}.ACCESS_HISTORY WHERE {Window("QUERY_START_TIME", startMicros, endMicros)}";
+        WindowStatements("QUERY_ID, START_TIME", startMicros, endMicros) +
+        $"SELECT a.* FROM {AccountUsage}.ACCESS_HISTORY a WHERE {Window("a.QUERY_START_TIME", startMicros - StatementLookbackMicros, endMicros)} " +
+        "AND a.QUERY_START_TIME >= (SELECT DATEADD('minute', -1, MIN(wq.START_TIME)) FROM wq) " +
+        "AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)";
 
     public static string Logins(long startMicros, long endMicros) =>
         $"SELECT * FROM {AccountUsage}.LOGIN_HISTORY WHERE {Window("EVENT_TIMESTAMP", startMicros, endMicros)}";
 
+    /// <summary>
+    /// The sessions created in the window, and (from 1.15.0) the older sessions of the statements that ended in it.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A STATEMENT NEEDS ITS SESSION, HOWEVER OLD. A pooled connection can keep one session for weeks, and a session
+    ///   opened before the first window was never read: its statements had no client application. The second half reads
+    ///   each such session by its id, every time a window has its statements, so it costs one scan of SESSIONS per window.
+    /// </remarks>
     public static string Sessions(long startMicros, long endMicros) =>
-        $"SELECT * FROM {AccountUsage}.SESSIONS WHERE {Window("CREATED_ON", startMicros, endMicros)}";
+        WindowStatements("DISTINCT SESSION_ID", startMicros, endMicros) +
+        $"SELECT * FROM {AccountUsage}.SESSIONS WHERE {Window("CREATED_ON", startMicros, endMicros)} " +
+        $"UNION ALL SELECT s.* FROM {AccountUsage}.SESSIONS s WHERE s.CREATED_ON <= {Ts(startMicros)} " +
+        "AND s.SESSION_ID IN (SELECT wq.SESSION_ID FROM wq)";
 
     // ---- catalog (daily): the columns sent, live objects only ----
 

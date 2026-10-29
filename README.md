@@ -101,7 +101,7 @@ be committed. Any other value can be written in the file or taken from the envir
 | `password_env` / `password_file` | Where the credential comes from: an environment variable or a mounted file |
 | `catalog_username`, `catalog_password_env` / `catalog_password_file` | MongoDB Atlas only, optional (1.9.0): the catalog user that lists collections and their sizes, and exactly one place its password comes from. See [MongoDB Atlas](#mongodb-atlas) |
 | `options` | Engine-specific extras (see below) |
-| `collectSessionLog` | Also ship login and session events (default `true`) |
+| `collectSessionLog` | Show the source's sign-ins in Trailox (default `true`). With `false`, ClickHouse, Databricks and Redshift sign-ins are not read. Snowflake's `LOGIN_HISTORY` and `SESSIONS`, MongoDB Atlas's connection lines and the PostgreSQL log are still read, because statements take their client address, application and sign-in method from them |
 | `storeRawQueryText` | `false` keeps statement text inside your network (default `true`) |
 | `excludedDatabases` | Databases left out of what is shipped; what that covers depends on the engine (see [What leaves your network](#what-leaves-your-network)) |
 | `pollMinutes` | How often Trailox collects the database, 1-1440 minutes. Optional; Trailox's default is 10 for ClickHouse and MongoDB, 60 for Databricks and Snowflake, 180 for Redshift. **Used when Trailox first registers the source**: after that its setting in Trailox decides, and Trailox warns when this file differs. **On Snowflake a shorter poll needs a larger daily credit cap** than the setup script sets (6 credits for 60 minutes, 72 for 5), or Snowflake suspends the warehouse. From 1.4.0 |
@@ -271,6 +271,9 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
   (`ACCESS_HISTORY`). From 1.15.0, a read that runs into a time limit (the agent's own 30 minutes per
   statement, or a lower statement timeout of the warehouse, the user or the account) is asked for again
   over a shorter window.
+- From 1.15.0, the access history and sessions are read for the statements that ended in each window. A
+  statement that ran for hours still gets its tables and columns (up to a day), and a statement in a
+  session that opened long before gets its application. Each sessions read scans `SESSIONS` once.
 
 ### MongoDB Atlas
 
