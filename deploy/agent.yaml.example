@@ -94,7 +94,7 @@ endpoints:
   #   password_file: /run/secrets/sf_key               # its unencrypted PKCS#8 PEM private key
   #   options:
   #     role: TRAILOX_MONITOR                          # the role the setup script creates
-  #   collectSessionLog: true                          # sign-ins from LOGIN_HISTORY and SESSIONS
+  #   collectSessionLog: true                          # false = no sign-ins shown; still read for the statements
   #   storeRawQueryText: true                          # false = QUERY_TEXT is never shipped (BIND_VALUES never is)
   #   excludedDatabases: []                            # databases never inventoried (SNOWFLAKE always excluded)
   #   pollMinutes: 60                                  # IMPORTANT: a shorter poll needs a larger daily credit cap
