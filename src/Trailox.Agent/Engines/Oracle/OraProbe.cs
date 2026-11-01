@@ -166,6 +166,7 @@ internal static class OraProbe
         }
         if (await Try(session, f, "AUDIT_UNIFIED_POLICIES", OraSql.PolicyObjects, ct, new OraBind("cap", (long)OraSql.MaxPolicyObjects)) is { } objects)
         {
+            f.PolicyObjectsRead = true;
             f.PolicyObjects = objects.Select(p => new OraclePolicyObject
             {
                 Policy = p[0] as string ?? "",

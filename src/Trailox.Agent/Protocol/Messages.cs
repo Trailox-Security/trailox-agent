@@ -261,13 +261,19 @@ public sealed class OracleCaps
     /// <summary>Whether the audit view has the SOURCE column (19.21 and later), which the poll then reads.</summary>
     public bool SourceColumn { get; set; }
 
-    /// <summary>logs_only, partial, selective or full: which of the TRAILOX_* policies are enabled.</summary>
+    /// <summary>logs_only, partial, selective or full: which of the TRAILOX_* policies are enabled; empty when they cannot be read.</summary>
     public string ObservedLevel { get; set; } = "";
+
+    /// <summary>Whether the enabled policies were read. An empty <see cref="Policies"/> alone could be a missing grant.</summary>
+    public bool PoliciesRead { get; set; }
 
     /// <summary>The TRAILOX_* policies that are enabled, one row for each user or role.</summary>
     public List<OraclePolicy> Policies { get; set; } = new();
 
-    /// <summary>What the TRAILOX_* policies audit.</summary>
+    /// <summary>Whether the policies' objects were read, as <see cref="PoliciesRead"/>.</summary>
+    public bool PolicyObjectsRead { get; set; }
+
+    /// <summary>The objects the TRAILOX_* policies name.</summary>
     public List<OraclePolicyObject> PolicyObjects { get; set; } = new();
 
     /// <summary>The probe's checks, as the source page shows them.</summary>

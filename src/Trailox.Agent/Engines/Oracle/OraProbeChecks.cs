@@ -55,6 +55,7 @@ public sealed class OraFacts
     public List<OraclePolicy> Policies { get; set; } = new();
     public bool PoliciesRead { get; set; }
     public List<OraclePolicyObject> PolicyObjects { get; set; } = new();
+    public bool PolicyObjectsRead { get; set; }
     public Dictionary<string, string?>? Limits { get; set; }
     public DateTime? PasswordExpiry { get; set; }
     public int? OldAuditSettings { get; set; }
@@ -110,7 +111,7 @@ public static class OraProbeChecks
         yield return Room(f);
         yield return Spillover(f.Spilled);
         yield return DefaultPolicies(f.PoliciesRead, f.Policies, f.Major);
-        yield return Level(f.Policies, f.PolicyObjects.Count);
+        yield return Level(f.PoliciesRead, f.Policies, f.PolicyObjects.Count);
         yield return Profile(f.Limits);
         yield return ResourceLimit(f.Parameters.GetValueOrDefault("resource_limit"));
         yield return SourceColumn(f.SourceColumn);
@@ -149,8 +150,10 @@ public static class OraProbeChecks
             DayRecordsLimit = MaxRecordsPerDay,
             Spilled = f.Spilled,
             SourceColumn = f.SourceColumn,
-            ObservedLevel = ObservedLevel(f.Policies),
+            ObservedLevel = f.PoliciesRead ? ObservedLevel(f.Policies) : "",
+            PoliciesRead = f.PoliciesRead,
             Policies = f.Policies.Where(p => p.Name.StartsWith("TRAILOX_", StringComparison.Ordinal)).ToList(),
+            PolicyObjectsRead = f.PolicyObjectsRead,
             PolicyObjects = f.PolicyObjects,
             Checks = checks.ToList(),
         };
@@ -340,8 +343,13 @@ public static class OraProbeChecks
         return parts > 0 || enabled.Contains("TRAILOX_TABLES") || enabled.Contains("TRAILOX_PERSONS") ? LevelPartial : LevelLogsOnly;
     }
 
-    public static OracleCheck Level(IReadOnlyList<OraclePolicy> policies, int objects = 0)
+    /// <param name="read">The enabled policies could be read. Without that an empty list says nothing: no level can be told.</param>
+    public static OracleCheck Level(bool read, IReadOnlyList<OraclePolicy> policies, int objects = 0)
     {
+        if (!read)
+        {
+            return Warn("level", "the enabled policies cannot be read, so the audit level cannot be told");
+        }
         var level = ObservedLevel(policies);
         if (objects >= OraSql.MaxPolicyObjects)
         {

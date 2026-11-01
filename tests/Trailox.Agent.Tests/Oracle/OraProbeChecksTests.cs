@@ -244,7 +244,7 @@ public class OraProbeChecksTests
     {
         var policies = names.Select(n => new OraclePolicy { Name = n }).ToList();
         Assert.Equal(level, OraProbeChecks.ObservedLevel(policies));
-        Assert.Equal(level == "partial" ? "warn" : "ok", OraProbeChecks.Level(policies).Status);
+        Assert.Equal(level == "partial" ? "warn" : "ok", OraProbeChecks.Level(true, policies).Status);
     }
 
     [Fact]
@@ -325,7 +325,22 @@ public class OraProbeChecksTests
     [Fact]
     public void Policy_objects_at_the_cap_warn_that_some_are_not_reported()
     {
-        Assert.Equal("warn", OraProbeChecks.Level(Array.Empty<OraclePolicy>(), OraSql.MaxPolicyObjects).Status);
+        Assert.Equal("warn", OraProbeChecks.Level(true, Array.Empty<OraclePolicy>(), OraSql.MaxPolicyObjects).Status);
+    }
+
+    /// <summary>An empty list after a refused read is not "no policy is enabled": that would read as a level switched off.</summary>
+    [Fact]
+    public void Policies_that_cannot_be_read_tell_no_level()
+    {
+        var f = Facts();
+        f.PoliciesRead = false;
+        f.Policies = new List<OraclePolicy>();
+
+        Assert.Equal("warn", Check(f, "level").Status);
+        Assert.Contains("cannot be read", Check(f, "level").Message);
+        var caps = OraProbeChecks.Caps(f, OraProbeChecks.All(f).ToList());
+        Assert.False(caps.PoliciesRead);
+        Assert.Equal("", caps.ObservedLevel);
     }
 
     [Fact]

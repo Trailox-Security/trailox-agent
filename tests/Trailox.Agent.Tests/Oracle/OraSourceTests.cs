@@ -472,6 +472,8 @@ public class OraSourceTests
         Assert.Equal(Micros(new DateTime(2026, 10, 23, 0, 0, 0, DateTimeKind.Utc)), oracle.TodayPartitionEndMicros);
         Assert.True(oracle.SourceColumn);
         Assert.Equal("partial", oracle.ObservedLevel);
+        Assert.True(oracle.PoliciesRead);
+        Assert.True(oracle.PolicyObjectsRead);
         Assert.Equal(("TRAILOX_TABLES", "APP", "ACCOUNTS"), (oracle.PolicyObjects[0].Policy, oracle.PolicyObjects[0].Schema, oracle.PolicyObjects[0].Name));
         Assert.Equal(1, fake.Opens);
         Assert.Equal(1, fake.MostSessions);
@@ -526,6 +528,39 @@ public class OraSourceTests
         var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
 
         Assert.Equal(check, Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job").Status);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Each_policy_view_says_on_its_own_whether_it_was_read(bool policiesReadable, bool objectsReadable)
+    {
+        var fake = Probed();
+        if (!policiesReadable)
+        {
+            fake.Fails(OraSql.EnabledPolicies, 942);
+        }
+        if (!objectsReadable)
+        {
+            fake.Fails(OraSql.PolicyObjects, 942);
+        }
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        Assert.Equal(policiesReadable, caps.Oracle!.PoliciesRead);
+        Assert.Equal(objectsReadable, caps.Oracle.PolicyObjectsRead);
+    }
+
+    /// <summary>What the check-in sends: both flags under their camelCase names, on the wire and not only in the object.</summary>
+    [Fact]
+    public async Task The_flags_reach_the_check_in_by_name()
+    {
+        var caps = await new OraSource(Endpoint(), Probed(), () => Now).ProbeAsync(CancellationToken.None);
+
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(caps, ProtocolInfo.Json));
+        var oracle = json.RootElement.GetProperty("oracle");
+        Assert.True(oracle.GetProperty("policiesRead").GetBoolean());
+        Assert.True(oracle.GetProperty("policyObjectsRead").GetBoolean());
     }
 
     [Fact]

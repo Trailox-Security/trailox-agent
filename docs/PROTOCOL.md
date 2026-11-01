@@ -847,9 +847,10 @@ and the first time. Every other record is a row of its own, with `event_count` 1
 `ownUser`, `ownProgram` (both as the server gives them), `probedAtMicros`, `unifiedMode` (`pure`, `mixed`), `auditTrail`,
 `trailPartitioned`, `trailInterval`, `trailRows`, `trailBlocks` (statistics, never a count), `todayPartition`,
 `todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `dayRecordsEstimate`,
-`dayRecordsLimit`, `spilled`, `sourceColumn`, `observedLevel` (`logs_only`, `partial`, `selective`, `full`), `policies` (`name`,
-`enabledOption`, `entityName`, `entityType`, `success`, `failure`: the `TRAILOX_*` ones enabled), `policyObjects` (`policy`,
-`schema`, `name`: the objects those policies name, at most 500) and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `container`,
+`dayRecordsLimit`, `spilled`, `sourceColumn`, `observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
+cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityName`, `entityType`, `success`, `failure`: the
+`TRAILOX_*` ones enabled), `policyObjectsRead`, `policyObjects` (`policy`, `schema`, `name`: the objects those policies name, at most
+500) and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `container`,
 `platform`, `poll_view`, `audit_trail`, `day_limit`, `views`, `partition`, `room`, `spillover`, `default_policies`, `level`,
 `profile`, `resource_limit`, `source_column`, `old_audit_settings`, `purge_job`, `password_expiry`.
 
@@ -861,6 +862,9 @@ and `dayRecordsEstimate` is the projection at 1,040 bytes a record. `day_limit` 
 24 hours, more than `dayRecordsLimit` records at 1,040 bytes. It warns when the projection is above the limit at 650 bytes, and
 when the tablespace's size cannot be read. An optional read that fails for any reason but a lost session is listed in `views`,
 and the probe goes on.
+
+`policiesRead` and `policyObjectsRead` are true only when that view was read, so an empty list after a missing grant is not taken
+for a policy that is not enabled.
 
 **A failed check refuses the source:** the check-in reports `probeError`, the failed checks' messages joined, with the
 caps and every check beside it. The agent runs no task on a refused source, and probes it again every 5 minutes.
