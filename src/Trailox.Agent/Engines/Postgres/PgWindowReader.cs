@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.IO.Pipelines;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -7,30 +6,6 @@ using Trailox.Agent.Engines.MongoDb;
 using Trailox.Agent.Runner;
 
 namespace Trailox.Agent.Engines.Postgres;
-
-/// <summary>Rows on their way to the upload: the sink, and the pipe it writes to, flushed as it fills so a task holds little.</summary>
-public sealed class PgRows
-{
-    private const int FlushBytes = 256 * 1024;
-
-    private readonly PipeWriter? _pipe;
-
-    public PgRows(RowSink sink, PipeWriter? pipe = null)
-    {
-        Sink = sink;
-        _pipe = pipe;
-    }
-
-    public RowSink Sink { get; }
-
-    public async ValueTask FlushAsync(CancellationToken ct)
-    {
-        if (_pipe != null && _pipe.UnflushedBytes > FlushBytes)
-        {
-            await _pipe.FlushAsync(ct);
-        }
-    }
-}
 
 /// <summary>
 /// The <c>pg_log</c> rows of one instance for one window [start, end). Each record belongs to the window by its own
@@ -64,7 +39,7 @@ public sealed class PgWindowReader
     private readonly bool _english;
     private readonly long _rotationMicros;
     private readonly RowSink _sink;
-    private readonly PgRows? _rows;
+    private readonly RowWriter? _rows;
     private readonly SortedDictionary<string, long> _counted = new(StringComparer.Ordinal);
     private readonly PgAuditGroups _audit;
 
@@ -95,7 +70,7 @@ public sealed class PgWindowReader
     /// <c>log_rotation_age</c>, from the probe: a new file at least this often. 0 (unknown, or no rotation by time): a
     /// directory window is never said to be missing.
     /// </param>
-    public PgWindowReader(string instance, long startMicros, long endMicros, bool shipText, RowSink sink, PgRows? rows = null,
+    public PgWindowReader(string instance, long startMicros, long endMicros, bool shipText, RowSink sink, RowWriter? rows = null,
         bool english = true, int rotationMinutes = 0)
     {
         _instance = instance;

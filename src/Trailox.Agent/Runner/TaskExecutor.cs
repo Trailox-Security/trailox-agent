@@ -67,12 +67,15 @@ public sealed class TaskExecutor
         {
             // The database refused the statement or was unreachable mid-task. Report it; the
             // probe will say more at the next check-in. A read stopped at the database's time limit
-            // (agent 1.15) says so, and Trailox asks for shorter windows.
-            var tooLong = ex is SourceException { WindowTooLong: true };
-            _errors.Add(alias, $"{task.Stream} {Describe(task)}: {ex.Message}");
+            // (agent 1.15) or at a bound (agent 1.16) says so, and Trailox asks for shorter windows.
+            // Once rows are on their way a failure arrives through the upload, and the HTTP client may wrap it.
+            var source = SourceOf(ex);
+            var reason = source is { TooLargeAtSource: true } ? ChunkFailed.TooLargeAtSource : source is { WindowTooLong: true } ? ChunkFailed.WindowTooLong : null;
+            var message = source?.Message ?? ex.Message;
+            _errors.Add(alias, $"{task.Stream} {Describe(task)}: {message}");
             _logger.LogWarning("endpoint {Alias}: {Stream} {Window} failed on the database{Shorter}: {Message}", alias, task.Stream, Describe(task),
-                tooLong ? " at its time limit; shorter windows will be asked for" : "", EndpointSession.Trim(ex.Message));
-            await ReportFailureAsync(task, alias, ex.Message, ct, tooLong ? ChunkFailed.WindowTooLong : null);
+                reason != null ? " at its limit; shorter windows will be asked for" : "", EndpointSession.Trim(message));
+            await ReportFailureAsync(task, alias, message, ct, reason);
             return true;
         }
         catch (GatewayException ex) when (ex.IsUnauthorized)
@@ -117,6 +120,19 @@ public sealed class TaskExecutor
             await ReportFailureAsync(task, alias, reason, ct);
             return true;
         }
+    }
+
+    /// <summary>The engine's own failure, directly or inside what the upload wrapped it in; null when there is none.</summary>
+    internal static SourceException? SourceOf(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException!)
+        {
+            if (e is SourceException source)
+            {
+                return source;
+            }
+        }
+        return null;
     }
 
     /// <summary>

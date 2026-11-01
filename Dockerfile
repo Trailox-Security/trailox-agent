@@ -17,6 +17,9 @@ COPY src/Trailox.Agent/Trailox.Agent.csproj src/Trailox.Agent/
 RUN dotnet restore src/Trailox.Agent/Trailox.Agent.csproj
 COPY src/ src/
 RUN dotnet publish src/Trailox.Agent/Trailox.Agent.csproj -c Release -o /app -p:Version=$VERSION -p:UseAppHost=false
+# The Oracle driver goes out under Oracle's own terms: its licence and third-party notices travel with it.
+RUN mkdir /app/licenses \
+    && cp /root/.nuget/packages/oracle.manageddataaccess.core/*/LICENSE.txt /root/.nuget/packages/oracle.manageddataaccess.core/*/info.txt /app/licenses/
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0-noble-chiseled AS final
 WORKDIR /app

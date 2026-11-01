@@ -1,7 +1,5 @@
-using System.IO.Pipelines;
 using Npgsql;
 using Trailox.Agent.Config;
-using Trailox.Agent.Engines.MongoDb;
 using Trailox.Agent.Protocol;
 using Streams = Trailox.Agent.Protocol.ProtocolInfo.Streams;
 
@@ -154,7 +152,7 @@ public sealed class PgSource : IEngineSource
     /// </summary>
     private IReadOnlyList<PgInstance> CatalogInstances => _instances.Count > 1 ? new[] { _instances[1], _instances[0] } : new[] { _instances[0] };
 
-    private async Task LogAsync(AgentTask task, PgRows rows, CancellationToken ct)
+    private async Task LogAsync(AgentTask task, RowWriter rows, CancellationToken ct)
     {
         var callsPerSecond = _utcNow() - FromMicros(task.EndMicros) > CatchUp ? CatchUpCallsPerSecond : LiveCallsPerSecond;
         foreach (var instance in _instances)
@@ -371,66 +369,9 @@ public sealed class PgSource : IEngineSource
         return (reader.GetInt32(0), reader.GetString(1));
     }
 
-    /// <summary>
-    /// The rows of one task through a pipe the upload drains, so what the task holds does not grow with the window or the
-    /// catalog.
-    /// </summary>
-    /// <remarks>
-    /// 🔴 THE FIRST BYTES ARE AWAITED BEFORE THE UPLOAD. A failure before any row - "not configured", no server reachable,
-    ///    a rejected password - is then thrown here, as the task's own failure, with its flags. Thrown inside the upload,
-    ///    it would reach the runner wrapped by the HTTP client, and a missing optional grant would be listed among the
-    ///    agent's errors.
-    /// </remarks>
-    internal static async Task<RowStream> StreamedAsync(Func<PgRows, CancellationToken, Task> produce, CancellationToken ct)
-    {
-        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 8 << 20, resumeWriterThreshold: 4 << 20));
-        var producer = Task.Run(async () =>
-        {
-            try
-            {
-                await produce(new PgRows(new RowSink(pipe.Writer), pipe.Writer), cts.Token);
-                await pipe.Writer.CompleteAsync();
-            }
-            catch (Exception ex)
-            {
-                await pipe.Writer.CompleteAsync(ex);
-            }
-        }, CancellationToken.None);
-        try
-        {
-            // Nothing is consumed: the upload reads these bytes again.
-            var first = await pipe.Reader.ReadAsync(ct);
-            pipe.Reader.AdvanceTo(first.Buffer.Start);
-        }
-        catch
-        {
-            new Producer(cts, producer).Dispose();
-            throw;
-        }
-        // Quiet by design: a log file with few sign-ins, or a catalog database with many tables, yields few rows for minutes.
-        return new RowStream(pipe.Reader.AsStream(), new Producer(cts, producer)) { KeepAlive = true };
-    }
+    /// <summary>The rows of one task, through <see cref="StreamedRows"/>.</summary>
+    internal static Task<RowStream> StreamedAsync(Func<RowWriter, CancellationToken, Task> produce, CancellationToken ct) =>
+        StreamedRows.OpenAsync(produce, ct);
 
     private static DateTime FromMicros(long micros) => DateTime.UnixEpoch.AddTicks(micros * 10);
-
-    /// <summary>Stops the producer when the upload is done or abandoned.</summary>
-    private sealed class Producer : IDisposable
-    {
-        private readonly CancellationTokenSource _cts;
-        private readonly Task _task;
-
-        public Producer(CancellationTokenSource cts, Task task)
-        {
-            _cts = cts;
-            _task = task;
-        }
-
-        public void Dispose()
-        {
-            _cts.Cancel();
-            _ = _task.ContinueWith(t => _ = t.Exception, TaskScheduler.Default);
-            _cts.Dispose();
-        }
-    }
 }
