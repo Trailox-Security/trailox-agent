@@ -115,8 +115,14 @@ public class SourceException : Exception
     /// </summary>
     public bool AuthenticationRejected { get; init; }
 
-    /// <summary>What to do before the restart after <see cref="AuthenticationRejected"/>, when that is not fixing the password.</summary>
+    /// <summary>What to do after <see cref="AuthenticationRejected"/>, when that is not fixing the password.</summary>
     public string? AuthenticationFix { get; init; }
+
+    /// <summary>
+    /// With <see cref="AuthenticationRejected"/>: the refusal can end with no change on the agent's side (agent 1.16: a locked
+    /// Oracle account), so the agent signs in again after this long instead of waiting for a restart. Null: until a restart.
+    /// </summary>
+    public TimeSpan? SignInRetryAfter { get; init; }
 
     /// <summary>
     /// The probe read the source and refuses it (agent 1.16: Oracle, where a poll would cost the customer too much or could

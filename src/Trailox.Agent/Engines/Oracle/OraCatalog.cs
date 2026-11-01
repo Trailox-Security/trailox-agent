@@ -22,8 +22,18 @@ internal static class OraErrors
     /// </summary>
     public static bool StoppedByBound(OraDriverException ex) => ex.TimedOut || ex.Number is 2393 or 2395;
 
+    /// <summary>ORA-28000: the one refusal that can end with no change on the agent's side.</summary>
+    public const int AccountLocked = 28000;
+
     /// <summary>
-    /// What to do before a restart when the server refused the sign-in itself; null for any other failure.
+    /// How long a locked account is left alone before one more try. 🔴 A LOCK IS NOT ALWAYS THE AGENT'S TO FIX: anyone who can
+    /// reach the listener can lock a known user name with wrong passwords, and it ends with the profile's lock time or an
+    /// administrator. A stop until a restart would leave the trail unread after that; one try an hour costs one record.
+    /// </summary>
+    public static readonly TimeSpan LockedRetry = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// What to do when the server refused the sign-in itself; null for any other failure.
     /// 🔴 EACH OF THESE IS ONE MORE FAILED SIGN-IN IN THE CUSTOMER'S TRAIL. At a retry a minute the default profile locks
     /// the user after ten wrong passwords, and a user with no CREATE SESSION writes about 1,900 records a day.
     /// </summary>
@@ -31,7 +41,7 @@ internal static class OraErrors
     {
         1017 => "fix the password",
         1045 => "grant CREATE SESSION",
-        28000 => "unlock the account",
+        AccountLocked => "unlock the account",
         28001 => "set a new password and give it to the agent",
         _ => null,
     };
@@ -50,6 +60,8 @@ public sealed class OraCatalog
     private readonly Func<DateTime> _utcNow;
     private readonly TimeSpan _callLimit;
     private SourceException? _rejected;
+    private SourceException? _locked;
+    private DateTime _lockedUntilUtc;
 
     /// <param name="callLimit">The longest any one call on a session may run; <see cref="OraSql.CommandTimeoutSeconds"/> unless a test says.</param>
     public OraCatalog(EndpointConfig endpoint, IOraDriver driver, Func<DateTime>? utcNow = null, TimeSpan? callLimit = null)
@@ -67,6 +79,8 @@ public sealed class OraCatalog
     /// 🔴 AFTER A REFUSED SIGN-IN, NO SIGN-IN AT ALL until the agent restarts: every open fails at once as the first did,
     ///    without connecting. The runner stops the probes; this stops the tasks issued meanwhile, each of which would write
     ///    one more failed sign-in into the customer's trail. Network errors keep the runner's retry.
+    /// 🔴 A LOCKED ACCOUNT IS HELD THE SAME WAY, FOR <see cref="OraErrors.LockedRetry"/>. Then one open tries again: refused, it
+    ///    holds for another hour; let in, the source goes on with no restart.
     /// </remarks>
     public async Task<IOraSession> OpenAsync(CancellationToken ct)
     {
@@ -74,10 +88,15 @@ public sealed class OraCatalog
         {
             throw _rejected;
         }
+        if (_locked != null && _utcNow() < _lockedUntilUtc)
+        {
+            throw _locked;
+        }
         IOraSession? session = null;
         try
         {
             session = new OraBoundedSession(await _driver.OpenAsync(Target, ct), _callLimit);
+            _locked = null;
             foreach (var setting in OraSql.SessionSettings)
             {
                 await session.ExecuteAsync(setting, ct);
@@ -90,12 +109,7 @@ public sealed class OraCatalog
             {
                 await session.DisposeAsync();
             }
-            if (OraErrors.SignInFix(ex.Number) is { } fix)
-            {
-                _rejected = new SourceException(Text(ex)) { AuthenticationRejected = true, AuthenticationFix = fix };
-                throw _rejected;
-            }
-            throw Failure(ex, ct);
+            throw OraErrors.SignInFix(ex.Number) is { } fix ? Refused(ex, fix) : Failure(ex, ct);
         }
         catch
         {
@@ -105,6 +119,28 @@ public sealed class OraCatalog
             }
             throw;
         }
+    }
+
+    /// <summary>A sign-in the server refused, remembered: for good, or for an hour when the account is locked.</summary>
+    private SourceException Refused(OraDriverException ex, string fix)
+    {
+        var locked = ex.Number == OraErrors.AccountLocked;
+        var refused = new SourceException(Text(ex))
+        {
+            AuthenticationRejected = true,
+            AuthenticationFix = fix,
+            SignInRetryAfter = locked ? OraErrors.LockedRetry : null,
+        };
+        if (locked)
+        {
+            _locked = refused;
+            _lockedUntilUtc = _utcNow() + OraErrors.LockedRetry;
+        }
+        else
+        {
+            _rejected = refused;
+        }
+        return refused;
     }
 
     /// <summary>A failed statement as the task reports it. One stopped by a bound says so, and a cancellation stays one.</summary>

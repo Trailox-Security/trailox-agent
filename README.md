@@ -447,9 +447,11 @@ The agent signs in with a user of its own and reads everything over SQL: no AWS 
   `day_limit`, `views`, `partition`, `room`, `spillover`, `default_policies`, `level`, `profile`, `resource_limit`,
   `source_column`, `old_audit_settings`, `purge_job` and `password_expiry`, each `ok`, `warn` or `fail` with what to
   change. A `fail` refuses the source: the agent runs no poll on it, and probes it again every 5 minutes.
-- **A refused sign-in** (wrong password, a locked account, an expired password, no `CREATE SESSION`): the agent stops
-  signing in to that source, for its probe and its tasks, until it restarts, so it never locks the user or fills your
-  trail with its own failed sign-ins. Fix it, then restart the agent.
+- **A refused sign-in** (wrong password, an expired password, no `CREATE SESSION`): the agent stops signing in to that
+  source, for its probe and its tasks, until it restarts, so it never locks the user or fills your trail with its own
+  failed sign-ins. Fix it, then restart the agent. **A locked account** is held the same way for an hour, then tried once,
+  which is one failed sign-in in your trail an hour: a lock can end without the agent, and once the account is
+  open the agent goes on with no restart.
 - **The driver** is Oracle's ODP.NET Core, under Oracle's own licence, which is in the image at
   `/app/licenses/LICENSE.txt`, with its third-party notices in `/app/licenses/info.txt`.
 

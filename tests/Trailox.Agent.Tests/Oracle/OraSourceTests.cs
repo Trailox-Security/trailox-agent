@@ -391,7 +391,6 @@ public class OraSourceTests
 
     [Theory]
     [InlineData(1017, "fix the password")]
-    [InlineData(28000, "unlock the account")]
     [InlineData(28001, "set a new password")]
     [InlineData(1045, "grant CREATE SESSION")]
     public async Task A_refused_sign_in_stops_every_later_sign_in_until_a_restart(int number, string fix)
@@ -409,6 +408,77 @@ public class OraSourceTests
         var ex = await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None));
         Assert.True(ex.AuthenticationRejected);
         Assert.Equal(1, fake.Opens);
+    }
+
+    /// <summary>
+    /// Anyone who can reach the listener can lock a known user with wrong passwords, and the lock ends without the agent. A stop until
+    /// a restart would leave the trail unread after that; a retry a minute would write 1,440 failed sign-ins a day.
+    /// </summary>
+    [Fact]
+    public async Task A_locked_account_writes_no_failed_sign_in_for_an_hour_then_one()
+    {
+        var at = Now;
+        var locked = new OraDriverException(28000, "ORA-28000: The account is locked.");
+        var fake = new FakeOra { OpenFails = locked };
+        var source = new OraSource(Endpoint(), fake, () => at);
+        var session = new EndpointSession(Endpoint(), source, TimeSpan.FromMinutes(60), () => at);
+
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+
+        Assert.Equal(1, fake.Opens);
+        Assert.Contains("unlock the account", session.ProbeError);
+        Assert.Contains("no restart is needed", session.ProbeError);
+        Assert.DoesNotContain("restart the agent", session.ProbeError);
+
+        at = Now.Add(OraErrors.LockedRetry).AddSeconds(-1);
+        Assert.False(session.NeedsProbe);
+        var ex = await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None));
+        Assert.True(ex.AuthenticationRejected);
+        Assert.Equal(1, fake.Opens);
+
+        at = Now.Add(OraErrors.LockedRetry).AddSeconds(1);
+        Assert.True(session.NeedsProbe);
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+        Assert.Equal(2, fake.Opens);
+        Assert.False(session.NeedsProbe);
+    }
+
+    [Fact]
+    public async Task An_unlocked_account_goes_on_with_no_restart()
+    {
+        var at = Now;
+        var fake = Probed();
+        fake.OpenFails = new OraDriverException(28000, "ORA-28000: The account is locked.");
+        fake.Answer(OraSql.Poll(text: true, source: true));
+        var source = new OraSource(Endpoint(), fake, () => at);
+        var session = new EndpointSession(Endpoint(), source, TimeSpan.FromMinutes(60), () => at);
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+
+        fake.OpenFails = null;
+        at = Now.Add(OraErrors.LockedRetry).AddSeconds(1);
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+
+        Assert.Null(session.ProbeError);
+        Assert.False(session.NeedsProbe);
+        await RowsAsync((await source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None))!);
+    }
+
+    /// <summary>An hour after a lock the password may turn out wrong too: that one still stops, or the lock would come back.</summary>
+    [Fact]
+    public async Task A_wrong_password_found_after_a_lock_still_stops()
+    {
+        var at = Now;
+        var fake = new FakeOra { OpenFails = new OraDriverException(28000, "ORA-28000: The account is locked.") };
+        var session = new EndpointSession(Endpoint(), new OraSource(Endpoint(), fake, () => at), TimeSpan.FromMinutes(60), () => at);
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+
+        fake.OpenFails = new OraDriverException(1017, "ORA-01017: invalid username/password; logon denied");
+        at = Now.Add(OraErrors.LockedRetry).AddSeconds(1);
+        await session.ProbeAsync(NullLogger.Instance, CancellationToken.None);
+        at = at.AddDays(30);
+
+        Assert.False(session.NeedsProbe);
+        Assert.Contains("restart the agent", session.ProbeError);
     }
 
     [Theory]

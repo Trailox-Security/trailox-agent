@@ -869,9 +869,10 @@ for a policy that is not enabled.
 **A failed check refuses the source:** the check-in reports `probeError`, the failed checks' messages joined, with the
 caps and every check beside it. The agent runs no task on a refused source, and probes it again every 5 minutes.
 
-A sign-in the server refuses (`ORA-01017`, `ORA-28000`, `ORA-28001`, `ORA-01045`) fails the probe or the task, and the agent
-then does not sign in to that source again, for a probe or a task, until it restarts. Network errors keep the retry at
-each check-in.
+A sign-in the server refuses (`ORA-01017`, `ORA-28001`, `ORA-01045`) fails the probe or the task, and the agent then does not
+sign in to that source again, for a probe or a task, until it restarts. `ORA-28000`, a locked account, is held the same way
+for an hour; then one sign-in is tried, and the agent goes on with no restart once the account is open. Network errors keep
+the retry at each check-in.
 
 ## 7. Configuration
 
