@@ -440,8 +440,9 @@ The agent signs in with a user of its own and reads everything over SQL: no AWS 
   data, with daily partitions, as the setup script does: when `SYSAUX` fills, Oracle sends every record to spillover files
   with no error, and every audited statement slows sharply.
 - **Amazon RDS:** RDS's default parameter group sets `audit_trail = NONE`, and with that unified auditing writes
-  nothing at all: copy the group, set `audit_trail` to `DB`, attach the copy and reboot once. The setup script places the
-  trail before that reboot, because a new location applies only to partitions made after it.
+  nothing at all: give the instance a parameter group of your own with `audit_trail` set to `DB` (a default group cannot be
+  changed or copied, so create one in the same family; copy a group of your own), attach it and reboot once. The setup
+  script places the trail before that reboot, because a new location applies only to partitions made after it.
 - **The probe's checks:** `container`, `platform`, `poll_view`, `audit_trail` (the session has an audit session ID),
   `views`, `partition`, `room`, `spillover`, `failed_signins`, `default_policies`, `level`, `profile`, `resource_limit`,
   `source_column`, `old_audit_settings`, `purge_job` and `password_expiry`, each `ok`, `warn` or `fail` with what to

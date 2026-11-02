@@ -179,7 +179,8 @@ public static class OraProbeChecks
         }
         return Fail("audit_trail", platform == "rds"
             ? $"this instance writes no audit record (AUDIT_TRAIL is {auditTrail ?? "unknown"}, and the agent's session has no audit session ID): "
-                + "copy its parameter group, set audit_trail to DB, attach the copy and reboot once"
+                + "give it a parameter group of your own with audit_trail set to DB (a default group cannot be changed or copied, "
+                + "so create one in the same family; copy a group of your own), attach it and reboot once"
             : $"this server writes no audit record (AUDIT_TRAIL is {auditTrail ?? "unknown"}, and the agent's session has no audit session ID): "
                 + "set audit_trail to DB (one restart of the database) or link the server with unified auditing");
     }

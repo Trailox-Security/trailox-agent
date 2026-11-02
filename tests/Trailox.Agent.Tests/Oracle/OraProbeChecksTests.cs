@@ -75,6 +75,7 @@ public class OraProbeChecksTests
         Assert.Equal("fail", check.Status);
         Assert.Contains("parameter group", check.Message);
         Assert.Contains("NONE", check.Message);
+        Assert.Contains("a default group cannot be changed or copied", check.Message);
         Assert.Equal("fail", OraProbeChecks.Trail("NONE", sessionId, "self_managed").Status);
         Assert.DoesNotContain("parameter group", OraProbeChecks.Trail("NONE", sessionId, "self_managed").Message);
     }
