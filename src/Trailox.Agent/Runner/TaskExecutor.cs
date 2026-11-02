@@ -43,7 +43,9 @@ public sealed class TaskExecutor
                 return true;
             }
 
-            var accepted = await _gateway.UploadChunkAsync(task.ChunkId, rows.Body, ct, rows.KeepAlive);
+            var accepted = task.PartBytes is > 0
+                ? await UploadPartsAsync(task, rows, ct)
+                : await _gateway.UploadChunkAsync(task.ChunkId, rows.Body, ct, rows.KeepAlive);
             _logger.LogInformation("endpoint {Alias}: {Stream} {Window} -> {Rows} rows accepted", alias, task.Stream, Describe(task), accepted.RowsAccepted);
             return true;
         }
@@ -122,6 +124,20 @@ public sealed class TaskExecutor
         }
     }
 
+    /// <summary>One read as several uploads to one chunk, one at a time. Only the last call completes the task (PROTOCOL.md section 4).</summary>
+    private async Task<ChunkAccepted> UploadPartsAsync(AgentTask task, RowStream rows, CancellationToken ct)
+    {
+        var limit = TimeSpan.FromSeconds(task.PartSeconds is > 0 ? task.PartSeconds.Value : AgentTask.DefaultPartSeconds);
+        var parts = new RowParts(rows.Body, task.PartBytes!.Value, limit, ct);
+        var sent = 0;
+        while (await parts.MoreAsync())
+        {
+            await _gateway.UploadChunkAsync(task.ChunkId, parts.Next(), ct, rows.KeepAlive, ++sent);
+            TaskHeartbeat.Beat();
+        }
+        return await _gateway.CompleteChunkAsync(task.ChunkId, sent, task.ReadTime.Millis, ct);
+    }
+
     /// <summary>The engine's own failure, directly or inside what the upload wrapped it in; null when there is none.</summary>
     internal static SourceException? SourceOf(Exception ex)
     {
@@ -145,7 +161,7 @@ public sealed class TaskExecutor
     {
         try
         {
-            await _gateway.FailChunkAsync(task.ChunkId, EndpointSession.Trim(message), ct, reason);
+            await _gateway.FailChunkAsync(task.ChunkId, EndpointSession.Trim(message), ct, reason, task.ReadTime.Millis);
         }
         catch (Exception ex) when (!IsShutdown(ex, ct) && ex is not GatewayException { IsUnauthorized: true })
         {

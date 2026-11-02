@@ -196,7 +196,7 @@ public class OraSqlTests
     }
 }
 
-/// <summary>Only one file may name the driver: a fallback then replaces that file and nothing else.</summary>
+/// <summary>Only one file may name the driver: another driver then replaces that file and nothing else.</summary>
 public class OraDriverSeamTests
 {
     private const string DriverFile = "OdpDriver.cs";

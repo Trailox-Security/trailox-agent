@@ -36,6 +36,9 @@ public sealed class OraFacts
     /// <summary>The objects the agent has no grant on, by the name a grant takes.</summary>
     public SortedSet<string> Unreadable { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>The objects that did not answer in time: nothing is known about them, a grant included.</summary>
+    public SortedSet<string> Slow { get; } = new(StringComparer.Ordinal);
+
     public bool? Partitioned { get; set; }
     public long? TrailRows { get; set; }
     public long? TrailBlocks { get; set; }
@@ -45,10 +48,7 @@ public sealed class OraFacts
     public IReadOnlyList<OraPartition> Partitions { get; set; } = Array.Empty<OraPartition>();
     public OraSpace? Space { get; set; }
 
-    /// <summary>What the trail grew by in the last 24 hours, as seen.</summary>
-    public long? GrownBytes { get; set; }
-
-    /// <summary>That growth projected to a day.</summary>
+    /// <summary>What the trail grew by in the last 24 hours, projected to a day.</summary>
     public long? GrowthBytesPerDay { get; set; }
     public bool? Spilled { get; set; }
     public bool SourceColumn { get; set; }
@@ -64,24 +64,12 @@ public sealed class OraFacts
 
 /// <summary>
 /// What the probe tells the customer to fix: each check is ok, warn or fail, with what to change. All of it decides on
-/// plain values (<see cref="OraFacts"/>). 🔴 A FAILED CHECK REFUSES THE SOURCE: <see cref="OraSource"/> then runs no poll, so
-/// onboarding stops before the polls that would cost the customer, or that could never return a record.
+/// plain values (<see cref="OraFacts"/>). 🔴 A FAILED CHECK REFUSES THE SOURCE: <see cref="OraSource"/> then runs no poll,
+/// which only a source that could never return a record must meet. The size of a day fails nothing: a busy trail is read
+/// less often.
 /// </summary>
 public static class OraProbeChecks
 {
-    /// <summary>
-    /// The most records a day the agent reads. Each poll reads the whole day's partition, and past what the server keeps in
-    /// its cache a poll stops taking seconds and starts holding the disk, so every statement around it slows. A server with
-    /// more memory caches more of the day, so a limit from a small server is the cautious one.
-    /// </summary>
-    public const long MaxRecordsPerDay = 2_000_000;
-
-    /// <summary>What one record takes: a record with a long statement text.</summary>
-    public const int LargestRecordBytes = 1040;
-
-    /// <summary>What one record takes: a short one. Sign-ins take less, but a trail of those alone is not one this limit is near.</summary>
-    public const int SmallestRecordBytes = 650;
-
     /// <summary>The days the trail's tablespace must hold: the longest catch-up and one more.</summary>
     public const int RoomDays = 8;
 
@@ -90,6 +78,9 @@ public static class OraProbeChecks
     public const string LevelLogsOnly = "logs_only", LevelPartial = "partial", LevelSelective = "selective", LevelFull = "full";
 
     private static readonly string[] BasePolicies = { "TRAILOX_LOGON", "TRAILOX_DDL", "TRAILOX_ANYPRIV", "TRAILOX_DATAPUMP" };
+
+    /// <summary>The policies known to write a failed sign-in: the two an installation brings, by release, and ours.</summary>
+    private static readonly string[] FailedSignInPolicies = { "ORA_LOGON_FAILURES", "ORA_LOGIN_LOGOUT", "TRAILOX_LOGON" };
 
     private static readonly Regex RdsHost = new(@"\.rds\.amazonaws\.com(\.cn)?\z", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
@@ -105,12 +96,12 @@ public static class OraProbeChecks
         yield return Platform(f.Kind, f.Host, f.RdsAdmin);
         yield return PollView(f.PollReadable, f.OwnUser);
         yield return Trail(f.Parameters.GetValueOrDefault("audit_trail"), f.AuditSessionId, Platform(f.Host, f.RdsAdmin));
-        yield return Day(f.Space != null, f.GrownBytes, f.GrowthBytesPerDay);
-        yield return Views(f.Unreadable, f.OwnUser);
+        yield return Views(f.Unreadable, f.Slow, f.OwnUser);
         yield return Partition(f);
         yield return Room(f);
         yield return Spillover(f.Spilled);
-        yield return DefaultPolicies(f.PoliciesRead, f.Policies, f.Major);
+        yield return FailedSignIns(f.PoliciesRead, f.Policies, f.Major);
+        yield return DefaultPolicies(f.PoliciesRead, f.Policies);
         yield return Level(f.PoliciesRead, f.Policies, f.PolicyObjects.Count);
         yield return Profile(f.Limits);
         yield return ResourceLimit(f.Parameters.GetValueOrDefault("resource_limit"));
@@ -124,7 +115,6 @@ public static class OraProbeChecks
     public static OracleCaps Caps(OraFacts f, IReadOnlyList<OracleCheck> checks)
     {
         var today = Today(f);
-        var growth = f.GrowthBytesPerDay;
         return new OracleCaps
         {
             Platform = Platform(f.Host, f.RdsAdmin),
@@ -145,9 +135,7 @@ public static class OraProbeChecks
             TodayTablespace = TrailTablespace(f) ?? "",
             ConfiguredTablespace = f.ConfiguredTablespace ?? "",
             RoomBytes = f.Space?.RoomBytes,
-            GrowthBytesPerDay = growth,
-            DayRecordsEstimate = growth / LargestRecordBytes,
-            DayRecordsLimit = MaxRecordsPerDay,
+            GrowthBytesPerDay = f.GrowthBytesPerDay,
             Spilled = f.Spilled,
             SourceColumn = f.SourceColumn,
             ObservedLevel = f.PoliciesRead ? ObservedLevel(f.Policies) : "",
@@ -196,40 +184,23 @@ public static class OraProbeChecks
                 + "set audit_trail to DB (one restart of the database) or link the server with unified auditing");
     }
 
-    /// <summary>
-    /// The day against <see cref="MaxRecordsPerDay"/>. 🔴 Only growth that happened refuses a source, and only when even the
-    /// largest record size puts it over: bytes are what a poll reads. A projection, or the smallest size, can only warn.
-    /// </summary>
-    /// <param name="measurable">The tablespace's size can be read: without that nothing holds the limit, and that must not read as fine.</param>
-    public static OracleCheck Day(bool measurable, long? grownBytes, long? projectedBytesPerDay)
+    /// <param name="unreadable">The views the server refused: a grant fixes those.</param>
+    /// <param name="slow">The views that did not answer in time: no grant fixes those, and a later probe may read them.</param>
+    /// <param name="user">The agent's user.</param>
+    public static OracleCheck Views(IReadOnlyCollection<string> unreadable, IReadOnlyCollection<string> slow, string user)
     {
-        if (!measurable)
+        var problems = new List<string>();
+        if (unreadable.Count > 0)
         {
-            return Warn("day_limit", "the trail's growth cannot be measured, so nothing holds the limit on the records a day: "
-                + "grant SELECT on DBA_DATA_FILES and DBA_FREE_SPACE");
+            problems.Add($"the agent cannot read {string.Join(", ", unreadable)}, so the checks that use them say nothing: "
+                + $"grant SELECT on each to {user} (on RDS, through rdsadmin.rdsadmin_util.grant_sys_object)");
         }
-        if (grownBytes is not { } grown || projectedBytesPerDay is not { } projected)
+        if (slow.Count > 0)
         {
-            return Ok("day_limit", "no measure yet: it takes two probes an hour apart, and a new trail's polls are cheap");
+            problems.Add($"{string.Join(", ", slow)} did not answer in time, so the checks that use them say nothing until a later probe");
         }
-        if (grown / LargestRecordBytes > MaxRecordsPerDay)
-        {
-            return Fail("day_limit", $"in the last day the trail grew {Gb(grown)}, about {grown / LargestRecordBytes:N0} to {grown / SmallestRecordBytes:N0} records, "
-                + $"and the most the agent reads is {MaxRecordsPerDay:N0}. Each poll reads the whole day, so at this size it would slow this database. "
-                + "Audit less (name tables instead of auditing every statement, or leave out application accounts): "
-                + "the source comes back when a day's growth is under the limit");
-        }
-        var high = projected / SmallestRecordBytes;
-        return high > MaxRecordsPerDay
-            ? Warn("day_limit", $"at its current rate the trail grows about {Gb(projected)} a day, up to about {high:N0} records: near the "
-                + $"{MaxRecordsPerDay:N0} past which the probe refuses this source")
-            : Ok("day_limit", $"the trail grows about {Gb(projected)} a day, and the most the agent reads is {MaxRecordsPerDay:N0} records");
+        return problems.Count == 0 ? Ok("views", "the agent reads every view it uses") : Warn("views", string.Join("; ", problems));
     }
-
-    public static OracleCheck Views(IReadOnlyCollection<string> unreadable, string user) => unreadable.Count == 0
-        ? Ok("views", "the agent reads every view it uses")
-        : Warn("views", $"the agent cannot read {string.Join(", ", unreadable)}, so the checks that use them say nothing: "
-            + $"grant SELECT on each to {user} (on RDS, through rdsadmin.rdsadmin_util.grant_sys_object)");
 
     /// <summary>The partition that holds today's records; null when the day's first record has not opened it yet.</summary>
     public static OraPartition? Today(OraFacts f) =>
@@ -286,13 +257,12 @@ public static class OraProbeChecks
         var problems = new List<string>();
         if (tablespace == "SYSAUX")
         {
-            problems.Add("the trail is in SYSAUX: when SYSAUX fills, every record goes to spillover files and every audited statement slows about 100 times. "
+            problems.Add("the trail is in SYSAUX: when SYSAUX fills, every record goes to spillover files and every audited statement slows sharply. "
                 + "Give it a tablespace of its own with DBMS_AUDIT_MGMT.SET_AUDIT_TRAIL_LOCATION");
         }
         if (f.GrowthBytesPerDay is { } growth and > 0 && space.RoomBytes < RoomDays * growth)
         {
-            problems.Add($"{tablespace} has room for {Gb(space.RoomBytes)} and the trail grows about {Gb(growth)} a day: "
-                + $"it needs {RoomDays} days, or a purge job that keeps fewer");
+            problems.Add($"{tablespace} has room for {Gb(space.RoomBytes)} and the trail grows about {Gb(growth)} a day: it needs room for {RoomDays} days");
         }
         return problems.Count == 0 ? Ok("room", $"{tablespace} has room for {Gb(space.RoomBytes)}") : Warn("room", string.Join("; ", problems));
     }
@@ -305,26 +275,42 @@ public static class OraProbeChecks
         false => Ok("spillover", "no record in a spillover file"),
     };
 
-    /// <summary>The policies an installation enables by itself: an upgraded database has neither, and from 23ai the failures' has another name.</summary>
-    public static OracleCheck DefaultPolicies(bool read, IReadOnlyList<OraclePolicy> policies, int major)
+    /// <summary>
+    /// Whether a failed sign-in reaches the trail. No record says so, because a quiet trail looks the same as a deaf one: only
+    /// the enabled policies can tell. An upgraded database has neither of the two an installation enables, and from 23ai the
+    /// failures' has another name.
+    /// </summary>
+    public static OracleCheck FailedSignIns(bool read, IReadOnlyList<OraclePolicy> policies, int major)
+    {
+        if (!read)
+        {
+            return Warn("failed_signins", "the enabled policies cannot be read, so it cannot be told whether failed sign-ins are audited");
+        }
+        var enabled = policies.Where(p => FailedSignInPolicies.Contains(p.Name, StringComparer.Ordinal) && p.Failure == "YES").ToList();
+        var fix = $"run AUDIT POLICY {(major >= 23 ? "ORA_LOGIN_LOGOUT" : "ORA_LOGON_FAILURES")} WHENEVER NOT SUCCESSFUL";
+        if (enabled.Count == 0)
+        {
+            return Warn("failed_signins", $"no policy the agent knows audits failed sign-ins, so they may never reach the trail: {fix}");
+        }
+        return enabled.FirstOrDefault(CoversEveryone) is { } all
+            ? Ok("failed_signins", $"failed sign-ins are audited ({all.Name})")
+            : Warn("failed_signins", $"failed sign-ins are audited only for {string.Join(", ", enabled.Select(p => p.EntityName))}: {fix}");
+    }
+
+    /// <summary>Enabled for all users, or for all but those it names.</summary>
+    private static bool CoversEveryone(OraclePolicy policy) =>
+        policy.EntityName == "ALL USERS" || policy.EnabledOption.StartsWith("EXCEPT", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The policy for security changes that an installation enables by itself: an upgraded database does not have it.</summary>
+    public static OracleCheck DefaultPolicies(bool read, IReadOnlyList<OraclePolicy> policies)
     {
         if (!read)
         {
             return Warn("default_policies", "the enabled policies cannot be read");
         }
-        var failures = major >= 23 ? "ORA_LOGIN_LOGOUT" : "ORA_LOGON_FAILURES";
-        var missing = new List<string>();
-        if (!policies.Any(p => p.Name is "ORA_LOGON_FAILURES" or "ORA_LOGIN_LOGOUT"))
-        {
-            missing.Add($"AUDIT POLICY {failures} WHENEVER NOT SUCCESSFUL");
-        }
-        if (!policies.Any(p => p.Name == "ORA_SECURECONFIG"))
-        {
-            missing.Add("AUDIT POLICY ORA_SECURECONFIG");
-        }
-        return missing.Count == 0
-            ? Ok("default_policies", "failed sign-ins and security changes are audited")
-            : Warn("default_policies", $"run {string.Join("; ", missing)}: until then those events are not in the trail");
+        return policies.Any(p => p.Name == "ORA_SECURECONFIG")
+            ? Ok("default_policies", "security changes are audited")
+            : Warn("default_policies", "run AUDIT POLICY ORA_SECURECONFIG: until then those events are not in the trail");
     }
 
     /// <summary>Which audit level the enabled TRAILOX_* policies make up.</summary>
@@ -407,10 +393,11 @@ public static class OraProbeChecks
             : Ok("old_audit_settings", "no old audit setting overlaps the policies");
     }
 
+    /// <summary>Whether a job purges the trail. It is reported, never a warning: whether to purge is the customer's call.</summary>
     public static OracleCheck PurgeJob(bool? present) => present switch
     {
         null => Warn("purge_job", "the trail's purge jobs cannot be read"),
-        false => Warn("purge_job", "nothing purges the unified trail, so it grows until its tablespace is full: run the setup script's purge step"),
+        false => Ok("purge_job", "no job purges the unified trail"),
         true => Ok("purge_job", "a job purges the unified trail"),
     };
 

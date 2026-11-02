@@ -34,12 +34,15 @@ public class OraProbeChecksTests
         Space = new OraSpace(10_000_000_000, 100_000_000_000, 1_000_000_000),
         Spilled = false,
         PoliciesRead = true,
-        Policies = new List<OraclePolicy> { new() { Name = "ORA_LOGON_FAILURES" }, new() { Name = "ORA_SECURECONFIG" } },
+        Policies = new List<OraclePolicy> { Failures(), new() { Name = "ORA_SECURECONFIG" } },
         Limits = new Dictionary<string, string?> { ["SESSIONS_PER_USER"] = "2", ["CPU_PER_CALL"] = "6000", ["IDLE_TIME"] = "10", ["LOGICAL_READS_PER_CALL"] = "300000" },
         OldAuditSettings = 0,
         PurgeJob = true,
         Parameters = { ["audit_trail"] = "DB", ["resource_limit"] = "TRUE" },
     };
+
+    private static OraclePolicy Failures(string name = "ORA_LOGON_FAILURES", string failure = "YES", string option = "BY USER", string entity = "ALL USERS") =>
+        new() { Name = name, Failure = failure, EnabledOption = option, EntityName = entity };
 
     private static OracleCheck Check(OraFacts f, string name) => Assert.Single(OraProbeChecks.All(f), c => c.Name == name);
 
@@ -90,42 +93,31 @@ public class OraProbeChecksTests
         Assert.Contains("DBA_PART_TABLES", Check(f, "views").Message);
     }
 
+    /// <summary>No grant helps a view that was too slow, so the message must not send the customer to look for one.</summary>
     [Fact]
-    public void The_day_fails_when_a_days_growth_seen_is_above_the_limit_with_the_limit_and_what_to_audit_less()
-    {
-        var grown = (OraProbeChecks.MaxRecordsPerDay + 1) * OraProbeChecks.LargestRecordBytes;
-        var check = OraProbeChecks.Day(true, grown, grown);
-        Assert.Equal("fail", check.Status);
-        Assert.Contains(OraProbeChecks.MaxRecordsPerDay.ToString("N0"), check.Message);
-        Assert.Contains(" GB", check.Message);
-        Assert.Contains("Audit less", check.Message);
-    }
-
-    /// <summary>A busy hour times 24 is no day: a customer who does a day's work in eight hours would be refused every morning.</summary>
-    [Fact]
-    public void A_projection_alone_only_warns()
-    {
-        var projected = (OraProbeChecks.MaxRecordsPerDay + 1) * OraProbeChecks.LargestRecordBytes;
-        Assert.Equal("warn", OraProbeChecks.Day(true, projected / 24, projected).Status);
-    }
-
-    [Fact]
-    public void The_day_warns_near_the_limit_and_passes_under_it()
-    {
-        var near = (OraProbeChecks.MaxRecordsPerDay + 1) * OraProbeChecks.SmallestRecordBytes;
-        Assert.Equal("warn", OraProbeChecks.Day(true, near, near).Status);
-        var under = OraProbeChecks.MaxRecordsPerDay / 2 * OraProbeChecks.SmallestRecordBytes;
-        Assert.Equal("ok", OraProbeChecks.Day(true, under, under).Status);
-        Assert.Equal("ok", OraProbeChecks.Day(true, null, null).Status);
-    }
-
-    [Fact]
-    public void A_day_that_cannot_be_measured_warns_and_never_reads_as_fine()
+    public void A_view_that_did_not_answer_warns_with_no_grant_to_give()
     {
         var f = Facts();
-        f.Space = null;
-        Assert.Equal("warn", Check(f, "day_limit").Status);
-        Assert.Contains("DBA_FREE_SPACE", Check(f, "day_limit").Message);
+        f.Slow.Add("DBA_FREE_SPACE");
+        var check = Check(f, "views");
+        Assert.Equal("warn", check.Status);
+        Assert.Contains("DBA_FREE_SPACE did not answer in time", check.Message);
+        Assert.DoesNotContain("grant", check.Message, StringComparison.OrdinalIgnoreCase);
+
+        f.Unreadable.Add("DBA_PART_TABLES");
+        Assert.Contains("grant SELECT", Check(f, "views").Message);
+        Assert.Contains("DBA_FREE_SPACE did not answer in time", Check(f, "views").Message);
+    }
+
+    /// <summary>Size is no reason to refuse: a busy trail is read less often. Only a source that could never return a record fails.</summary>
+    [Fact]
+    public void The_size_of_a_day_fails_no_check()
+    {
+        var f = Facts();
+        f.GrowthBytesPerDay = 1_000_000_000_000;
+        var checks = OraProbeChecks.All(f).ToList();
+        Assert.DoesNotContain(checks, c => c.Status == "fail");
+        Assert.DoesNotContain(checks, c => c.Name == "day_limit");
     }
 
     [Fact]
@@ -145,6 +137,7 @@ public class OraProbeChecksTests
         f.GrowthBytesPerDay = 1_000_000_000;
         Assert.Equal("warn", Check(f, "room").Status);
         Assert.Contains("8 days", Check(f, "room").Message);
+        Assert.DoesNotContain("purge", Check(f, "room").Message, StringComparison.OrdinalIgnoreCase);
         f.GrowthBytesPerDay = 100_000_000;
         Assert.Equal("ok", Check(f, "room").Status);
     }
@@ -216,20 +209,52 @@ public class OraProbeChecksTests
     }
 
     [Fact]
-    public void Default_policies_missing_warn_with_the_two_statements()
+    public void The_policy_for_security_changes_missing_warns_with_its_statement()
     {
-        var check = OraProbeChecks.DefaultPolicies(true, Array.Empty<OraclePolicy>(), 19);
+        var check = OraProbeChecks.DefaultPolicies(true, Array.Empty<OraclePolicy>());
         Assert.Equal("warn", check.Status);
-        Assert.Contains("AUDIT POLICY ORA_LOGON_FAILURES WHENEVER NOT SUCCESSFUL", check.Message);
         Assert.Contains("AUDIT POLICY ORA_SECURECONFIG", check.Message);
+        Assert.Equal("warn", OraProbeChecks.DefaultPolicies(false, Array.Empty<OraclePolicy>()).Status);
+    }
+
+    [Theory]
+    [InlineData("ORA_LOGON_FAILURES", "BY USER", "ALL USERS")]
+    [InlineData("ORA_LOGIN_LOGOUT", "BY USER", "ALL USERS")]
+    [InlineData("TRAILOX_LOGON", "EXCEPT USER", "TRAILOX_MONITOR")]
+    public void Failed_sign_ins_are_audited_when_a_policy_covers_everyone_for_failures(string name, string option, string entity)
+    {
+        var check = OraProbeChecks.FailedSignIns(true, new[] { Failures(name, option: option, entity: entity) }, 19);
+        Assert.Equal("ok", check.Status);
+        Assert.Contains(name, check.Message);
+    }
+
+    /// <summary>The constant "ok" this check replaces said yes to all three.</summary>
+    [Theory]
+    [InlineData("no policy", "OTHER_POLICY", "YES", "BY USER", "ALL USERS")]
+    [InlineData("no policy", "ORA_LOGON_FAILURES", "NO", "BY USER", "ALL USERS")]
+    [InlineData("only for APP_ADMIN", "ORA_LOGON_FAILURES", "YES", "BY USER", "APP_ADMIN")]
+    public void Failed_sign_ins_that_may_not_reach_the_trail_warn_with_the_statement(string says, string name, string failure, string option, string entity)
+    {
+        var check = OraProbeChecks.FailedSignIns(true, new[] { Failures(name, failure, option, entity) }, 19);
+        Assert.Equal("warn", check.Status);
+        Assert.Contains(says, check.Message);
+        Assert.Contains("AUDIT POLICY ORA_LOGON_FAILURES WHENEVER NOT SUCCESSFUL", check.Message);
     }
 
     [Fact]
     public void From_23ai_the_failures_policy_has_another_name()
     {
-        var policies = new[] { new OraclePolicy { Name = "ORA_LOGIN_LOGOUT" }, new OraclePolicy { Name = "ORA_SECURECONFIG" } };
-        Assert.Equal("ok", OraProbeChecks.DefaultPolicies(true, policies, 23).Status);
-        Assert.Contains("ORA_LOGIN_LOGOUT", OraProbeChecks.DefaultPolicies(true, Array.Empty<OraclePolicy>(), 23).Message);
+        Assert.Equal("ok", OraProbeChecks.FailedSignIns(true, new[] { Failures("ORA_LOGIN_LOGOUT") }, 23).Status);
+        Assert.Contains("AUDIT POLICY ORA_LOGIN_LOGOUT WHENEVER NOT SUCCESSFUL", OraProbeChecks.FailedSignIns(true, Array.Empty<OraclePolicy>(), 23).Message);
+    }
+
+    /// <summary>An empty list after a refused read is not "nothing audits them", and no "ok" may come from it either.</summary>
+    [Fact]
+    public void Policies_that_cannot_be_read_say_nothing_about_failed_sign_ins()
+    {
+        var check = OraProbeChecks.FailedSignIns(false, Array.Empty<OraclePolicy>(), 19);
+        Assert.Equal("warn", check.Status);
+        Assert.Contains("cannot be read", check.Message);
     }
 
     [Theory]
@@ -275,10 +300,14 @@ public class OraProbeChecksTests
         Assert.Equal("warn", OraProbeChecks.OldSettings("FALSE", null).Status);
     }
 
+    /// <summary>Whether to purge is the customer's call, so no job is reported and never pressed on them.</summary>
     [Fact]
-    public void No_purge_job_warns()
+    public void A_purge_job_is_reported_and_its_absence_is_no_warning()
     {
-        Assert.Equal("warn", OraProbeChecks.PurgeJob(false).Status);
+        Assert.Equal("ok", OraProbeChecks.PurgeJob(false).Status);
+        Assert.Contains("no job", OraProbeChecks.PurgeJob(false).Message);
+        Assert.DoesNotContain("setup", OraProbeChecks.PurgeJob(false).Message);
+        Assert.Equal("ok", OraProbeChecks.PurgeJob(true).Status);
         Assert.Equal("warn", OraProbeChecks.PurgeJob(null).Status);
     }
 
@@ -313,7 +342,7 @@ public class OraProbeChecksTests
         f.AuditSessionId = "0";
         f.Spilled = true;
         f.Limits = null;
-        f.GrowthBytesPerDay = f.GrownBytes = long.MaxValue / 2;
+        f.GrowthBytesPerDay = long.MaxValue / 2;
         foreach (var check in OraProbeChecks.All(f))
         {
             Assert.Matches("^[a-z][a-z0-9_]{0,59}$", check.Name);
@@ -349,14 +378,12 @@ public class OraProbeChecksTests
         var f = Facts();
         f.Policies.Add(new OraclePolicy { Name = "TRAILOX_LOGON", EnabledOption = "EXCEPT", EntityName = "TRAILOX_MONITOR" });
         f.GrowthBytesPerDay = 1_300_000_000;
-        f.GrownBytes = 1_300_000_000;
         var caps = OraProbeChecks.Caps(f, OraProbeChecks.All(f).ToList());
         Assert.Equal(("rds", "Standard Edition 2", "LEDGER", "mixed"), (caps.Platform, caps.Edition, caps.Container, caps.UnifiedMode));
         Assert.Equal(("TRAILOX_MONITOR", "trailox-agent.dll"), (caps.OwnUser, caps.OwnProgram));
         Assert.Equal((Now - DateTime.UnixEpoch).Ticks / 10, caps.ProbedAtMicros);
         Assert.Equal(("SYS_P241", "TRAILOX_AUDIT"), (caps.TodayPartition, caps.TodayTablespace));
-        Assert.Equal(1_250_000, caps.DayRecordsEstimate);
-        Assert.Equal(OraProbeChecks.MaxRecordsPerDay, caps.DayRecordsLimit);
+        Assert.Equal(1_300_000_000, caps.GrowthBytesPerDay);
         Assert.Equal("TRAILOX_LOGON", Assert.Single(caps.Policies).Name);
     }
 }

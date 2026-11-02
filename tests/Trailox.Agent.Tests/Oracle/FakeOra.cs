@@ -12,9 +12,15 @@ internal sealed class FakeOra : IOraDriver
     /// <summary>Thrown by the next opens, as a server that refuses the sign-in.</summary>
     public Exception? OpenFails { get; set; }
 
+    /// <summary>Closing a session never finishes, as on a connection still held by a call.</summary>
+    public bool CloseHangs { get; set; }
+
     public List<string> Statements { get; } = new();
 
     public List<IReadOnlyList<OraBind>> Binds { get; } = new();
+
+    /// <summary>The limit each query came with, in the order of <see cref="Binds"/>.</summary>
+    public List<TimeSpan?> Limits { get; } = new();
 
     public int OpenSessions { get; private set; }
 
@@ -51,10 +57,11 @@ internal sealed class FakeOra : IOraDriver
             return Task.CompletedTask;
         }
 
-        public Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct)
+        public Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct, TimeSpan? limit = null)
         {
             _fake.Statements.Add(sql);
             _fake.Binds.Add(binds);
+            _fake.Limits.Add(limit);
             if (!_fake._answers.TryGetValue(sql, out var answer))
             {
                 return Task.FromResult<IOraRows>(new FakeRows(Array.Empty<object?[]>()));
@@ -65,7 +72,7 @@ internal sealed class FakeOra : IOraDriver
         public ValueTask DisposeAsync()
         {
             _fake.OpenSessions--;
-            return ValueTask.CompletedTask;
+            return _fake.CloseHangs ? new ValueTask(Task.Delay(Timeout.Infinite)) : ValueTask.CompletedTask;
         }
     }
 }
@@ -90,6 +97,12 @@ internal sealed class FakeRows : IOraRows
 
     public bool DeafToToken { get; init; }
 
+    /// <summary>Closing these rows never finishes, as on a connection still held by a call.</summary>
+    public bool DisposeHangs { get; init; }
+
+    /// <summary>When the rows run out the fetch takes this long, and then the read ends.</summary>
+    public TimeSpan EndsAfter { get; init; }
+
     /// <summary>Rows read so far.</summary>
     public int Read { get; private set; }
 
@@ -98,9 +111,14 @@ internal sealed class FakeRows : IOraRows
         ct.ThrowIfCancellationRequested();
         if (!_rows.MoveNext())
         {
+            if (EndsAfter > TimeSpan.Zero)
+            {
+                return Task.Delay(EndsAfter, ct).ContinueWith(_ => false, ct, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+            }
             if (HangsAtEnd)
             {
-                return Task.Delay(Timeout.Infinite, DeafToToken ? CancellationToken.None : ct).ContinueWith(_ => false, ct, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+                var heard = DeafToToken ? CancellationToken.None : ct;
+                return Task.Delay(Timeout.Infinite, heard).ContinueWith(_ => false, heard, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
             }
             return FailsAtEnd != null ? throw FailsAtEnd : Task.FromResult(false);
         }
@@ -117,6 +135,6 @@ internal sealed class FakeRows : IOraRows
     public ValueTask DisposeAsync()
     {
         _rows.Dispose();
-        return ValueTask.CompletedTask;
+        return DisposeHangs ? new ValueTask(Task.Delay(Timeout.Infinite)) : ValueTask.CompletedTask;
     }
 }

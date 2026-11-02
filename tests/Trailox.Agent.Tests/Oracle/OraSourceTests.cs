@@ -335,6 +335,84 @@ public class OraSourceTests
         Assert.True(ex.TooLargeAtSource);
     }
 
+    /// <summary>The task's limit reaches the audit read, and no other statement changes with it.</summary>
+    [Fact]
+    public async Task A_tasks_read_limit_holds_the_audit_read_and_nothing_else()
+    {
+        var fake = new FakeOra();
+        fake.Answer(OraSql.SourceColumn);
+        fake.Answer(OraSql.Poll(text: true, source: false));
+        var task = Task(Streams.OraAudit);
+        task.ReadLimitSeconds = 300;
+
+        await RowsAsync((await new OraSource(Endpoint(), fake, () => Now).OpenAsync(task, CancellationToken.None))!);
+
+        Assert.Equal(new TimeSpan?[] { null, TimeSpan.FromMinutes(5) }, fake.Limits);
+    }
+
+    /// <summary>An older gateway sends no limit and changes nothing, and no value can take away the limit's bound.</summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(0, null)]
+    [InlineData(-1, null)]
+    [InlineData(1800, 1800)]
+    [InlineData(int.MaxValue, OraSql.MaxReadLimitSeconds)]
+    public void The_read_limit_comes_from_the_task_within_reason(int? seconds, int? limit) =>
+        Assert.Equal(limit is { } set ? TimeSpan.FromSeconds(set) : null, OraSql.ReadLimit(seconds));
+
+    /// <summary>The bound above the seam and the driver's own timeout must move together, or the shorter one still stops the read.</summary>
+    [Theory]
+    [InlineData(null, OraSql.CommandTimeoutSeconds)]
+    [InlineData(1800.0, 1800)]
+    [InlineData(0.2, 1)]
+    public void The_drivers_timeout_follows_the_limit(double? limit, int seconds) =>
+        Assert.Equal(seconds, OdpDriver.TimeoutSeconds(limit is { } set ? TimeSpan.FromSeconds(set) : null));
+
+    [Fact]
+    public async Task A_read_limit_longer_than_the_sessions_lets_a_long_fetch_finish()
+    {
+        FakeOra Slow()
+        {
+            var fake = new FakeOra();
+            fake.Answer(OraSql.SourceColumn);
+            fake.Answer(OraSql.Poll(text: true, source: false), _ => new FakeRows(Array.Empty<object?[]>()) { EndsAfter = TimeSpan.FromMilliseconds(300) });
+            return fake;
+        }
+        var callLimit = TimeSpan.FromMilliseconds(100);
+        var task = Task(Streams.OraAudit);
+        task.ReadLimitSeconds = 30;
+
+        var rows = await RowsAsync((await new OraSource(Endpoint(), Slow(), () => Now, callLimit).OpenAsync(task, CancellationToken.None))!);
+
+        Assert.Single(rows);
+        var stopped = await Assert.ThrowsAsync<SourceException>(() => new OraSource(Endpoint(), Slow(), () => Now, callLimit).OpenAsync(Task(Streams.OraAudit), CancellationToken.None));
+        Assert.True(stopped.TooLargeAtSource);
+    }
+
+    /// <summary>The time reaches the task whether the read finished or a limit stopped it before its first row.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_poll_counts_what_it_waited_on_the_database(bool stopped)
+    {
+        var fake = new FakeOra();
+        fake.Answer(OraSql.SourceColumn);
+        fake.Answer(OraSql.Poll(text: true, source: false), _ => new FakeRows(Array.Empty<object?[]>()) { EndsAfter = TimeSpan.FromMilliseconds(200) });
+        var source = new OraSource(Endpoint(), fake, () => Now, TimeSpan.FromMilliseconds(stopped ? 100 : 2000));
+        var task = Task(Streams.OraAudit);
+
+        if (stopped)
+        {
+            await Assert.ThrowsAsync<SourceException>(() => source.OpenAsync(task, CancellationToken.None));
+        }
+        else
+        {
+            await RowsAsync((await source.OpenAsync(task, CancellationToken.None))!);
+        }
+
+        Assert.True(task.ReadTime.Millis >= (stopped ? 90 : 190), $"{task.ReadTime.Millis} ms");
+    }
+
     /// <summary>The limit is on each call: a long window of quick fetches is no reason to stop.</summary>
     [Fact]
     public async Task A_long_read_of_quick_fetches_runs_past_the_limit()
@@ -575,7 +653,117 @@ public class OraSourceTests
         var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
 
         Assert.Contains("DBA_FREE_SPACE", Assert.Single(caps.Oracle!.Checks, c => c.Name == "views").Message);
-        Assert.Equal("warn", Assert.Single(caps.Oracle.Checks, c => c.Name == "day_limit").Status);
+        Assert.Equal("warn", Assert.Single(caps.Oracle.Checks, c => c.Name == "room").Status);
+    }
+
+    private static FakeRows Hangs(bool deaf = false) => new(Array.Empty<object?[]>()) { HangsAtEnd = true, DeafToToken = deaf };
+
+    private static OraSource Bounded(FakeOra fake) => new(Endpoint(), fake, () => Now, TimeSpan.FromMilliseconds(100));
+
+    /// <summary>A slow optional view must not cost the source its polls, whether the driver stops at the limit or not.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_optional_read_that_hangs_fails_nothing_and_is_named_as_slow(bool deaf)
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.TablespaceFree, _ => Hangs(deaf));
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        var views = Assert.Single(caps.Oracle!.Checks, c => c.Name == "views");
+        Assert.Contains("DBA_FREE_SPACE", views.Message);
+        Assert.Contains("did not answer in time", views.Message);
+        Assert.DoesNotContain(caps.Oracle.Checks, c => c.Status == "fail");
+    }
+
+    /// <summary>The profile's limits stop a read as a time limit does: no grant would help, so the message must not ask for one.</summary>
+    [Theory]
+    [InlineData(2393)]
+    [InlineData(2395)]
+    public async Task An_optional_read_the_profile_stopped_is_slow_and_no_missing_grant(int number)
+    {
+        var fake = Probed();
+        fake.Fails(OraSql.TablespaceFree, number);
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        var views = Assert.Single(caps.Oracle!.Checks, c => c.Name == "views").Message;
+        Assert.Contains("DBA_FREE_SPACE did not answer in time", views);
+        Assert.DoesNotContain("grant", views, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The reason must reach the report even when nothing on that connection can be closed.</summary>
+    [Fact]
+    public async Task A_read_stopped_on_a_connection_that_will_not_close_still_says_why()
+    {
+        var fake = new FakeOra { CloseHangs = true };
+        fake.Answer(OraSql.SourceColumn);
+        fake.Answer(OraSql.Poll(text: true, source: false), _ => new FakeRows(Array.Empty<object?[]>()) { HangsAtEnd = true, DeafToToken = true, DisposeHangs = true });
+        var source = new OraSource(Endpoint(), fake, () => Now, TimeSpan.FromMilliseconds(100));
+
+        var open = source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None);
+        var stopped = await Assert.ThrowsAsync<SourceException>(() => open.WaitAsync(TimeSpan.FromSeconds(20)));
+
+        Assert.True(stopped.TooLargeAtSource);
+    }
+
+    /// <summary>A stopped call that ended leaves the session as it was, so the probe reads the rest.</summary>
+    [Fact]
+    public async Task The_reads_after_a_stopped_read_go_on()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.TablespaceFree, _ => Hangs());
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        Assert.True(caps.Oracle!.PoliciesRead);
+        Assert.Equal("ok", Assert.Single(caps.Oracle.Checks, c => c.Name == "profile").Status);
+    }
+
+    /// <summary>A stopped call that never ended must not make each later read wait out its limit on the same connection.</summary>
+    [Fact]
+    public async Task The_reads_after_a_call_that_will_not_stop_fail_at_once_and_are_named_too()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.TablespaceFree, _ => Hangs(deaf: true));
+        fake.Answer(OraSql.SpillAny, _ => Hangs());
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        var views = Assert.Single(caps.Oracle!.Checks, c => c.Name == "views").Message;
+        Assert.Contains("V_$UNIFIED_AUDIT_TRAIL", views);
+        Assert.Contains("AUDIT_UNIFIED_ENABLED_POLICIES", views);
+        Assert.DoesNotContain(OraSql.SpillAny, fake.Statements);
+    }
+
+    /// <summary>Only a refusal says the grant is missing. A read that took too long must not refuse a source that has it.</summary>
+    [Fact]
+    public async Task A_poll_view_read_that_hangs_refuses_nothing()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.PollViewReadable, _ => Hangs());
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        Assert.Equal("ok", Assert.Single(caps.Oracle!.Checks, c => c.Name == "poll_view").Status);
+        Assert.Contains("UNIFIED_AUDIT_TRAIL did not answer in time", Assert.Single(caps.Oracle.Checks, c => c.Name == "views").Message);
+    }
+
+    /// <summary>The answer holds for the life of the process, so a read that told nothing must not settle it.</summary>
+    [Fact]
+    public async Task A_source_column_read_that_hangs_is_asked_again_by_the_next_poll()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.SourceColumn, _ => Hangs());
+        var source = Bounded(fake);
+        await source.ProbeAsync(CancellationToken.None);
+
+        fake.Answer(OraSql.SourceColumn, new object?[] { 1L });
+        fake.Answer(OraSql.Poll(text: true, source: true));
+        await RowsAsync((await source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None))!);
+
+        Assert.Contains(OraSql.Poll(text: true, source: true), fake.Statements);
     }
 
     [Fact]
@@ -588,16 +776,30 @@ public class OraSourceTests
     }
 
     [Theory]
-    [InlineData("ENABLED", "ok")]
-    [InlineData("DISABLED", "warn")]
-    public async Task A_disabled_purge_job_is_no_purge_job(string status, string check)
+    [InlineData("ENABLED", "a job purges")]
+    [InlineData("DISABLED", "no job purges")]
+    public async Task A_disabled_purge_job_is_no_purge_job(string status, string message)
     {
         var fake = Probed();
         fake.Answer(OraSql.CleanupJobs, new object?[] { "TRAILOX_PURGE", status, "UNIFIED AUDIT TRAIL" });
 
         var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
 
-        Assert.Equal(check, Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job").Status);
+        var check = Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job");
+        Assert.Equal("ok", check.Status);
+        Assert.Contains(message, check.Message);
+    }
+
+    [Fact]
+    public async Task The_probe_says_whether_failed_sign_ins_reach_the_trail()
+    {
+        var fake = Probed();
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+        Assert.Equal("ok", Assert.Single(caps.Oracle!.Checks, c => c.Name == "failed_signins").Status);
+
+        fake.Answer(OraSql.EnabledPolicies, new object?[] { "ORA_SECURECONFIG", "BY USER", "ALL USERS", "USER", "YES", "YES" });
+        caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+        Assert.Equal("warn", Assert.Single(caps.Oracle!.Checks, c => c.Name == "failed_signins").Status);
     }
 
     [Theory]
@@ -711,8 +913,9 @@ public class OraSourceTests
         await RowsAsync((await source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None))!);
     }
 
+    /// <summary>A busy trail is read less often. Its size refuses nothing, and the polls go on.</summary>
     [Fact]
-    public async Task A_day_seen_over_the_limit_refuses_the_source()
+    public async Task A_day_of_any_size_refuses_nothing()
     {
         var at = Now;
         var fake = Probed();
@@ -720,28 +923,13 @@ public class OraSourceTests
         await source.ProbeAsync(CancellationToken.None);
 
         at = Now.AddHours(6);
-        fake.Answer(OraSql.TablespaceFiles, new object?[] { 14_000_000_000L, 100_000_000_000L });
-        var ex = await Assert.ThrowsAsync<SourceException>(() => source.ProbeAsync(CancellationToken.None));
-
-        Assert.Equal("fail", Assert.Single(ex.RefusedCaps!.Oracle!.Checks, c => c.Name == "day_limit").Status);
-        Assert.Contains("Audit less", ex.Message);
-    }
-
-    /// <summary>A busy hour projected to a day warns; it does not stop the polls.</summary>
-    [Fact]
-    public async Task A_busy_hour_alone_does_not_refuse_the_source()
-    {
-        var at = Now;
-        var fake = Probed();
-        var source = new OraSource(Endpoint(), fake, () => at);
-        await source.ProbeAsync(CancellationToken.None);
-
-        at = Now.AddHours(1);
-        fake.Answer(OraSql.TablespaceFree, new object?[] { 500_000_000L });
+        fake.Answer(OraSql.TablespaceFiles, new object?[] { 90_000_000_000L, 100_000_000_000L });
         var caps = await source.ProbeAsync(CancellationToken.None);
 
-        Assert.Equal("warn", Assert.Single(caps.Oracle!.Checks, c => c.Name == "day_limit").Status);
-        Assert.Equal(12_000_000_000, caps.Oracle.GrowthBytesPerDay);
+        Assert.Equal(320_000_000_000, caps.Oracle!.GrowthBytesPerDay);
+        Assert.DoesNotContain(caps.Oracle.Checks, c => c.Status == "fail");
+        fake.Answer(OraSql.Poll(text: true, source: true));
+        await RowsAsync((await source.OpenAsync(Task(Streams.OraAudit), CancellationToken.None))!);
     }
 
     [Fact]

@@ -55,20 +55,31 @@ public sealed class GatewayClient
     /// request body. Nothing is buffered beyond the compressor's window.
     /// </summary>
     /// <param name="keepAlive">The rows can go quiet for minutes (<see cref="Engines.RowStream.KeepAlive"/>).</param>
-    public async Task<ChunkAccepted> UploadChunkAsync(string chunkId, Stream rows, CancellationToken ct, bool keepAlive = false)
+    /// <param name="part">This body's number, from 1, when the read goes in parts; <see cref="CompleteChunkAsync"/> then ends it.</param>
+    public async Task<ChunkAccepted> UploadChunkAsync(string chunkId, Stream rows, CancellationToken ct, bool keepAlive = false, int? part = null)
     {
         using var content = new GzipStreamContent(rows, keepAlive ? KeepAliveEvery : null);
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"v1/agent/chunks/{chunkId}") { Content = content };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"v1/agent/chunks/{chunkId}{(part is { } number ? $"?part={number}" : "")}") { Content = content };
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         await ThrowOnError(response, ct);
         return await response.Content.ReadFromJsonAsync<ChunkAccepted>(ProtocolInfo.Json, ct) ?? new ChunkAccepted();
     }
 
-    public async Task FailChunkAsync(string chunkId, string message, CancellationToken ct, string? reason = null)
+    /// <summary>Ends a read sent in parts: only this completes the task.</summary>
+    public async Task<ChunkAccepted> CompleteChunkAsync(string chunkId, int parts, long? readMillis, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(CheckinTimeout);
-        using var response = await _http.PostAsJsonAsync($"v1/agent/chunks/{chunkId}/failed", new ChunkFailed { Message = message, Reason = reason }, ProtocolInfo.Json, timeout.Token);
+        using var response = await _http.PostAsJsonAsync($"v1/agent/chunks/{chunkId}/complete", new ChunkComplete { Parts = parts, ReadMillis = readMillis }, ProtocolInfo.Json, timeout.Token);
+        await ThrowOnError(response, ct);
+        return await response.Content.ReadFromJsonAsync<ChunkAccepted>(ProtocolInfo.Json, ct) ?? new ChunkAccepted();
+    }
+
+    public async Task FailChunkAsync(string chunkId, string message, CancellationToken ct, string? reason = null, long? readMillis = null)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(CheckinTimeout);
+        using var response = await _http.PostAsJsonAsync($"v1/agent/chunks/{chunkId}/failed", new ChunkFailed { Message = message, Reason = reason, ReadMillis = readMillis }, ProtocolInfo.Json, timeout.Token);
         await ThrowOnError(response, ct);
     }
 

@@ -426,27 +426,27 @@ The agent signs in with a user of its own and reads everything over SQL: no AWS 
 - **Account:** a user with `CREATE SESSION`, `SELECT` on the views the setup script lists one by one (never `SELECT ANY
   DICTIONARY`, `SELECT_CATALOG_ROLE` or `AUDIT_ADMIN`), and a profile with `SESSIONS_PER_USER 2`, `CPU_PER_CALL`,
   `LOGICAL_READS_PER_CALL` and `IDLE_TIME`. `RESOURCE_LIMIT` must be `TRUE`, or the server enforces none of them. Each
-  call on the server, a fetch as much as an execute, has 60 seconds, the session runs with no parallel query, and the
-  agent uses one connection at a time, for one task (for each page of columns, one connection). Run one agent for each
-  source.
+  call on the server, a fetch as much as an execute, has 60 seconds, or for the audit poll what its task sets, at most
+  an hour. The session runs with no parallel query, and the agent uses one connection at a time, for
+  one task (for each page of columns, one connection). Run one agent for each source.
 - **agent.yaml:** `host`/`port` = the listener; `tls: true` = TCPS, with the server's certificate checked against the
   host, so the agent's runtime must trust its CA; `kind` = `cloud` (RDS) or `onprem`; `username` and its password;
   `options.service_name` = the PDB's service, or a non-CDB's. The user name is unquoted, and the agent writes it in upper
   case, as the server does.
 - **The trail's size:** the table has no index on time, so each poll reads the whole day's partition, whatever its
-  window, and a poll's cost follows the day's records. The agent reads at most 2,000,000 records a day, measured from
-  the growth of the trail's tablespace over the last 24 hours: above that it refuses the source and says what to audit
-  less, and the source comes back when a day's growth is under the limit. Keep the trail in a tablespace of its own, not
-  one it shares with your data, with daily partitions and a
-  purge job, as the setup script does: when `SYSAUX` fills, Oracle sends every record to spillover files with no
-  error, and every audited statement slows about 100 times.
+  window, and a poll's cost follows the day's records. No day is too large to read: a busy trail is read less often, down
+  to once a day, so its findings arrive later, failed sign-ins among them. A poll time you set yourself always wins. A
+  read too large for one upload goes in parts. Keep the trail in a tablespace of its own, not one it shares with your
+  data, with daily partitions, as the setup script does: when `SYSAUX` fills, Oracle sends every record to spillover files
+  with no error, and every audited statement slows sharply.
 - **Amazon RDS:** RDS's default parameter group sets `audit_trail = NONE`, and with that unified auditing writes
   nothing at all: copy the group, set `audit_trail` to `DB`, attach the copy and reboot once. The setup script places the
   trail before that reboot, because a new location applies only to partitions made after it.
 - **The probe's checks:** `container`, `platform`, `poll_view`, `audit_trail` (the session has an audit session ID),
-  `day_limit`, `views`, `partition`, `room`, `spillover`, `default_policies`, `level`, `profile`, `resource_limit`,
+  `views`, `partition`, `room`, `spillover`, `failed_signins`, `default_policies`, `level`, `profile`, `resource_limit`,
   `source_column`, `old_audit_settings`, `purge_job` and `password_expiry`, each `ok`, `warn` or `fail` with what to
-  change. A `fail` refuses the source: the agent runs no poll on it, and probes it again every 5 minutes.
+  change. A `fail` refuses the source: the agent runs no poll on it, and probes it again every 5 minutes. Only a source
+  that could never return a record fails. Whether a job purges the trail is reported, and is your call.
 - **A refused sign-in** (wrong password, an expired password, no `CREATE SESSION`): the agent stops signing in to that
   source, for its probe and its tasks, until it restarts, so it never locks the user or fills your trail with its own
   failed sign-ins. Fix it, then restart the agent. **A locked account** is held the same way for an hour, then tried once,

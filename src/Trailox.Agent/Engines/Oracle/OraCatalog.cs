@@ -82,7 +82,9 @@ public sealed class OraCatalog
     /// 🔴 A LOCKED ACCOUNT IS HELD THE SAME WAY, FOR <see cref="OraErrors.LockedRetry"/>. Then one open tries again: refused, it
     ///    holds for another hour; let in, the source goes on with no restart.
     /// </remarks>
-    public async Task<IOraSession> OpenAsync(CancellationToken ct)
+    /// <param name="ct">Stops the sign-in.</param>
+    /// <param name="time">Counts what the session's calls wait on the server, for a read that reports it.</param>
+    public async Task<IOraSession> OpenAsync(CancellationToken ct, ReadTime? time = null)
     {
         if (_rejected != null)
         {
@@ -95,7 +97,7 @@ public sealed class OraCatalog
         IOraSession? session = null;
         try
         {
-            session = new OraBoundedSession(await _driver.OpenAsync(Target, ct), _callLimit);
+            session = new OraBoundedSession(await _driver.OpenAsync(Target, ct), _callLimit, time);
             _locked = null;
             foreach (var setting in OraSql.SessionSettings)
             {

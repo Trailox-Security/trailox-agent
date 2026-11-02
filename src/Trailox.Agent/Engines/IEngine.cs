@@ -125,9 +125,9 @@ public class SourceException : Exception
     public TimeSpan? SignInRetryAfter { get; init; }
 
     /// <summary>
-    /// The probe read the source and refuses it (agent 1.16: Oracle, where a poll would cost the customer too much or could
-    /// never return a record): what it found goes to Trailox with the reason, no task is issued, and the source is probed
-    /// again every few minutes rather than at every check-in.
+    /// The probe read the source and refuses it (agent 1.16: Oracle, where a poll could never return a record): what it found
+    /// goes to Trailox with the reason, no task is issued, and the source is probed again every few minutes rather than at
+    /// every check-in.
     /// </summary>
     public EndpointCaps? RefusedCaps { get; init; }
 }

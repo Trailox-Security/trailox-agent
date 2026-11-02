@@ -249,12 +249,6 @@ public sealed class OracleCaps
     /// <summary>Its growth projected to a day, from this agent's probes of the last 24 hours; null until two are an hour apart.</summary>
     public long? GrowthBytesPerDay { get; set; }
 
-    /// <summary>The records a day that growth stands for, at the largest record size; null with no growth.</summary>
-    public long? DayRecordsEstimate { get; set; }
-
-    /// <summary>The most records a day the agent reads.</summary>
-    public long DayRecordsLimit { get; set; }
-
     /// <summary>Whether a record sits in a spillover file; null when the view cannot be read.</summary>
     public bool? Spilled { get; set; }
 
@@ -399,12 +393,49 @@ public sealed class AgentTask
     public string Stream { get; set; } = "";
     public long StartMicros { get; set; }
     public long EndMicros { get; set; }
+
+    /// <summary>The limit on each call of this task's read, when Trailox sets one (agent 1.16: Oracle's audit poll).</summary>
+    public int? ReadLimitSeconds { get; set; }
+
+    /// <summary>
+    /// Greater than 0: the rows may go in parts, each at most this many bytes before compression (agent 1.16). Otherwise one upload.
+    /// </summary>
+    public long? PartBytes { get; set; }
+
+    /// <summary>With <see cref="PartBytes"/>: how long one part may last. Otherwise <see cref="DefaultPartSeconds"/>.</summary>
+    public int? PartSeconds { get; set; }
+
+    public const int DefaultPartSeconds = 600;
+
+    /// <summary>Filled by the engine as it reads, for the task's report. The agent's own: not part of the task as sent.</summary>
+    [JsonIgnore]
+    public ReadTime ReadTime { get; } = new();
+}
+
+/// <summary>What one task's read has spent waiting on its database, with no upload time in it (agent 1.16).</summary>
+public sealed class ReadTime
+{
+    private long _ticks;
+
+    public void Add(TimeSpan wait) => Interlocked.Add(ref _ticks, wait.Ticks);
+
+    /// <summary>Whole milliseconds, at least 1 once anything was counted; null for an engine that does not measure.</summary>
+    public long? Millis => Interlocked.Read(ref _ticks) is > 0 and var ticks ? Math.Max(1, ticks / TimeSpan.TicksPerMillisecond) : null;
 }
 
 public sealed class ChunkAccepted
 {
     public long RowsAccepted { get; set; }
     public long WatermarkMicros { get; set; }
+}
+
+/// <summary>Ends a read sent in parts: how many there were, and how long it waited on the database (agent 1.16).</summary>
+public sealed class ChunkComplete
+{
+    public int Parts { get; set; }
+
+    /// <summary>See <see cref="ReadTime"/>. Null, and not sent, for an engine that does not measure.</summary>
+    public long? ReadMillis { get; set; }
 }
 
 public sealed class ChunkFailed
@@ -425,6 +456,9 @@ public sealed class ChunkFailed
     /// Null, and not sent, otherwise.
     /// </summary>
     public string? Reason { get; set; }
+
+    /// <summary>See <see cref="ReadTime"/>, up to where the read stopped. Null, and not sent, for an engine that does not measure.</summary>
+    public long? ReadMillis { get; set; }
 }
 
 public sealed class GatewayError

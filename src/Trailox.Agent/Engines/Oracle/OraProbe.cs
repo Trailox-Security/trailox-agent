@@ -5,14 +5,12 @@ using Trailox.Agent.Protocol;
 namespace Trailox.Agent.Engines.Oracle;
 
 /// <summary>
-/// The growth of the trail's tablespace, from this agent's probes. Nothing else tells a day's size: a count reads the whole
-/// partition. What it keeps lives and dies with the process, so a new process has no measure for its first hour.
+/// The growth of the trail's tablespace, from this agent's probes: what tells how long its room lasts. Nothing else does, as a
+/// count reads the whole partition. What it keeps lives and dies with the process, so a new process has no measure for its
+/// first hour, and the room check then has no growth to warn on.
 /// </summary>
 /// <remarks>
-/// 🔴 WHAT WAS SEEN AND WHAT IS PROJECTED ARE KEPT APART. A busy hour times 24 is no day: a customer who does a day's work in
-/// eight hours would be refused every morning. <see cref="GrownBytes"/> is growth that happened, and only that can refuse
-/// a source; <see cref="BytesPerDay"/> is the projection, which can only warn. Space that falls is a purge, not negative
-/// growth: the interval counts as none, and the growth around it still counts.
+/// Space that falls is a purge, not negative growth: the interval counts as none, and the growth around it still counts.
 /// </remarks>
 public sealed class OraGrowth
 {
@@ -66,6 +64,11 @@ public sealed class OraGrowth
 /// <summary>Reads what <see cref="OraProbeChecks"/> decides on. One statement a fact; none reads the trail's rows.</summary>
 internal static class OraProbe
 {
+    /// <summary>The view that says whether the trail has the <c>SOURCE</c> column.</summary>
+    internal const string ColumnsView = "ALL_TAB_COLUMNS";
+
+    private const string PollView = "UNIFIED_AUDIT_TRAIL";
+
     private const int FirstSupportedMajor = 19;
 
     private static readonly Regex HighValueTime = new(@"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", RegexOptions.Compiled);
@@ -73,9 +76,10 @@ internal static class OraProbe
     public static async Task ReadAsync(IOraSession session, OraFacts f, CancellationToken ct)
     {
         await ReadServerAsync(session, f, ct);
-        f.PollReadable = await Try(session, f, "UNIFIED_AUDIT_TRAIL", OraSql.PollViewReadable, ct) != null;
-        f.Unreadable.Remove("UNIFIED_AUDIT_TRAIL");
-        f.SourceColumn = await Try(session, f, "ALL_TAB_COLUMNS", OraSql.SourceColumn, ct) is { Count: > 0 };
+        // Only a refusal says the grant is missing: a read that a bound stopped says nothing about it.
+        f.PollReadable = await Try(session, f, PollView, OraSql.PollViewReadable, ct) != null || f.Slow.Contains(PollView);
+        f.Unreadable.Remove(PollView);
+        f.SourceColumn = await Try(session, f, ColumnsView, OraSql.SourceColumn, ct) is { Count: > 0 };
         await ReadTrailAsync(session, f, ct);
         await ReadPoliciesAsync(session, f, ct);
         await ReadOwnAsync(session, f, ct);
@@ -212,6 +216,11 @@ internal static class OraProbe
         try
         {
             return await OraCatalog.AllAsync(session, sql, ct, binds);
+        }
+        catch (OraDriverException ex) when (OraErrors.StoppedByBound(ex))
+        {
+            f.Slow.Add(name);
+            return null;
         }
         catch (OraDriverException ex) when (!OraErrors.SessionLost(ex.Number))
         {

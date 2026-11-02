@@ -16,8 +16,15 @@ namespace Trailox.Agent.Engines.Oracle;
 /// </remarks>
 public static class OraSql
 {
-    /// <summary>The longest any one statement may run. Past it the driver cancels the call.</summary>
+    /// <summary>The longest any one call may run, unless its task sets the audit read's own (<see cref="ReadLimit"/>).</summary>
     public const int CommandTimeoutSeconds = 60;
+
+    /// <summary>The most a task may set: a call that takes longer than this is stuck, not slow.</summary>
+    public const int MaxReadLimitSeconds = 3600;
+
+    /// <summary>The limit on each call of an audit read, from its task; null for the session's own limit.</summary>
+    public static TimeSpan? ReadLimit(int? seconds) =>
+        seconds is > 0 ? TimeSpan.FromSeconds(Math.Min(seconds.Value, MaxReadLimitSeconds)) : null;
 
     /// <summary>The longest <c>SQL_TEXT</c> that ships, in characters; a longer one is marked <c>truncated</c>.</summary>
     public const int MaxTextChars = 4000;

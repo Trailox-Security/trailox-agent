@@ -47,11 +47,13 @@ public sealed class OraSource : IEngineSource
                 throw _catalog.Failure(ex, ct);
             }
         }
-        _sourceColumn = facts.SourceColumn;
+        if (!facts.Slow.Contains(OraProbe.ColumnsView))
+        {
+            _sourceColumn = facts.SourceColumn;
+        }
         if (facts.Space is { } space)
         {
             _growth.Add(facts.NowUtc, OraProbeChecks.TrailTablespace(facts) ?? "", space.UsedBytes);
-            facts.GrownBytes = _growth.GrownBytes;
             facts.GrowthBytesPerDay = _growth.BytesPerDay;
         }
         var checks = OraProbeChecks.All(facts).ToList();
@@ -102,7 +104,7 @@ public sealed class OraSource : IEngineSource
     private async Task PollAsync(AgentTask task, RowWriter output, CancellationToken ct)
     {
         TaskHeartbeat.Beat();
-        await using var session = await _catalog.OpenAsync(ct);
+        await using var session = await _catalog.OpenAsync(ct, task.ReadTime);
         try
         {
             _sourceColumn ??= (await OraCatalog.AllAsync(session, OraSql.SourceColumn, ct)).Count > 0;
@@ -113,7 +115,7 @@ public sealed class OraSource : IEngineSource
                 new OraBind("me", _endpoint.Username),
             };
             var sql = OraSql.Poll(_endpoint.StoreRawQueryText, _sourceColumn.Value);
-            await using var rows = await session.QueryAsync(sql, binds, ct);
+            await using var rows = await session.QueryAsync(sql, binds, ct, OraSql.ReadLimit(task.ReadLimitSeconds));
             await new OraPoll(task.StartMicros, _endpoint.StoreRawQueryText, _sourceColumn.Value, output).ReadAsync(rows, ct);
         }
         catch (OraDriverException ex)

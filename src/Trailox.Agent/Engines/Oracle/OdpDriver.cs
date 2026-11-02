@@ -48,6 +48,9 @@ internal sealed class OdpDriver : IOraDriver
         HAEvents = false,
     }.ConnectionString;
 
+    /// <summary>The driver's command timeout for a limit: whole seconds, never shorter than the limit above the seam.</summary>
+    internal static int TimeoutSeconds(TimeSpan? limit) => limit is { } set ? (int)Math.Ceiling(set.TotalSeconds) : OraSql.CommandTimeoutSeconds;
+
     /// <summary>The seam's failure for a driver's; null for a cancellation, which stays one.</summary>
     private static OraDriverException? Translate(Exception ex) => ex switch
     {
@@ -57,8 +60,21 @@ internal sealed class OdpDriver : IOraDriver
     };
 
     /// <summary>A cancelled token breaks the call on the server too, whether or not the driver's own async call stops at it.</summary>
+    /// <remarks>
+    /// 🔴 NOTHING MAY ESCAPE THE CANCEL. It runs on the limit's timer thread, where an exception ends the process and no report
+    ///    of the task is sent. The call is abandoned above the seam either way.
+    /// </remarks>
     private static CancellationTokenRegistration CancelsOn(CancellationToken ct, OracleCommand command) =>
-        ct.Register(static c => ((OracleCommand)c!).Cancel(), command);
+        ct.Register(static c =>
+        {
+            try
+            {
+                ((OracleCommand)c!).Cancel();
+            }
+            catch (Exception)
+            {
+            }
+        }, command);
 
     /// <summary>A refused TLS connection has a generic message: the certificate's reason is in the exception inside.</summary>
     private static string WithCause(Exception ex) =>
@@ -87,7 +103,7 @@ internal sealed class OdpDriver : IOraDriver
 
         public async Task ExecuteAsync(string sql, CancellationToken ct)
         {
-            using var command = Command(sql, Array.Empty<OraBind>());
+            using var command = Command(sql, Array.Empty<OraBind>(), null);
             using var cancel = CancelsOn(ct, command);
             try
             {
@@ -99,9 +115,9 @@ internal sealed class OdpDriver : IOraDriver
             }
         }
 
-        public async Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct)
+        public async Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct, TimeSpan? limit = null)
         {
-            var command = Command(sql, binds);
+            var command = Command(sql, binds, limit);
             try
             {
                 using var cancel = CancelsOn(ct, command);
@@ -114,12 +130,12 @@ internal sealed class OdpDriver : IOraDriver
             }
         }
 
-        private OracleCommand Command(string sql, IReadOnlyList<OraBind> binds)
+        private OracleCommand Command(string sql, IReadOnlyList<OraBind> binds, TimeSpan? limit)
         {
             var command = new OracleCommand(sql, _connection)
             {
                 BindByName = true,
-                CommandTimeout = OraSql.CommandTimeoutSeconds,
+                CommandTimeout = TimeoutSeconds(limit),
                 FetchSize = FetchBytes,
                 // A LONG column (a partition's HIGH_VALUE) whole, in its row: the dictionary's views have no key to fetch it by later.
                 InitialLONGFetchSize = -1,

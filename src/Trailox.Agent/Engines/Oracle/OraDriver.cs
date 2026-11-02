@@ -17,7 +17,8 @@ public interface IOraSession : IAsyncDisposable
     Task ExecuteAsync(string sql, CancellationToken ct);
 
     /// <summary>Runs a query. Its rows are fetched as <see cref="IOraRows.ReadAsync"/> asks for them, never all at once.</summary>
-    Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct);
+    /// <param name="limit">How long each call of this query may run; null for the session's own limit.</param>
+    Task<IOraRows> QueryAsync(string sql, IReadOnlyList<OraBind> binds, CancellationToken ct, TimeSpan? limit = null);
 }
 
 /// <summary>The rows of one query, one at a time. Disposing never throws.</summary>

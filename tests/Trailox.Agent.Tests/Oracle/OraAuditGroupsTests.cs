@@ -242,7 +242,7 @@ public class OraAuditGroupsTests
         Assert.Equal(1, groups.LateRecords);
     }
 
-    /// <summary>A row's hash is its identity downstream: two rows that shared one would lose a count.</summary>
+    /// <summary>No two rows share a hash, even two rows of one minute and key.</summary>
     [Fact]
     public void Every_row_has_a_hash_of_its_own_even_a_second_row_of_one_minute_and_key()
     {

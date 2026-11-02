@@ -158,7 +158,7 @@ POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2, "readMillis": 412
   A body has no marker of its own, because the last part is not known until the rows have ended. A read with no rows sends no
   part, and `/complete` with `parts` 0.
 - `readMillis` on `/complete` is how long the read waited on the database: its calls on the server, summed, with no upload time
-  in it. Trailox uses it to choose how often to read this source. An engine that does not measure leaves it out.
+  in it. An engine that does not measure leaves it out.
 - A read that stops part of the way sends no `/complete`. It is reported as in section 5, or, when a reply to a part stopped it,
   handled as in section 1. Its window is read again from the start, under a new `chunkId`.
 - A task without `partBytes` is one upload with no `part`, and no `/complete`.
@@ -781,10 +781,10 @@ with no pool. The descriptor is built from `host`, `port` and `options.service_n
 
 **Each session** runs `ALTER SESSION SET TIME_ZONE = 'UTC' NLS_COMP = 'BINARY' NLS_SORT = 'BINARY'` and `ALTER SESSION DISABLE
 PARALLEL QUERY`. Each call on the server has 60 seconds: an execute and each fetch, so a long window of quick fetches runs,
-and the time the upload holds the fetch back does not count. The audit poll's own calls have the task's `readLimitSeconds`,
-which Trailox sets from how often this source is read: at most 3,600, and 60 when the task has none. A limit stops one call,
-not the whole read. Every object is named with its owner, so no public synonym can stand in for one. The agent calls no
-procedure, and of the functions in packages only `SYS.DBMS_LOB.SUBSTR` and `SYS.DBMS_LOB.GETLENGTH`.
+and the time the upload holds the fetch back does not count. The audit poll's own calls have the task's `readLimitSeconds`: at
+most 3,600, and 60 when the task has none. A limit stops one call, not the whole read. Every object is named with its owner,
+so no public synonym can stand in for one. The agent calls no procedure, and of the functions in packages only
+`SYS.DBMS_LOB.SUBSTR` and `SYS.DBMS_LOB.GETLENGTH`.
 
 A call that runs for minutes sends nothing, so the agent marks itself alive while it waits, within the call's limit. A call
 that has passed its limit gets 5 seconds to stop before the next statement runs; if it has not stopped by then, the session's
@@ -892,15 +892,15 @@ cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityNam
 
 `growthBytesPerDay` is the used space of the trail's tablespace at this process's probes of the last 24 hours, projected to a
 day; it takes two probes an hour apart. Space that falls, a purge, counts as no growth. `room` warns when the tablespace holds
-under 8 days of it. The size of a day fails no check: Trailox reads a busy trail less often instead.
+under 8 days of it. The size of a day fails no check.
 
 `failed_signins` says whether a failed sign-in reaches the trail, from the enabled policies: `ok` when `ORA_LOGON_FAILURES`,
 `ORA_LOGIN_LOGOUT` or `TRAILOX_LOGON` is enabled for failures for every user, or every user but those it names. It warns when one
 covers some users only, when none is enabled for failures (a policy of your own is not looked into), and when the policies
 cannot be read. `purge_job` says whether a job purges the trail, and is `ok` either way: whether to purge is your call.
 
-An optional read that fails for any reason but a lost session is listed in `views`, and the probe goes on. One that did not
-answer in time is listed there too, as slow rather than as a missing grant, and fails no check, `poll_view` included.
+An optional read that fails for any reason but a lost session is listed in `views`, and the probe goes on. One that a limit
+stopped is listed there too, as slow rather than as a missing grant, and fails no check, `poll_view` included.
 
 `policiesRead` and `policyObjectsRead` are true only when that view was read, so an empty list after a missing grant is not taken
 for a policy that is not enabled.

@@ -50,7 +50,7 @@ public sealed class OracleEngine : IEngine
         }
         if (UserPattern.IsMatch(e.Username))
         {
-            // The name the server writes in its trail and answers to: the collected records are matched by it exactly.
+            // An unquoted name: the agent signs in and reports it in upper case.
             e.Username = e.Username.ToUpperInvariant();
         }
         else
