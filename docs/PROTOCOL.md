@@ -795,13 +795,13 @@ further calls fail at once as timed out.
 ```sql
 WHERE event_timestamp_utc >= CAST(:lo AS TIMESTAMP) AND event_timestamp_utc < CAST(:hi AS TIMESTAMP)
   AND NOT (NVL(dbusername, ' ') = :me AND dbproxy_username IS NULL AND NVL(return_code, -1) = 0
-           AND NVL(action_name, ' ') IN ('SELECT', 'LOGON', 'LOGOFF', 'LOGOFF BY CLEANUP'))
+           AND NVL(action_name, ' ') = 'SELECT')
 ```
 
-`start <= t < end`, in UTC, with no `ORDER BY`. `:me` is the agent's user in upper case: its own successful reads,
-sign-ins and sign-offs are left out, and its changes and failed sign-ins are read, and so is anything done as it through
-a proxy. `SQL_TEXT` is a CLOB, and no LOB enters
-the result: the poll selects its length and its first 4,000 characters, in four pieces of 1,000, each of which fits a
+`start <= t < end`, in UTC, with no `ORDER BY`. `:me` is the agent's user in upper case: its own successful reads are left
+out. A sign-in by the monitoring user is recorded: its sign-ins and sign-offs, its changes and its failed sign-ins are read,
+and so is anything done as it through a proxy. `SQL_TEXT` is a CLOB, and no LOB enters the result: the poll selects its
+length and its first 4,000 characters, in four pieces of 1,000, each of which fits a
 `VARCHAR2(4000)` in any character set. `SQL_BINDS` is never selected. `SOURCE` is selected only where the probe found the
 column (19.21 and later). With `storeRawQueryText: false` the text is not selected at all. A record's trailing NUL, which
 the trail stores, is removed.

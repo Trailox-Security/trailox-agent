@@ -415,8 +415,8 @@ The agent signs in with a user of its own and reads everything over SQL: no AWS 
     statement) of the schemas Oracle does not maintain, and your audit settings;
   - on each probe, the dictionary's facts about the trail: never a count of it.
 - **What leaves your network:** one row per audit record, with who, from where, what, on which object and with what
-  result, except the agent's own successful reads, sign-ins and sign-offs. A change made with the agent's user, or a
-  failed sign-in against it, is shipped, and so is anything done as that user through a proxy. Of a statement's text, at
+  result, except the agent's own successful reads. A sign-in or sign-off by the agent's user, a change made with it, or
+  a failed sign-in against it is shipped, and so is anything done as that user through a proxy. Of a statement's text, at
   most its first 4,000 characters are read, and they ship as its shape: every string and number replaced by `?`, comments
   removed, passwords replaced by `<redacted>`. That goes for DDL and stored code too, so no value and no password written
   as a string leaves your network, however it was spelled. Reads, writes and procedure calls are also grouped per

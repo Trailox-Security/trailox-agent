@@ -57,15 +57,15 @@ public static class OraSql
 
     /// <summary>
     /// One window of the audit trail, <c>:lo &lt;= t &lt; :hi</c> by <c>EVENT_TIMESTAMP_UTC</c>, without the agent's own
-    /// successful reads, sign-ins and sign-offs. <c>:me</c> is its user in upper case.
+    /// successful reads. <c>:me</c> is its user in upper case.
     /// </summary>
     /// <remarks>
     /// <list type="bullet">
     /// <item>🔴 ONLY <c>EVENT_TIMESTAMP_UTC</c> PRUNES THE TRAIL'S PARTITIONS; <c>EVENT_TIMESTAMP</c> reads every one. The
     ///   table has no index on time, so a poll reads its whole day's partition, whatever the window.</item>
     /// <item>No <c>ORDER BY</c>: a sort of a busy window costs the customer, and nothing needs the order.</item>
-    /// <item>🔴 THE AGENT'S OWN CHANGES AND FAILED SIGN-INS ARE SHIPPED, and so is a record with no user: the filter is
-    ///   written so that a null keeps the row. Someone signed in as the agent's user through a proxy is not the agent.</item>
+    /// <item>🔴 THE AGENT'S OWN SIGN-INS, CHANGES AND FAILED SIGN-INS ARE SHIPPED, and so is a record with no user: the filter
+    ///   is written so that a null keeps the row. Someone signed in as the agent's user through a proxy is not the agent.</item>
     /// <item>🔴 <c>SQL_TEXT</c> IS A CLOB, AND NO LOB ENTERS THE RESULT. A locator would cost a round trip a row. Only the
     ///   length and the first characters are selected, in pieces that fit a <c>VARCHAR2(4000)</c> in any character set: one
     ///   <c>DBMS_LOB.SUBSTR</c> of 4,000 characters would fail the whole read on one long text of multi-byte characters.</item>
@@ -87,7 +87,7 @@ public static class OraSql
             FROM AUDSYS.UNIFIED_AUDIT_TRAIL
             WHERE event_timestamp_utc >= CAST(:lo AS TIMESTAMP) AND event_timestamp_utc < CAST(:hi AS TIMESTAMP)
               AND NOT (NVL(dbusername, ' ') = :me AND dbproxy_username IS NULL AND NVL(return_code, -1) = 0
-                       AND NVL(action_name, ' ') IN ('SELECT', 'LOGON', 'LOGOFF', 'LOGOFF BY CLEANUP'))
+                       AND NVL(action_name, ' ') = 'SELECT')
             """;
     }
 

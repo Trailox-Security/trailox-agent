@@ -110,6 +110,21 @@ public class OraSourceTests
         Assert.Equal(1, json.RootElement.GetProperty("by_action").GetProperty("LOGON").GetInt32());
     }
 
+    /// <summary>A sign-in by the monitoring user is recorded: what the read returns ships, with no filter of its own in the agent.</summary>
+    [Fact]
+    public async Task Our_own_sign_ins_ship_each_as_a_row_and_are_counted()
+    {
+        var rows = await PollAsync(Poll(true,
+            Trail(Start.AddMinutes(1), "TRAILOX_MONITOR", "LOGON", obj: null),
+            Trail(Start.AddMinutes(2), "TRAILOX_MONITOR", "LOGOFF", obj: null),
+            Trail(Start.AddMinutes(3), "TRAILOX_MONITOR", "LOGOFF BY CLEANUP", obj: null)));
+
+        Assert.Equal(new[] { "LOGON", "LOGOFF", "LOGOFF BY CLEANUP", OraPoll.SummaryAction }, rows.Select(r => r.GetProperty("action_name").GetString()));
+        Assert.All(rows.SkipLast(1), r => Assert.Equal("TRAILOX_MONITOR", r.GetProperty("dbusername").GetString()));
+        using var json = JsonDocument.Parse(Summary(rows).GetProperty("summary").GetString()!);
+        Assert.Equal((3, 3), (json.RootElement.GetProperty("records").GetInt32(), json.RootElement.GetProperty("shipped").GetInt32()));
+    }
+
     [Fact]
     public async Task An_empty_window_still_ships_its_count_row()
     {

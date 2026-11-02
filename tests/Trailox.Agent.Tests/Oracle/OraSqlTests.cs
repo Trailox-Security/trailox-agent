@@ -47,11 +47,24 @@ public class OraSqlTests
     }
 
     [Fact]
-    public void The_poll_keeps_a_null_and_drops_only_our_own_successful_reads_and_sessions()
+    public void The_poll_keeps_a_null_and_drops_only_our_own_successful_reads()
     {
         Assert.Contains("NOT (NVL(dbusername, ' ') = :me AND dbproxy_username IS NULL AND NVL(return_code, -1) = 0", Poll);
-        Assert.Contains("NVL(action_name, ' ') IN ('SELECT', 'LOGON', 'LOGOFF', 'LOGOFF BY CLEANUP')", Poll);
+        Assert.Contains("NVL(action_name, ' ') = 'SELECT')", Poll);
         Assert.DoesNotContain("dbusername <>", Poll);
+    }
+
+    /// <summary>A sign-in by the monitoring user is recorded: of its successful records, only its reads are left out.</summary>
+    [Theory]
+    [InlineData("SELECT", true)]
+    [InlineData("LOGON", false)]
+    [InlineData("LOGOFF", false)]
+    [InlineData("LOGOFF BY CLEANUP", false)]
+    public void Of_our_own_records_the_poll_leaves_out_only_reads(string action, bool leftOut)
+    {
+        var filter = Poll[Poll.IndexOf("AND NOT (", StringComparison.Ordinal)..];
+
+        Assert.Equal(leftOut, filter.Contains($"'{action}'", StringComparison.Ordinal));
     }
 
     [Theory]
