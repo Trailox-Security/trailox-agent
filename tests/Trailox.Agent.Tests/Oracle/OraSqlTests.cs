@@ -39,6 +39,14 @@ public class OraSqlTests
         yield return OraSql.Poll(text: false, source: false);
     }
 
+    /// <summary>A read of its own: the probe cannot go on without the session's row, so a server that refuses the role must not take that row with it.</summary>
+    [Fact]
+    public void The_role_is_read_on_its_own()
+    {
+        Assert.Equal("SELECT SYS_CONTEXT('USERENV', 'DATABASE_ROLE') FROM SYS.DUAL", OraSql.DatabaseRole);
+        Assert.DoesNotContain("DATABASE_ROLE", OraSql.Session);
+    }
+
     [Fact]
     public void The_poll_cuts_its_window_on_the_utc_column_only()
     {

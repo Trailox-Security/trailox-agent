@@ -69,6 +69,8 @@ internal static class OraProbe
 
     private const string PollView = "UNIFIED_AUDIT_TRAIL";
 
+    private const string RoleRead = "USERENV";
+
     private const int FirstSupportedMajor = 19;
 
     private static readonly Regex HighValueTime = new(@"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", RegexOptions.Compiled);
@@ -106,6 +108,7 @@ internal static class OraProbe
         f.Program = Trim(own[2] as string, 128);
         f.AuditSessionId = own[3]?.ToString();
         f.RdsAdmin = (await OraCatalog.AllAsync(session, OraSql.RdsAdmin, ct)).Count > 0;
+        await ReadRoleAsync(session, f, ct);
         foreach (var row in await Try(session, f, "V_$OPTION", OraSql.Options, ct) ?? new())
         {
             if (row[0] as string == "Unified Auditing")
@@ -117,6 +120,20 @@ internal static class OraProbe
         {
             f.Parameters[row[0] as string ?? ""] = row[1]?.ToString();
         }
+    }
+
+    /// <summary>
+    /// Before the optional reads, so a view that holds the session does not cost the report the role. It takes no grant and
+    /// decides no check, so a read that fails asks for nothing, and the role is then unknown.
+    /// </summary>
+    private static async Task ReadRoleAsync(IOraSession session, OraFacts f, CancellationToken ct)
+    {
+        if (await Try(session, f, RoleRead, OraSql.DatabaseRole, ct) is { Count: > 0 } role)
+        {
+            f.DatabaseRole = role[0][0] as string;
+        }
+        f.Unreadable.Remove(RoleRead);
+        f.Slow.Remove(RoleRead);
     }
 
     private static async Task ReadTrailAsync(IOraSession session, OraFacts f, CancellationToken ct)

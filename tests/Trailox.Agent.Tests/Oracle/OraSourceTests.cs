@@ -596,6 +596,7 @@ public class OraSourceTests
         var fake = new FakeOra();
         fake.Answer(OraSql.Product, new object?[] { "Oracle Database 19c Standard Edition 2 Release 19.0.0.0.0 - Production", "19.32.0.0.0" });
         fake.Answer(OraSql.Session, new object?[] { "TRAILOX_MONITOR", container, "trailox-agent.dll", auditSessionId });
+        fake.Answer(OraSql.DatabaseRole, new object?[] { "PRIMARY" });
         fake.Answer(OraSql.RdsAdmin, new object?[] { 1L });
         fake.Answer(OraSql.Options, new object?[] { "Unified Auditing", "FALSE" }, new object?[] { "Partitioning", "FALSE" });
         fake.Answer(OraSql.Parameters, new object?[] { "audit_trail", "DB" }, new object?[] { "resource_limit", "TRUE" });
@@ -848,6 +849,97 @@ public class OraSourceTests
         var oracle = json.RootElement.GetProperty("oracle");
         Assert.True(oracle.GetProperty("policiesRead").GetBoolean());
         Assert.True(oracle.GetProperty("policyObjectsRead").GetBoolean());
+    }
+
+    private static async Task<List<(string, string, string)>> ChecksOf(FakeOra fake) =>
+        Checks(await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None));
+
+    private static List<(string, string, string)> Checks(EndpointCaps caps) =>
+        caps.Oracle!.Checks.Select(c => (c.Name, c.Status, c.Message)).ToList();
+
+    private static void AssertNoRole(EndpointCaps caps)
+    {
+        Assert.Null(caps.Oracle!.DatabaseRole);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(caps, ProtocolInfo.Json));
+        Assert.False(json.RootElement.GetProperty("oracle").TryGetProperty("databaseRole", out _));
+    }
+
+    [Theory]
+    [InlineData("PRIMARY")]
+    [InlineData("PHYSICAL STANDBY")]
+    [InlineData("LOGICAL STANDBY")]
+    [InlineData("SNAPSHOT STANDBY")]
+    public async Task The_probe_reports_the_role_the_server_gives_and_no_check_moves_with_it(string role)
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.DatabaseRole, new object?[] { role });
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(caps, ProtocolInfo.Json));
+        Assert.Equal(role, json.RootElement.GetProperty("oracle").GetProperty("databaseRole").GetString());
+        Assert.Equal(await ChecksOf(Probed()), Checks(caps));
+    }
+
+    /// <summary>The role takes no grant and decides no check: absent reads as unknown, and nothing tells the customer to fix anything.</summary>
+    [Theory]
+    [InlineData(2003)]
+    [InlineData(1031)]
+    [InlineData(2393)]
+    public async Task A_role_that_cannot_be_read_is_left_out_and_no_check_moves(int number)
+    {
+        var fake = Probed();
+        fake.Fails(OraSql.DatabaseRole, number);
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        AssertNoRole(caps);
+        Assert.Equal(await ChecksOf(Probed()), Checks(caps));
+    }
+
+    [Fact]
+    public async Task A_role_read_that_hangs_is_left_out_and_no_check_moves()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.DatabaseRole, _ => Hangs());
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        AssertNoRole(caps);
+        Assert.Equal(await ChecksOf(Probed()), Checks(caps));
+    }
+
+    [Fact]
+    public async Task A_role_the_server_leaves_empty_is_left_out()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.DatabaseRole, new object?[] { null });
+        AssertNoRole(await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None));
+
+        fake.Answer(OraSql.DatabaseRole);
+        AssertNoRole(await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None));
+    }
+
+    /// <summary>It comes before the optional reads, so a view that holds the connection does not cost the report the role.</summary>
+    [Fact]
+    public async Task The_role_is_read_before_a_view_can_hold_the_session()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.DatabaseRole, new object?[] { "PHYSICAL STANDBY" });
+        fake.Answer(OraSql.Options, _ => Hangs(deaf: true));
+
+        var caps = await Bounded(fake).ProbeAsync(CancellationToken.None);
+
+        Assert.Equal("PHYSICAL STANDBY", caps.Oracle!.DatabaseRole);
+    }
+
+    [Fact]
+    public async Task A_session_lost_on_the_role_read_fails_the_probe()
+    {
+        var fake = Probed();
+        fake.Fails(OraSql.DatabaseRole, 3113);
+
+        await Assert.ThrowsAsync<SourceException>(() => new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None));
     }
 
     [Fact]

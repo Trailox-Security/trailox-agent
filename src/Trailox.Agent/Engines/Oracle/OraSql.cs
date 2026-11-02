@@ -109,6 +109,9 @@ public static class OraSql
         FROM SYS.DUAL
         """;
 
+    /// <summary>The server's role. A read of its own, because <see cref="Session"/> must not fail with it. It takes no grant.</summary>
+    public const string DatabaseRole = "SELECT SYS_CONTEXT('USERENV', 'DATABASE_ROLE') FROM SYS.DUAL";
+
     public const string RdsAdmin = "SELECT 1 FROM SYS.ALL_USERS WHERE username = 'RDSADMIN'";
 
     public const string Options = "SELECT parameter, value FROM SYS.V_$OPTION WHERE parameter IN ('Unified Auditing', 'Partitioning')";

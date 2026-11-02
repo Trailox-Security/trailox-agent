@@ -204,6 +204,9 @@ public sealed class OracleCaps
     /// <summary>The container the agent signs in to: a PDB's name, or a non-CDB's.</summary>
     public string Container { get; set; } = "";
 
+    /// <summary>The server's role, as it gives it: PRIMARY, PHYSICAL STANDBY, LOGICAL STANDBY or SNAPSHOT STANDBY; null when it cannot be read.</summary>
+    public string? DatabaseRole { get; set; }
+
     /// <summary>The user the server knows the agent as, in the server's own case.</summary>
     public string OwnUser { get; set; } = "";
 

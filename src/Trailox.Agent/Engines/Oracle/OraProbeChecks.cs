@@ -27,6 +27,7 @@ public sealed class OraFacts
     public string OwnUser { get; set; } = "";
     public string Program { get; set; } = "";
     public string Container { get; set; } = "";
+    public string? DatabaseRole { get; set; }
     public string? AuditSessionId { get; set; }
     public bool RdsAdmin { get; set; }
     public string? UnifiedOption { get; set; }
@@ -121,6 +122,7 @@ public static class OraProbeChecks
             Product = f.Product,
             Edition = Editions.Match(f.Product).Value,
             Container = f.Container,
+            DatabaseRole = f.DatabaseRole,
             OwnUser = f.OwnUser,
             OwnProgram = f.Program,
             ProbedAtMicros = (f.NowUtc - DateTime.UnixEpoch).Ticks / 10,

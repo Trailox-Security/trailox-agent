@@ -878,10 +878,10 @@ and the first time. Every other record is a row of its own, with `event_count` 1
 `DBA_SEGMENTS`, `V$ACTIVE_SESSION_HISTORY`, `DBA_HIST_*` or `V$SQL_MONITOR`.
 
 **The probe** reports `caps.oracle` in the check-in: `platform` (`rds`, `self_managed`), `product`, `edition`, `container`,
-`ownUser`, `ownProgram` (both as the server gives them), `probedAtMicros`, `unifiedMode` (`pure`, `mixed`), `auditTrail`,
-`trailPartitioned`, `trailInterval`, `trailRows`, `trailBlocks` (statistics, never a count), `todayPartition`,
-`todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `spilled`, `sourceColumn`,
-`observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
+`databaseRole`, `ownUser`, `ownProgram` (both as the server gives them), `probedAtMicros`, `unifiedMode` (`pure`, `mixed`),
+`auditTrail`, `trailPartitioned`, `trailInterval`, `trailRows`, `trailBlocks` (statistics, never a count), `todayPartition`,
+`todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `spilled`,
+`sourceColumn`, `observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
 cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityName`, `entityType`, `success`, `failure`: the
 `TRAILOX_*` ones enabled), `policyObjectsRead`, `policyObjects` (`policy`, `schema`, `name`: the objects those policies name, at most
 500) and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `container`,
@@ -889,6 +889,10 @@ cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityNam
 `profile`, `resource_limit`, `source_column`, `old_audit_settings`, `purge_job`, `password_expiry`.
 
 `earliestEventMicros` and `earliestSessionMicros` are 0: the trail's oldest record is never read.
+
+`databaseRole` is `SYS_CONTEXT('USERENV', 'DATABASE_ROLE')` as the server gives it: `PRIMARY`, `PHYSICAL STANDBY`,
+`LOGICAL STANDBY` or `SNAPSHOT STANDBY`. It needs no grant and decides no check, and it is absent when it cannot be read. A
+read-only standby always writes to spillover files, so `spilled` means something different there.
 
 `growthBytesPerDay` is the used space of the trail's tablespace at this process's probes of the last 24 hours, projected to a
 day; it takes two probes an hour apart. Space that falls, a purge, counts as no growth. `room` warns when the tablespace holds
