@@ -110,6 +110,8 @@ The report never contains `host`, `port`, credentials or any row data.
   agent resumes where it stopped. Uploading the same task twice is harmless.
 - Windows are half-open, `(startMicros, endMicros]`, in microseconds since the Unix epoch (UTC).
   Catalog tasks have no window.
+- From 1.16.0 a task may also carry `readLimitSeconds`, the limit on each call of its read (section 6g), and `partBytes` and
+  `partSeconds`, which say that its rows may be sent in parts (section 4). A task without them runs as it always did.
 
 ## 3. Executing a task
 
@@ -135,6 +137,29 @@ Reply `200 { "rowsAccepted": n }`. Any other reply is handled as in section 1: t
 records the error, reports it in the next check-in's `lastErrors`, and moves on. Nothing is
 retried locally, because Trailox re-issues the window.
 
+### One read in several parts (from 1.16.0)
+
+One read can hold more rows than one upload takes. A task with `partBytes` greater than 0 sends its rows as numbered uploads
+to the same `chunkId`, from 1, one at a time, and then says that it has finished:
+
+```
+POST /v1/agent/chunks/{chunkId}?part=1           -> 200 { "rowsAccepted": n }
+POST /v1/agent/chunks/{chunkId}?part=2           -> 200 { "rowsAccepted": n }
+POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2 }
+                                                 -> 200 { "rowsAccepted": <all parts>, "watermarkMicros": n }
+```
+
+- A part is an ordinary upload: the same headers and the same body. It holds whole rows, and a row is never cut.
+- A part's body is at most `partBytes` before compression, not counting blank lines. It ends at that size, or `partSeconds`
+  after the part began, whichever comes first. With no `partSeconds` that is 600 seconds.
+- A part begins only when there are rows for it, so no upload stands open while the database reads with nothing to send.
+- A part waits for the reply to the one before. All the parts of a read carry one `chunkId`, so its rows stay one chunk.
+- `/complete` follows the last part, with how many were sent. Only then is the task done, and only then is the window read.
+  A body has no marker of its own, because the last part is not known until the rows have ended.
+- A read that stops part of the way sends no `/complete`. It is reported as in section 5, or, when a reply to a part stopped it,
+  handled as in section 1. Its window is read again from the start, under a new `chunkId`.
+- A task without `partBytes` is one upload with no `part`, and no `/complete`.
+
 ## 5. Reporting a failed task: `POST /v1/agent/chunks/{chunkId}/failed`
 
 `{ "message": "...", "reason": "..." }`. Sent when a task fails for any reason but the agent stopping:
@@ -148,8 +173,8 @@ same window at a later poll, and the agent does not list it among its errors. Fr
 `window_too_long` means the database stopped the read at its time limit (Snowflake's statement timeout,
 error `000630`): the same window would stop the same way, so Trailox issues shorter ones. The agent still
 lists it among its errors. From 1.16.0, `too_large_at_source` means a bound stopped the read (Oracle's per-call limits,
-`ORA-02393` and `ORA-02395`, or the agent's 60-second limit on a call): Trailox issues shorter windows, and the agent lists it
-among its errors. The agent sends either reason whether the read stopped before the first row or during the upload.
+`ORA-02393` and `ORA-02395`, or the agent's limit on a call): Trailox issues shorter windows, and the agent lists it among its
+errors. The agent sends either reason whether the read stopped before the first row or during the upload.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
@@ -752,9 +777,14 @@ with no pool. The descriptor is built from `host`, `port` and `options.service_n
 
 **Each session** runs `ALTER SESSION SET TIME_ZONE = 'UTC' NLS_COMP = 'BINARY' NLS_SORT = 'BINARY'` and `ALTER SESSION DISABLE
 PARALLEL QUERY`. Each call on the server has 60 seconds: an execute and each fetch, so a long window of quick fetches runs,
-and the time the upload holds the fetch back does not count. Every object is named with its owner, so no public synonym
-can stand in for one. The agent calls no procedure, and of the functions in packages only `SYS.DBMS_LOB.SUBSTR` and
-`SYS.DBMS_LOB.GETLENGTH`.
+and the time the upload holds the fetch back does not count. The audit poll's own calls have the task's `readLimitSeconds`,
+which Trailox sets from how often this source is read: at most 3,600, and 60 when the task has none. A limit stops one call,
+not the whole read. Every object is named with its owner, so no public synonym can stand in for one. The agent calls no
+procedure, and of the functions in packages only `SYS.DBMS_LOB.SUBSTR` and `SYS.DBMS_LOB.GETLENGTH`.
+
+A call that runs for minutes sends nothing, so the agent marks itself alive while it waits, within the call's limit. A call
+that has passed its limit gets 5 seconds to stop before the next statement runs; if it has not stopped by then, the session's
+further calls fail at once as timed out.
 
 **The audit poll** reads `AUDSYS.UNIFIED_AUDIT_TRAIL` for one window:
 
@@ -846,22 +876,27 @@ and the first time. Every other record is a row of its own, with `event_count` 1
 **The probe** reports `caps.oracle` in the check-in: `platform` (`rds`, `self_managed`), `product`, `edition`, `container`,
 `ownUser`, `ownProgram` (both as the server gives them), `probedAtMicros`, `unifiedMode` (`pure`, `mixed`), `auditTrail`,
 `trailPartitioned`, `trailInterval`, `trailRows`, `trailBlocks` (statistics, never a count), `todayPartition`,
-`todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `dayRecordsEstimate`,
-`dayRecordsLimit`, `spilled`, `sourceColumn`, `observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
+`todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `spilled`, `sourceColumn`,
+`observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
 cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityName`, `entityType`, `success`, `failure`: the
 `TRAILOX_*` ones enabled), `policyObjectsRead`, `policyObjects` (`policy`, `schema`, `name`: the objects those policies name, at most
 500) and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `container`,
-`platform`, `poll_view`, `audit_trail`, `day_limit`, `views`, `partition`, `room`, `spillover`, `default_policies`, `level`,
+`platform`, `poll_view`, `audit_trail`, `views`, `partition`, `room`, `spillover`, `failed_signins`, `default_policies`, `level`,
 `profile`, `resource_limit`, `source_column`, `old_audit_settings`, `purge_job`, `password_expiry`.
 
 `earliestEventMicros` and `earliestSessionMicros` are 0: the trail's oldest record is never read.
 
-The growth is measured from the used space of the trail's tablespace at this process's probes of the last 24 hours; it takes
-two probes an hour apart. Space that falls, a purge, counts as no growth. `growthBytesPerDay` is that growth projected to a day,
-and `dayRecordsEstimate` is the projection at 1,040 bytes a record. `day_limit` fails only on growth that happened: over the last
-24 hours, more than `dayRecordsLimit` records at 1,040 bytes. It warns when the projection is above the limit at 650 bytes, and
-when the tablespace's size cannot be read. An optional read that fails for any reason but a lost session is listed in `views`,
-and the probe goes on.
+`growthBytesPerDay` is the used space of the trail's tablespace at this process's probes of the last 24 hours, projected to a
+day; it takes two probes an hour apart. Space that falls, a purge, counts as no growth. `room` warns when the tablespace holds
+under 8 days of it. The size of a day fails no check: Trailox reads a busy trail less often instead.
+
+`failed_signins` says whether a failed sign-in reaches the trail, from the enabled policies: `ok` when `ORA_LOGON_FAILURES`,
+`ORA_LOGIN_LOGOUT` or `TRAILOX_LOGON` is enabled for failures for every user, or every user but those it names. It warns when one
+covers some users only, when none is enabled for failures (a policy of your own is not looked into), and when the policies
+cannot be read. `purge_job` says whether a job purges the trail, and is `ok` either way: whether to purge is your call.
+
+An optional read that fails for any reason but a lost session is listed in `views`, and the probe goes on. One that did not
+answer in time is listed there too, as slow rather than as a missing grant, and fails no check, `poll_view` included.
 
 `policiesRead` and `policyObjectsRead` are true only when that view was read, so an empty list after a missing grant is not taken
 for a policy that is not enabled.
