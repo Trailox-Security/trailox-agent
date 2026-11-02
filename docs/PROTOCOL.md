@@ -145,7 +145,7 @@ to the same `chunkId`, from 1, one at a time, and then says that it has finished
 ```
 POST /v1/agent/chunks/{chunkId}?part=1           -> 200 { "rowsAccepted": n }
 POST /v1/agent/chunks/{chunkId}?part=2           -> 200 { "rowsAccepted": n }
-POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2 }
+POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2, "readMillis": 41250 }
                                                  -> 200 { "rowsAccepted": <all parts>, "watermarkMicros": n }
 ```
 
@@ -155,14 +155,17 @@ POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2 }
 - A part begins only when there are rows for it, so no upload stands open while the database reads with nothing to send.
 - A part waits for the reply to the one before. All the parts of a read carry one `chunkId`, so its rows stay one chunk.
 - `/complete` follows the last part, with how many were sent. Only then is the task done, and only then is the window read.
-  A body has no marker of its own, because the last part is not known until the rows have ended.
+  A body has no marker of its own, because the last part is not known until the rows have ended. A read with no rows sends no
+  part, and `/complete` with `parts` 0.
+- `readMillis` on `/complete` is how long the read waited on the database: its calls on the server, summed, with no upload time
+  in it. Trailox uses it to choose how often to read this source. An engine that does not measure leaves it out.
 - A read that stops part of the way sends no `/complete`. It is reported as in section 5, or, when a reply to a part stopped it,
   handled as in section 1. Its window is read again from the start, under a new `chunkId`.
 - A task without `partBytes` is one upload with no `part`, and no `/complete`.
 
 ## 5. Reporting a failed task: `POST /v1/agent/chunks/{chunkId}/failed`
 
-`{ "message": "...", "reason": "..." }`. Sent when a task fails for any reason but the agent stopping:
+`{ "message": "...", "reason": "...", "readMillis": n }`. Sent when a task fails for any reason but the agent stopping:
 the `SELECT` fails (a missing grant, an unreachable database), the database does not answer in time, or
 it answers with something the agent cannot read. The window is re-issued on a later check-in. When this
 report cannot be delivered, the task stays unanswered and is handed back at a later check-in.
@@ -174,7 +177,8 @@ same window at a later poll, and the agent does not list it among its errors. Fr
 error `000630`): the same window would stop the same way, so Trailox issues shorter ones. The agent still
 lists it among its errors. From 1.16.0, `too_large_at_source` means a bound stopped the read (Oracle's per-call limits,
 `ORA-02393` and `ORA-02395`, or the agent's limit on a call): Trailox issues shorter windows, and the agent lists it among its
-errors. The agent sends either reason whether the read stopped before the first row or during the upload.
+errors. The agent sends either reason whether the read stopped before the first row or during the upload. `readMillis` (from
+1.16.0) is as in section 4, up to where the read stopped, and an engine that does not measure leaves it out.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
