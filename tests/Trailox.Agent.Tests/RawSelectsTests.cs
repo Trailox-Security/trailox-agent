@@ -123,18 +123,22 @@ public class RawSelectsTests
     }
 
     /// <summary>
-    /// Agent 1.7: only the settings rows a readonly verdict needs, with `index` returned as element_index -
-    /// the column names are part of what the agent sends.
+    /// Only the settings rows Trailox reads - readonly, allow_ddl, the six logging settings, and every element that names
+    /// a profile - with `index` returned as element_index and, on a profile's element, whom the profile applies to. The
+    /// column names are part of what the agent sends.
     /// </summary>
     [Fact]
-    public void The_settings_select_reads_only_the_rows_a_readonly_verdict_needs()
+    public void The_settings_select_reads_only_the_rows_trailox_needs()
     {
         var sql = RawSelects.CatalogSettings;
 
-        Assert.StartsWith("SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index, setting_name, value, "
-                          + "toString(writability) AS writability, inherit_profile", sql);
-        Assert.Contains("FROM system.settings_profile_elements", sql);
-        Assert.Contains("WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL", sql);
+        Assert.StartsWith("SELECT today() AS snapshot_date, e.profile_name AS profile_name, e.user_name AS user_name, e.role_name AS role_name, "
+                          + "e.index AS element_index, e.setting_name AS setting_name, e.value AS value, toString(e.writability) AS writability, "
+                          + "e.inherit_profile AS inherit_profile, p.apply_to_all AS apply_to_all, p.apply_to_list AS apply_to_list, "
+                          + "p.apply_to_except AS apply_to_except\n", sql);
+        Assert.Contains("\nFROM system.settings_profile_elements AS e\nLEFT JOIN system.settings_profiles AS p ON p.name = e.profile_name\n", sql);
+        Assert.Contains("\nWHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', "
+                        + "'log_queries_probability', 'log_query_settings', 'log_queries_cut_to_length') OR inherit_profile IS NOT NULL\n", sql);
         Assert.EndsWith("FORMAT JSONEachRow", sql);
         Assert.Equal(sql, RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = ProtocolInfo.Streams.CatalogSettings }));
     }

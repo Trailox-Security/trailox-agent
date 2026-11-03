@@ -118,18 +118,28 @@ public static class RawSelects
 
     /// <summary>
     /// The settings that decide whether a user is read-only (agent 1.7): readonly, allow_ddl, and every element that
-    /// names a profile, so Trailox can follow a user's chain of profiles. Only these rows - a profile can hold any value
-    /// a customer put in it, and nothing else is used. `index` is returned as element_index.
+    /// names a profile, so Trailox can follow a user's chain of profiles. Also the six settings that can keep a
+    /// statement out of system.query_log or cut what it records, and, on each profile's element, whom the profile
+    /// applies to (system.settings_profiles). Only these rows - a profile can hold any value a customer put in it, and
+    /// nothing else is used. `index` is returned as element_index.
     /// </summary>
     /// <remarks>
     /// Needs its own grant, which older setup scripts did not ask for: SELECT ON system.settings_profile_elements (or
-    /// SHOW SETTINGS PROFILES on a server with select_from_system_db_requires_grant = false). A refusal is reported as
-    /// the task's failure but kept off the agent's own error list (TaskExecutor, MissingOptionalGrant).
+    /// SHOW SETTINGS PROFILES on a server with select_from_system_db_requires_grant = false). SHOW SETTINGS PROFILES
+    /// also reads system.settings_profiles, with that setting true or false. A refusal is reported as the task's
+    /// failure but kept off the agent's own error list (TaskExecutor, MissingOptionalGrant).
+    /// A user's or a role's element finds no profile in the join: it is sent with apply_to_all 0 and two empty lists.
+    /// Every column that crosses the join is named with AS, so each keeps its own name in the output.
     /// </remarks>
     public const string CatalogSettings =
-        "SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index, setting_name, value, " +
-        "toString(writability) AS writability, inherit_profile\nFROM system.settings_profile_elements\n" +
-        "WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL\nFORMAT JSONEachRow";
+        "SELECT today() AS snapshot_date, e.profile_name AS profile_name, e.user_name AS user_name, e.role_name AS role_name, " +
+        "e.index AS element_index, e.setting_name AS setting_name, e.value AS value, toString(e.writability) AS writability, " +
+        "e.inherit_profile AS inherit_profile, p.apply_to_all AS apply_to_all, p.apply_to_list AS apply_to_list, " +
+        "p.apply_to_except AS apply_to_except\n" +
+        "FROM system.settings_profile_elements AS e\nLEFT JOIN system.settings_profiles AS p ON p.name = e.profile_name\n" +
+        "WHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', " +
+        "'log_queries_probability', 'log_query_settings', 'log_queries_cut_to_length') OR inherit_profile IS NOT NULL\n" +
+        "FORMAT JSONEachRow";
 
     // ---- probe (once per endpoint per probe interval) ----
 
