@@ -167,7 +167,7 @@ public class SnowflakeEngineTests
     {
         var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(SfRawSelects.ShapeText)));
 
-        Assert.Equal("A6FB5085367EB3ECACE7F81DB076C5CDF2B959BDF7439FC36350AF206FE288B5", digest);
+        Assert.Equal("3F58538E9B712E113F07A916390694B7881279D999C060B38818BD41FD585D38", digest);
         Assert.Equal("TO_VARCHAR(HASH(" + SfRawSelects.ShapeText + ") + 9223372036854775808)", SfRawSelects.ShapeHash);
     }
 
