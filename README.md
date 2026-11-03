@@ -447,7 +447,7 @@ The agent signs in with a user of its own and reads everything over SQL: no AWS 
   `views`, `partition`, `room`, `spillover`, `failed_signins`, `default_policies`, `level`, `profile`, `resource_limit`,
   `source_column`, `old_audit_settings`, `purge_job` and `password_expiry`, each `ok`, `warn` or `fail` with what to
   change. A `fail` refuses the source: the agent runs no poll on it, and probes it again every 5 minutes. Only a source
-  that could never return a record fails. Whether a job purges the trail is reported, and is your call.
+  that could never return a record fails. How the trail is purged, by a job or up to a time, is reported, and is your call.
 - **A refused sign-in** (wrong password, an expired password, no `CREATE SESSION`): the agent stops signing in to that
   source, for its probe and its tasks, until it restarts, so it never locks the user or fills your trail with its own
   failed sign-ins. Fix it, then restart the agent. **A locked account** is held the same way for an hour, then tried once,

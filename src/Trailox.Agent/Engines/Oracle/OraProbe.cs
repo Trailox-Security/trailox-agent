@@ -211,6 +211,11 @@ internal static class OraProbe
         {
             f.PurgeJob = jobs.Any(j => j[2] as string == "UNIFIED AUDIT TRAIL" && !string.Equals(j[1] as string, "DISABLED", StringComparison.OrdinalIgnoreCase));
         }
+        if (await Try(session, f, "DBA_AUDIT_MGMT_LAST_ARCH_TS", OraSql.PurgeCut, ct) is { } cut)
+        {
+            f.PurgeCutRead = true;
+            f.PurgedTo = cut.Count > 0 ? cut[0][0] as DateTime? : null;
+        }
     }
 
     private static async Task ReadOldSettingsAsync(IOraSession session, OraFacts f, CancellationToken ct)

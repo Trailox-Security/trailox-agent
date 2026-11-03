@@ -174,6 +174,13 @@ public static class OraSql
 
     public const string CleanupJobs = "SELECT job_name, job_status, audit_trail FROM SYS.DBA_AUDIT_MGMT_CLEANUP_JOBS";
 
+    /// <summary>
+    /// The time the unified trail is purged up to, which any purge sets, a job of the customer's own scheduler included: those never
+    /// appear in <see cref="CleanupJobs"/>. In UTC, because the column holds the session's zone. One row, NULL when none is set.
+    /// </summary>
+    public const string PurgeCut =
+        "SELECT MAX(SYS_EXTRACT_UTC(last_archive_ts)) FROM SYS.DBA_AUDIT_MGMT_LAST_ARCH_TS WHERE audit_trail = 'UNIFIED AUDIT TRAIL'";
+
     // ---- the daily catalog
 
     private const string CustomerOwners = "(SELECT username FROM SYS.DBA_USERS WHERE oracle_maintained = 'N')";

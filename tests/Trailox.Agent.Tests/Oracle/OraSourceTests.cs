@@ -793,7 +793,7 @@ public class OraSourceTests
 
     [Theory]
     [InlineData("ENABLED", "a job purges")]
-    [InlineData("DISABLED", "no job purges")]
+    [InlineData("DISABLED", "no purge has run")]
     public async Task A_disabled_purge_job_is_no_purge_job(string status, string message)
     {
         var fake = Probed();
@@ -804,6 +804,59 @@ public class OraSourceTests
         var check = Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job");
         Assert.Equal("ok", check.Status);
         Assert.Contains(message, check.Message);
+    }
+
+    private static async Task<OracleCheck> PurgeCheck(FakeOra fake) =>
+        Assert.Single((await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None)).Oracle!.Checks, c => c.Name == "purge_job");
+
+    /// <summary>A job of the customer's own scheduler never shows in the jobs view: the cut it set is what says the trail is purged.</summary>
+    [Fact]
+    public async Task A_purge_with_no_listed_job_is_reported_by_its_cut()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.CleanupJobs);
+        fake.Answer(OraSql.PurgeCut, new object?[] { new DateTime(2026, 10, 3, 0, 0, 1) });
+
+        var check = await PurgeCheck(fake);
+
+        Assert.Equal(("ok", "the unified trail is purged up to 2026-10-03 00:00 UTC"), (check.Status, check.Message));
+    }
+
+    [Fact]
+    public async Task No_job_and_no_cut_is_no_purge_yet()
+    {
+        var fake = Probed();
+        fake.Answer(OraSql.CleanupJobs);
+        fake.Answer(OraSql.PurgeCut, new object?[] { null });
+
+        Assert.Equal("no purge has run on the unified trail", (await PurgeCheck(fake)).Message);
+    }
+
+    [Fact]
+    public async Task One_view_refused_reports_from_the_other_and_names_the_view()
+    {
+        var fake = Probed();
+        fake.Fails(OraSql.CleanupJobs, 942);
+        fake.Answer(OraSql.PurgeCut, new object?[] { new DateTime(2026, 10, 3, 0, 0, 1) });
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        Assert.Equal("ok", Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job").Status);
+        Assert.Contains("purged up to", Assert.Single(caps.Oracle.Checks, c => c.Name == "purge_job").Message);
+        Assert.Contains("DBA_AUDIT_MGMT_CLEANUP_JOBS", Assert.Single(caps.Oracle.Checks, c => c.Name == "views").Message);
+    }
+
+    [Fact]
+    public async Task Both_views_refused_warns()
+    {
+        var fake = Probed();
+        fake.Fails(OraSql.CleanupJobs, 942);
+        fake.Fails(OraSql.PurgeCut, 942);
+
+        var caps = await new OraSource(Endpoint(), fake, () => Now).ProbeAsync(CancellationToken.None);
+
+        Assert.Equal("warn", Assert.Single(caps.Oracle!.Checks, c => c.Name == "purge_job").Status);
+        Assert.Contains("DBA_AUDIT_MGMT_LAST_ARCH_TS", Assert.Single(caps.Oracle.Checks, c => c.Name == "views").Message);
     }
 
     [Fact]

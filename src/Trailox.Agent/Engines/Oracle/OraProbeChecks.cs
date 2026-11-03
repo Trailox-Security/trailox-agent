@@ -61,6 +61,12 @@ public sealed class OraFacts
     public DateTime? PasswordExpiry { get; set; }
     public int? OldAuditSettings { get; set; }
     public bool? PurgeJob { get; set; }
+
+    /// <summary>Whether the time the trail is purged up to was read: <see cref="PurgedTo"/> null then means none is set.</summary>
+    public bool PurgeCutRead { get; set; }
+
+    /// <summary>The time the unified trail is purged up to, UTC.</summary>
+    public DateTime? PurgedTo { get; set; }
 }
 
 /// <summary>
@@ -108,7 +114,7 @@ public static class OraProbeChecks
         yield return ResourceLimit(f.Parameters.GetValueOrDefault("resource_limit"));
         yield return SourceColumn(f.SourceColumn);
         yield return OldSettings(f.UnifiedOption, f.OldAuditSettings);
-        yield return PurgeJob(f.PurgeJob);
+        yield return PurgeJob(f.PurgeJob, f.PurgeCutRead, f.PurgedTo);
         yield return PasswordExpiry(f.PasswordExpiry, f.NowUtc);
     }
 
@@ -396,13 +402,32 @@ public static class OraProbeChecks
             : Ok("old_audit_settings", "no old audit setting overlaps the policies");
     }
 
-    /// <summary>Whether a job purges the trail. It is reported, never a warning: whether to purge is the customer's call.</summary>
-    public static OracleCheck PurgeJob(bool? present) => present switch
+    /// <summary>
+    /// How the trail is purged: by a purge job, or up to the time any purge set. It is reported, never a warning: whether to purge is the
+    /// customer's call. Only both views unread warns.
+    /// </summary>
+    /// <remarks>
+    /// A job of the database's own scheduler is not in the jobs view, so an empty list there proves nothing alone: only the cut can say
+    /// that no purge has run.
+    /// </remarks>
+    public static OracleCheck PurgeJob(bool? job, bool cutRead, DateTime? purgedTo)
     {
-        null => Warn("purge_job", "the trail's purge jobs cannot be read"),
-        false => Ok("purge_job", "no job purges the unified trail"),
-        true => Ok("purge_job", "a job purges the unified trail"),
-    };
+        if (job == true)
+        {
+            return Ok("purge_job", "a job purges the unified trail");
+        }
+        if (purgedTo is { } at)
+        {
+            return Ok("purge_job", "the unified trail is purged up to " + at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC");
+        }
+        if (cutRead)
+        {
+            return Ok("purge_job", "no purge has run on the unified trail");
+        }
+        return job == false
+            ? Ok("purge_job", "no purge job is listed for the unified trail, and the time it is purged up to cannot be read")
+            : Warn("purge_job", "the trail's purge jobs cannot be read");
+    }
 
     public static OracleCheck PasswordExpiry(DateTime? expiry, DateTime now) =>
         expiry is { } at && at - now < TimeSpan.FromDays(ExpiryWarnDays)

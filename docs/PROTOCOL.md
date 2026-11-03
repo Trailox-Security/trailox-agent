@@ -901,7 +901,10 @@ under 8 days of it. The size of a day fails no check.
 `failed_signins` says whether a failed sign-in reaches the trail, from the enabled policies: `ok` when `ORA_LOGON_FAILURES`,
 `ORA_LOGIN_LOGOUT` or `TRAILOX_LOGON` is enabled for failures for every user, or every user but those it names. It warns when one
 covers some users only, when none is enabled for failures (a policy of your own is not looked into), and when the policies
-cannot be read. `purge_job` says whether a job purges the trail, and is `ok` either way: whether to purge is your call.
+cannot be read. `purge_job` says how the trail is purged, from `DBA_AUDIT_MGMT_CLEANUP_JOBS` and
+`DBA_AUDIT_MGMT_LAST_ARCH_TS`: a purge job, the time the trail is purged up to (UTC, to the minute), or that no purge has run. A
+job of the database's own scheduler shows only by that time. It is `ok` either way, and warns only when neither view can be
+read: whether to purge is your call.
 
 An optional read that fails for any reason but a lost session is listed in `views`, and the probe goes on. One that a limit
 stopped is listed there too, as slow rather than as a missing grant, and fails no check, `poll_view` included.

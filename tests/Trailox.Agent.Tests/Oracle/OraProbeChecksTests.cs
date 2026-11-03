@@ -301,15 +301,52 @@ public class OraProbeChecksTests
         Assert.Equal("warn", OraProbeChecks.OldSettings("FALSE", null).Status);
     }
 
-    /// <summary>Whether to purge is the customer's call, so no job is reported and never pressed on them.</summary>
-    [Fact]
-    public void A_purge_job_is_reported_and_its_absence_is_no_warning()
+    private static readonly DateTime Cut = new(2026, 10, 3, 0, 0, 1);
+
+    /// <summary>Whether to purge is the customer's call, so a purge is reported, and no purge is never pressed on them.</summary>
+    [Theory]
+    [InlineData(true, true, true, "a job purges the unified trail")]
+    [InlineData(true, false, false, "a job purges the unified trail")]
+    [InlineData(false, true, true, "the unified trail is purged up to 2026-10-03 00:00 UTC")]
+    [InlineData(null, true, true, "the unified trail is purged up to 2026-10-03 00:00 UTC")]
+    [InlineData(false, true, false, "no purge has run on the unified trail")]
+    [InlineData(null, true, false, "no purge has run on the unified trail")]
+    public void A_purge_is_reported_by_its_job_or_its_cut_and_none_is_no_warning(bool? job, bool cutRead, bool cutSet, string message)
     {
-        Assert.Equal("ok", OraProbeChecks.PurgeJob(false).Status);
-        Assert.Contains("no job", OraProbeChecks.PurgeJob(false).Message);
-        Assert.DoesNotContain("setup", OraProbeChecks.PurgeJob(false).Message);
-        Assert.Equal("ok", OraProbeChecks.PurgeJob(true).Status);
-        Assert.Equal("warn", OraProbeChecks.PurgeJob(null).Status);
+        var check = OraProbeChecks.PurgeJob(job, cutRead, cutSet ? Cut : null);
+        Assert.Equal(("ok", message), (check.Status, check.Message));
+        Assert.DoesNotContain("setup", check.Message);
+    }
+
+    /// <summary>A job of the customer's own scheduler is not in the jobs view, so an empty list there proves no absence of a purge.</summary>
+    [Fact]
+    public void An_empty_jobs_view_with_the_cut_unread_says_only_what_it_knows()
+    {
+        var check = OraProbeChecks.PurgeJob(false, false, null);
+        Assert.Equal("ok", check.Status);
+        Assert.DoesNotContain("no purge has run", check.Message);
+        Assert.Contains("cannot be read", check.Message);
+    }
+
+    [Fact]
+    public void Only_neither_view_read_warns()
+    {
+        Assert.Equal("warn", OraProbeChecks.PurgeJob(null, false, null).Status);
+    }
+
+    [Fact]
+    public void The_cut_is_given_to_the_minute_in_utc_whatever_the_culture()
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("ar-SA");
+            Assert.Equal("the unified trail is purged up to 2026-10-03 00:00 UTC", OraProbeChecks.PurgeJob(null, true, Cut).Message);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = culture;
+        }
     }
 
     [Fact]

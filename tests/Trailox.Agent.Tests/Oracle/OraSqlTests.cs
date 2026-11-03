@@ -47,6 +47,15 @@ public class OraSqlTests
         Assert.DoesNotContain("DATABASE_ROLE", OraSql.Session);
     }
 
+    /// <summary>The column holds the session's zone, so the cut is read in UTC, for the unified trail only, as one row.</summary>
+    [Fact]
+    public void The_purge_cut_is_read_in_utc_for_the_unified_trail()
+    {
+        Assert.Contains("MAX(SYS_EXTRACT_UTC(last_archive_ts))", OraSql.PurgeCut);
+        Assert.Contains("FROM SYS.DBA_AUDIT_MGMT_LAST_ARCH_TS", OraSql.PurgeCut);
+        Assert.Contains("audit_trail = 'UNIFIED AUDIT TRAIL'", OraSql.PurgeCut);
+    }
+
     [Fact]
     public void The_poll_cuts_its_window_on_the_utc_column_only()
     {
