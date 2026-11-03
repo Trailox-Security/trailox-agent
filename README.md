@@ -208,8 +208,13 @@ Self-managed or ClickHouse Cloud, over the HTTP interface (usually 8443 with TLS
 - **Reads:** `system.query_log`, `system.session_log`, and daily `system.tables`,
   `system.users`, `system.grants`, and (from 1.7) the `readonly`, `allow_ddl` and profile rows of
   `system.settings_profile_elements`, so Trailox can tell which users a readonly setting stops
-  from writing. Every request carries `log_comment=trailox-agent`, and the agent excludes its own
-  reads. Any other statement that carries that comment is reported like any other (from 1.12.0).
+  from writing. After 1.15 it also reads the rows of the six settings that can keep a statement
+  out of `system.query_log` or cut what it records (`log_queries`, `log_queries_min_type`,
+  `log_queries_min_query_duration_ms`, `log_queries_probability`, `log_query_settings`,
+  `log_queries_cut_to_length`), and whom each profile applies to, from `system.settings_profiles`.
+  No grant is added: the setup script's `SHOW SETTINGS PROFILES` reads `system.settings_profiles`.
+  Every request carries `log_comment=trailox-agent`, and the agent excludes its own reads. Any
+  other statement that carries that comment is reported like any other (from 1.12.0).
 - **Account:** a `readonly = 2` user with `SELECT` on those system tables; the Agents page
   prints the script.
 - **agent.yaml:** `host`/`port`/`tls` = the HTTP endpoint; `clusterName` = the cluster to

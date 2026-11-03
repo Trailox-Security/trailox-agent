@@ -256,10 +256,18 @@ FROM system.grants FORMAT JSONEachRow
 
 -- catalog_settings (daily; agent 1.7 and newer). Needs SELECT ON system.settings_profile_elements
 -- (or SHOW SETTINGS PROFILES). A refusal is reported as the task's failure, not as an agent error.
-SELECT today() AS snapshot_date, profile_name, user_name, role_name, index AS element_index,
-       setting_name, value, toString(writability) AS writability, inherit_profile
-FROM system.settings_profile_elements
-WHERE setting_name IN ('readonly', 'allow_ddl') OR inherit_profile IS NOT NULL
+-- The six logging settings and the three apply_to columns are new after 1.15: SHOW SETTINGS PROFILES
+-- also reads system.settings_profiles, so no grant is added. A user's or a role's row is sent with
+-- apply_to_all 0 and two empty lists, whatever the server's join_use_nulls.
+SELECT today() AS snapshot_date, e.profile_name AS profile_name, e.user_name AS user_name,
+       e.role_name AS role_name, e.index AS element_index, e.setting_name AS setting_name,
+       e.value AS value, toString(e.writability) AS writability, e.inherit_profile AS inherit_profile,
+       ifNull(p.apply_to_all, 0) AS apply_to_all, p.apply_to_list AS apply_to_list, p.apply_to_except AS apply_to_except
+FROM system.settings_profile_elements AS e
+LEFT JOIN system.settings_profiles AS p ON p.name = e.profile_name
+WHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_type',
+                       'log_queries_min_query_duration_ms', 'log_queries_probability', 'log_query_settings',
+                       'log_queries_cut_to_length') OR inherit_profile IS NOT NULL
 FORMAT JSONEachRow
 ```
 
