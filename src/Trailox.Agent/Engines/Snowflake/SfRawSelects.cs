@@ -54,12 +54,42 @@ public static class SfRawSelects
     /// <remarks>
     /// ⚠ Not even with storeRawQueryText on, as it was before 1.15.0: bound values are the customer's data,
     ///   not the statement's text.
+    /// ⚠ From 1.16.0 each row also carries the statement's SHAPE: QUERY_SHAPE_TEXT, its text with every literal masked
+    ///   and every name kept, and QUERY_SHAPE_HASH, that text's hash. Snowflake computes both, so they are sent whether or
+    ///   not the text is: with storeRawQueryText off, Trailox still knows which statements are the same statement, and
+    ///   the values in them never leave.
     /// </remarks>
     public static string Events(EndpointConfig endpoint, long startMicros, long endMicros)
     {
         var excluded = endpoint.StoreRawQueryText ? "BIND_VALUES" : "QUERY_TEXT, BIND_VALUES";
-        return $"SELECT * EXCLUDE ({excluded}) FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
+        return $"SELECT * EXCLUDE ({excluded}), {ShapeText} AS QUERY_SHAPE_TEXT, {ShapeHash} AS QUERY_SHAPE_HASH " +
+               $"FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
     }
+
+    /// <summary>
+    /// A statement's text with its literals masked and its names kept: one pass keeps a quoted name, turns a string into ''
+    /// and drops a comment (--, //, /* */) or a $$ block (the leftmost match wins, so none can hide another); then '' and
+    /// every number not inside a name become ?, a list of ? becomes (?), a run of (?) rows becomes one, and whitespace
+    /// collapses.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NO VALUE MAY ESCAPE IT: this text is sent even with storeRawQueryText off. A string may hold '' or a backslash
+    ///   escape (O\'Brien), and a string, a comment or a $$ block cut open by QUERY_TEXT's length limit runs to the end.
+    /// ⚠ TRAILOX RUNS THIS EXACT TEXT TOO, for the sources it reads itself, so one statement has one shape whichever way it
+    ///   is collected. The test pins its SHA-256; Trailox's own test pins the same value. Change both or neither.
+    /// ⚠ The patterns are single-quoted with backslash escapes (\' and \\), not $$-quoted: the first one contains $$.
+    /// </remarks>
+    public static readonly string ShapeText =
+        "REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(QUERY_TEXT, ''), "
+        + """'("([^"]|"")*")|(\')([^\'\\\\]|\'\'|\\\\.)*(\'|$)|--[^\\n]*|//[^\\n]*|/\\*([^*]|\\*+[^*/])*(\\*+/|$)|\\$\\$([^$]|\\$[^$])*(\\$\\$|$)', '\\1\\3\\3'), """
+        + """'\'\'', '?'), """
+        + """'(^|[^A-Za-z0-9_$".])[0-9]+(\\.[0-9]+)?', '\\1?'), """
+        + """'\\(\\s*-?\\?(\\s*,\\s*-?\\?)*\\s*\\)', '(?)'), """
+        + """'\\(\\?\\)(\\s*,\\s*\\(\\?\\))+', '(?)'), """
+        + """'\\s+', ' ')""";
+
+    /// <summary>The shape's hash, as unsigned 64-bit text.</summary>
+    public static readonly string ShapeHash = "TO_VARCHAR(HASH(" + ShapeText + ") + 9223372036854775808)";
 
     /// <summary>How far before a window a statement that ended in it may have started, and still be attributed.</summary>
     internal const long StatementLookbackMicros = 24L * 3600 * 1_000_000;

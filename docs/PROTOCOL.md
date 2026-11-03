@@ -384,6 +384,12 @@ are at that read, in each window that has its statements.
 
 `BIND_VALUES`, the values a statement was run with, is never read (from 1.15.0; before, it was sent when
 `storeRawQueryText` was true). With `storeRawQueryText` false, `QUERY_TEXT` is excluded too.
+
+From 1.16.0 each statement also carries its shape, computed by Snowflake: `QUERY_SHAPE_TEXT`, the text with every
+literal masked and every name kept (comments dropped, a list of values written `(?)`), and `QUERY_SHAPE_HASH`, that
+text's hash as unsigned 64-bit text. Both are sent whatever `storeRawQueryText` says, so Trailox can tell which
+statements are the same statement while the values in them stay with you. Trailox masks the statements it reads itself
+with the same text (`SfRawSelects.ShapeText`), so a statement has one shape however it is collected.
 `excludedDatabases` are left out of the catalog streams.
 
 From 1.11.0, `catalog_users` also reads `HAS_WORKLOAD_IDENTITY`, `PASSWORD_LAST_SET_TIME`, `DISPLAY_NAME` and
@@ -401,7 +407,9 @@ SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(END_TIME)), 0) FROM SNOWFLAKE.A
 SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(EVENT_TIMESTAMP)), 0) FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
 
 -- streams (window bound = TO_TIMESTAMP_LTZ(<n>, 6))
-SELECT * EXCLUDE ([QUERY_TEXT, ]BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
+SELECT * EXCLUDE ([QUERY_TEXT, ]BIND_VALUES), <shape> AS QUERY_SHAPE_TEXT, TO_VARCHAR(HASH(<shape>) + 9223372036854775808) AS QUERY_SHAPE_HASH
+  FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > <start> AND END_TIME <= <end>
+-- <shape> (from 1.16.0): six REGEXP_REPLACE over COALESCE(QUERY_TEXT, ''), exactly as SfRawSelects.ShapeText
 -- access_history: first the oldest start of the window's statements, then their rows from <from> = that start
 -- less a minute (a day before the window at most; the window's end when it has no statement; <start - 24 h> when
 -- the answer is not a whole number)

@@ -145,13 +145,30 @@ public class SnowflakeEngineTests
         await Assert.ThrowsAsync<SfException>(() => source.ProbeAsync(CancellationToken.None));
     }
 
-    /// <summary>1.15: the values a statement was bound to are never read; the text only when the customer sends it.</summary>
+    /// <summary>
+    /// 1.15: the values a statement was bound to are never read; the text only when the customer sends it. 1.16: the
+    /// statement's shape is sent either way.
+    /// </summary>
     [Fact]
     public void Events_windows_on_end_time_never_reads_bind_values_and_drops_text_when_the_customer_said_so()
     {
-        Assert.Equal("SELECT * EXCLUDE (BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > TO_TIMESTAMP_LTZ(1000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(2000, 6)",
+        var shape = $", {SfRawSelects.ShapeText} AS QUERY_SHAPE_TEXT, {SfRawSelects.ShapeHash} AS QUERY_SHAPE_HASH ";
+        Assert.Equal("SELECT * EXCLUDE (BIND_VALUES)" + shape + "FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY WHERE END_TIME > TO_TIMESTAMP_LTZ(1000, 6) AND END_TIME <= TO_TIMESTAMP_LTZ(2000, 6)",
             SfRawSelects.Events(Endpoint(), 1000, 2000));
-        Assert.StartsWith("SELECT * EXCLUDE (QUERY_TEXT, BIND_VALUES) FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", SfRawSelects.Events(Endpoint(text: false), 1000, 2000));
+        Assert.StartsWith("SELECT * EXCLUDE (QUERY_TEXT, BIND_VALUES)" + shape + "FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", SfRawSelects.Events(Endpoint(text: false), 1000, 2000));
+    }
+
+    /// <summary>
+    /// 1.16: Trailox masks the statements it reads itself with this exact text, and its own test pins the same SHA-256, so
+    /// one statement has one shape whichever way it is collected. Change both or neither.
+    /// </summary>
+    [Fact]
+    public void The_shape_masking_is_the_text_Trailox_runs()
+    {
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(SfRawSelects.ShapeText)));
+
+        Assert.Equal("A6FB5085367EB3ECACE7F81DB076C5CDF2B959BDF7439FC36350AF206FE288B5", digest);
+        Assert.Equal("TO_VARCHAR(HASH(" + SfRawSelects.ShapeText + ") + 9223372036854775808)", SfRawSelects.ShapeHash);
     }
 
     private const long Start = 1_790_000_000_000_000;
