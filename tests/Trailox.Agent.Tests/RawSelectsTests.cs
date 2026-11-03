@@ -134,7 +134,7 @@ public class RawSelectsTests
 
         Assert.StartsWith("SELECT today() AS snapshot_date, e.profile_name AS profile_name, e.user_name AS user_name, e.role_name AS role_name, "
                           + "e.index AS element_index, e.setting_name AS setting_name, e.value AS value, toString(e.writability) AS writability, "
-                          + "e.inherit_profile AS inherit_profile, p.apply_to_all AS apply_to_all, p.apply_to_list AS apply_to_list, "
+                          + "e.inherit_profile AS inherit_profile, ifNull(p.apply_to_all, 0) AS apply_to_all, p.apply_to_list AS apply_to_list, "
                           + "p.apply_to_except AS apply_to_except\n", sql);
         Assert.Contains("\nFROM system.settings_profile_elements AS e\nLEFT JOIN system.settings_profiles AS p ON p.name = e.profile_name\n", sql);
         Assert.Contains("\nWHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', "
