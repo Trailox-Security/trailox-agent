@@ -208,7 +208,8 @@ Self-managed or ClickHouse Cloud, over the HTTP interface (usually 8443 with TLS
   `log_queries_min_query_duration_ms`, `log_queries_probability`, `log_query_settings`,
   `log_queries_cut_to_length`), and whom each profile applies to, from `system.settings_profiles`.
   No grant is added: the setup script's `SHOW SETTINGS PROFILES` reads `system.settings_profiles`.
-  Every request carries `log_comment=trailox-agent`, and the agent excludes its own reads. Any other statement that carries that comment is reported like any other (from 1.12.0).
+  Every request carries `log_comment=trailox-agent`, and the agent excludes its own reads. Any
+  other statement that carries that comment is reported like any other (from 1.12.0).
 - **Account:** a `readonly = 2` user with `SELECT` on those system tables; the Agents page
   prints the script.
 - **agent.yaml:** `host`/`port`/`tls` = the HTTP endpoint; `clusterName` = the cluster to
