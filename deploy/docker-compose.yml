@@ -29,6 +29,7 @@ services:
       # TRAILOX_RS_PASSWORD: ${TRAILOX_RS_PASSWORD}              # a Redshift monitoring user's password
       # TRAILOX_ATLAS_SECRET: ${TRAILOX_ATLAS_SECRET}            # a MongoDB Atlas service account's secret
       # TRAILOX_PG_PASSWORD: ${TRAILOX_PG_PASSWORD}              # a PostgreSQL monitoring role's password
+      # TRAILOX_ORA_PASSWORD: ${TRAILOX_ORA_PASSWORD}            # an Oracle monitoring user's password
       # CH_HOST: clickhouse.internal                            # a value agent.yaml refers to as ${CH_HOST} (1.5.0 or later)
       # HTTPS_PROXY: http://proxy.internal:3128
       # NO_PROXY: clickhouse.internal,10.0.0.0/8

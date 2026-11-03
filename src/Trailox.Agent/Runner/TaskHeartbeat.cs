@@ -8,7 +8,9 @@ namespace Trailox.Agent.Runner;
 /// </summary>
 /// <remarks>
 /// An engine beats while it makes progress (lines read), never on a timer: a read that stops moving
-/// stops the beats, and the liveness probe then restarts the agent as it does today.
+/// stops the beats, and the liveness probe then restarts the agent as it does today. The one exception
+/// is a call with a limit of its own, which may wait for minutes with nothing to show (agent 1.16:
+/// Oracle's audit read): it beats while it waits, because its limit is what ends it.
 /// </remarks>
 public static class TaskHeartbeat
 {

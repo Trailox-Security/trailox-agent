@@ -110,6 +110,8 @@ The report never contains `host`, `port`, credentials or any row data.
   agent resumes where it stopped. Uploading the same task twice is harmless.
 - Windows are half-open, `(startMicros, endMicros]`, in microseconds since the Unix epoch (UTC).
   Catalog tasks have no window.
+- From 1.16.0 a task may also carry `readLimitSeconds`, the limit on each call of its read (section 6g), and `partBytes` and
+  `partSeconds`, which say that its rows may be sent in parts (section 4). A task without them runs as it always did.
 
 ## 3. Executing a task
 
@@ -127,16 +129,43 @@ body: one JSON object per row, as the database returned it
 ```
 
 A `mongo_ops` body (section 6e), from 1.8.2 a `mongo_slow_ops`, `mongo_connections` or
-`mongo_signin_failures` body, and from 1.12.0 every body of a `postgres` endpoint (section 6f), may also contain
-blank lines, before, between or after rows; a blank line is not a row, and a body of blank lines only has no rows.
+`mongo_signin_failures` body, from 1.12.0 every body of a `postgres` endpoint (section 6f), and from 1.16.0 every body
+of an `oracle` endpoint (section 6g), may also contain blank lines, before, between or after rows; a blank line is not a
+row, and a body of blank lines only has no rows.
 
 Reply `200 { "rowsAccepted": n }`. Any other reply is handled as in section 1: the agent
 records the error, reports it in the next check-in's `lastErrors`, and moves on. Nothing is
 retried locally, because Trailox re-issues the window.
 
+### One read in several parts (from 1.16.0)
+
+One read can hold more rows than one upload takes. A task with `partBytes` greater than 0 sends its rows as numbered uploads
+to the same `chunkId`, from 1, one at a time, and then says that it has finished:
+
+```
+POST /v1/agent/chunks/{chunkId}?part=1           -> 200 { "rowsAccepted": n }
+POST /v1/agent/chunks/{chunkId}?part=2           -> 200 { "rowsAccepted": n }
+POST /v1/agent/chunks/{chunkId}/complete         { "parts": 2, "readMillis": 41250 }
+                                                 -> 200 { "rowsAccepted": <all parts>, "watermarkMicros": n }
+```
+
+- A part is an ordinary upload: the same headers and the same body. It holds whole rows, and a row is never cut.
+- A part's body is at most `partBytes` before compression, not counting blank lines. It ends at that size, or `partSeconds`
+  after the part began, whichever comes first. With no `partSeconds` that is 600 seconds.
+- A part begins only when there are rows for it, so no upload stands open while the database reads with nothing to send.
+- A part waits for the reply to the one before. All the parts of a read carry one `chunkId`, so its rows stay one chunk.
+- `/complete` follows the last part, with how many were sent. Only then is the task done, and only then is the window read.
+  A body has no marker of its own, because the last part is not known until the rows have ended. A read with no rows sends no
+  part, and `/complete` with `parts` 0.
+- `readMillis` on `/complete` is how long the read waited on the database: its calls on the server, summed, with no upload time
+  in it. An engine that does not measure leaves it out.
+- A read that stops part of the way sends no `/complete`. It is reported as in section 5, or, when a reply to a part stopped it,
+  handled as in section 1. Its window is read again from the start, under a new `chunkId`.
+- A task without `partBytes` is one upload with no `part`, and no `/complete`.
+
 ## 5. Reporting a failed task: `POST /v1/agent/chunks/{chunkId}/failed`
 
-`{ "message": "...", "reason": "..." }`. Sent when a task fails for any reason but the agent stopping:
+`{ "message": "...", "reason": "...", "readMillis": n }`. Sent when a task fails for any reason but the agent stopping:
 the `SELECT` fails (a missing grant, an unreachable database), the database does not answer in time, or
 it answers with something the agent cannot read. The window is re-issued on a later check-in. When this
 report cannot be delivered, the task stays unanswered and is handed back at a later check-in.
@@ -146,7 +175,10 @@ published the whole window yet (MongoDB Atlas log files arrive minutes late). Tr
 same window at a later poll, and the agent does not list it among its errors. From 1.15.0,
 `window_too_long` means the database stopped the read at its time limit (Snowflake's statement timeout,
 error `000630`): the same window would stop the same way, so Trailox issues shorter ones. The agent still
-lists it among its errors.
+lists it among its errors. From 1.16.0, `too_large_at_source` means a bound stopped the read (Oracle's per-call limits,
+`ORA-02393` and `ORA-02395`, or the agent's limit on a call): Trailox issues shorter windows, and the agent lists it among its
+errors. The agent sends either reason whether the read stopped before the first row or during the upload. `readMillis` (from
+1.16.0) is as in section 4, up to where the read stopped, and an engine that does not measure leaves it out.
 
 ## 6. ClickHouse (engine `clickhouse`)
 
@@ -749,6 +781,154 @@ or the task, and the agent then does not sign in to that source again, for a pro
 primary's host is its own RDS instance endpoint (`<primary id>.<hash>.<region>.rds.amazonaws.com`); for any other
 host (an address, a CNAME, an Aurora cluster endpoint) each replica must be `id=host`, or the endpoint is
 invalid.
+
+## 6g. Oracle (engine `oracle`, from 1.16.0)
+
+Oracle 19c and later: Amazon RDS for Oracle and self-managed servers, one endpoint for each PDB or non-CDB. The agent
+signs in with `Oracle.ManagedDataAccess.Core`, one connection for each task and for each page of columns, closed after,
+with no pool. The descriptor is built from `host`, `port` and `options.service_name`; with `tls: true` the protocol is
+`tcps` and `SSL_SERVER_DN_MATCH` is on, so the server's certificate must match the host.
+
+**Each session** runs `ALTER SESSION SET TIME_ZONE = 'UTC' NLS_COMP = 'BINARY' NLS_SORT = 'BINARY'` and `ALTER SESSION DISABLE
+PARALLEL QUERY`. Each call on the server has 60 seconds: an execute and each fetch, so a long window of quick fetches runs,
+and the time the upload holds the fetch back does not count. The audit poll's own calls have the task's `readLimitSeconds`: at
+most 3,600, and 60 when the task has none. A limit stops one call, not the whole read. Every object is named with its owner,
+so no public synonym can stand in for one. The agent calls no procedure, and of the functions in packages only
+`SYS.DBMS_LOB.SUBSTR` and `SYS.DBMS_LOB.GETLENGTH`.
+
+A call that runs for minutes sends nothing, so the agent marks itself alive while it waits, within the call's limit. A call
+that has passed its limit gets 5 seconds to stop before the next statement runs; if it has not stopped by then, the session's
+further calls fail at once as timed out.
+
+**The audit poll** reads `AUDSYS.UNIFIED_AUDIT_TRAIL` for one window:
+
+```sql
+WHERE event_timestamp_utc >= CAST(:lo AS TIMESTAMP) AND event_timestamp_utc < CAST(:hi AS TIMESTAMP)
+  AND NOT (NVL(dbusername, ' ') = :me AND dbproxy_username IS NULL AND NVL(return_code, -1) = 0
+           AND NVL(action_name, ' ') = 'SELECT')
+```
+
+`start <= t < end`, in UTC, with no `ORDER BY`. `:me` is the agent's user in upper case: its own successful reads are left
+out. A sign-in by the monitoring user is recorded: its sign-ins and sign-offs, its changes and its failed sign-ins are read,
+and so is anything done as it through a proxy. `SQL_TEXT` is a CLOB, and no LOB enters the result: the poll selects its
+length and its first 4,000 characters, in four pieces of 1,000, each of which fits a
+`VARCHAR2(4000)` in any character set. `SQL_BINDS` is never selected. `SOURCE` is selected only where the probe found the
+column (19.21 and later). With `storeRawQueryText: false` the text is not selected at all. A record's trailing NUL, which
+the trail stores, is removed.
+
+**Keep-alive:** a poll reads its whole day's partition before the first row of a late window, so a body can go quiet. It
+works as in section 6f, for every stream of this engine.
+
+**Text.** `sql_text` is always a shape, in two steps, on every record: passwords are redacted, then every string and number
+is replaced. No pattern can find a password that dynamic SQL spells in pieces, so the strings are not left to a pattern.
+
+Step one replaces passwords by `<redacted>` in every text and in `dp_text_parameters1`, whatever Oracle masked itself:
+- after `IDENTIFIED BY`, the next password, in any quoting or none, up to the next ASCII white space (a password that is no
+  valid word fails its statement, and the statement is still audited); `IDENTIFIED BY VALUES '...'`; the old or new password
+  after each `REPLACE` or `SET`. Anything but a clause Oracle takes after `IDENTIFIED`, or after a password, replaces the
+  rest of the text;
+- the next word, name or string after `SECRET` in `ADMINISTER KEY MANAGEMENT`, and after `ENCRYPT USING` or `DECRYPT USING`;
+- the first string or quoted name within the next twelve tokens after a name that holds `pass`, `pwd`, `secret`,
+  `private_key`, `api_key`, `access_key` or `token`, or is `pw` or ends in `_pw`, and the strings joined to it;
+- every string in a call to `DBMS_CREDENTIAL.CREATE_CREDENTIAL` or `UPDATE_CREDENTIAL`, `DBMS_CLOUD.CREATE_CREDENTIAL` or
+  `UPDATE_CREDENTIAL`, `DBMS_SCHEDULER.CREATE_CREDENTIAL`, `DBMS_VECTOR.CREATE_CREDENTIAL`,
+  `DBMS_VECTOR_CHAIN.CREATE_CREDENTIAL`, `UTL_HTTP.SET_AUTHENTICATION`, `SET_WALLET`, `SET_PROXY`, `REQUEST`, `REQUEST_PIECES`
+  or `CREATE_REQUEST_CONTEXT`, `UTL_SMTP.AUTH`, `DBMS_LDAP.SIMPLE_BIND_S` or `BIND_S`, `DBMS_DATAPUMP.SET_PARAMETER`;
+- a whole string or quoted name that holds any of these itself, or a URL with a password.
+
+Any string or quoted name that never ends replaces the rest of the text.
+
+Step two is the statement's shape: every string (`'...'`, `N'...'`, `q'[...]'` with any delimiter, `nq'...'`) and number is
+replaced by `?`; a list of them is one `?`, and so is a list of rows. Comments and hints are removed and white space collapsed.
+Words, operators, quoted names and bind placeholders stay; a quoted name compared with something is a value, and becomes `?`.
+The shape ends with `?` at a string or quoted name that never ends, and at a word that touches a quote (`'O'Brien'`), where the
+quotes are not where they seem.
+
+**Grouping.** Records of the actions `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `UPSERT`, `EXECUTE` and `PL/SQL EXECUTE`
+are grouped per minute, one row for each (instance, user, proxy user, action, return code, object, program, OS user, client
+host and address, policies, privilege, audit type, shape). The row is the first record seen, with `event_count` records
+and the first time. Every other record is a row of its own, with `event_count` 1 and an empty `shape_hash`.
+- `shape_hash`, 16 hexadecimal digits, identifies the row: the group's key, its minute and its part. No two grouped rows share
+  one. It does not identify the shape: the same shape from two clients has two.
+- A minute ships when a record 2 minutes past its end has been read, or when 20,000 groups are open. The poll has no order,
+  so a record that comes later opens a second row for that minute and key, with a `shape_hash` of its own; the counts add up.
+- Past 500 keys of one user in one minute, that user's further records are grouped without their shape and client: `sql_text`
+  is `<many shapes>`, and instance, user, proxy user, action, return code and object stay. Past 2,000 objects, or 500 for
+  records that failed, they are grouped without their object too: `object_name` is `<many objects>`, and the key is the
+  instance, user, proxy user, action and whether it failed.
+- Past 10,000 groups in one minute, everyone's further keys go straight to that last form, so every record stays under its
+  own user's name.
+
+| stream | rows | columns |
+|---|---|---|
+| `ora_audit` | an audit record or group, and per window one count row, `action_name` = `summary`, stamped with the window's start | `event_time`, `instance_id`, `dbusername`, `dbproxy_username`, `action_name`, `return_code`, `object_schema`, `object_name`, `client_program_name`, `os_username`, `userhost`, `terminal`, `authentication_type`, `unified_audit_policies`, `system_privilege_used`, `audit_type`, `sessionid`, `entry_id`, `statement_id`, `sql_text`, `sql_text_length`, `truncated`, `dp_text_parameters1`, `summary`, `event_count`, `shape_hash` |
+| `catalog_users` | a user | `username`, `account_status`, `lock_date`, `expiry_date`, `created`, `profile`, `authentication_type`, `oracle_maintained`, `snapshot_date` |
+| `catalog_grants` | a role, system or table grant | `kind` (`role`, `system`, `table`), `grantee`, `privilege`, `owner`, `table_name`, `grantable`, `snapshot_date` |
+| `catalog_tables` | a table | `owner`, `table_name`, `num_rows`, `blocks`, `partitioned`, `last_analyzed`, `snapshot_date` |
+| `catalog_columns` | a column | `owner`, `table_name`, `column_name`, `data_type`, `column_id`, `snapshot_date` |
+| `catalog_settings` | one setting | `name`, `setting`, `snapshot_date` |
+
+- `ora_audit`: `event_time` is `EVENT_TIMESTAMP_UTC`, in microseconds. `authentication_type` is as the server wrote it,
+  with the client's address inside. A column with no value is an empty string, or 0 for a number; a record with no return code
+  has `return_code` -1. `sql_text_length` is the whole text's length as the server counts it, the trailing NUL included, and
+  `truncated` is 1 when it is over 4,000, else 0. The count row has `event_count` 1, and its `summary` is JSON: `records` (read),
+  `shipped` (rows of their own), `by_action`, `file_records` (records from spillover files, null where the view has no
+  `SOURCE`), `audit_records`, `audit_rows`, `audit_shapeless` and `audit_late`. On every other row `summary` is empty.
+- The catalog: `catalog_grants`, `catalog_tables` and `catalog_columns` read schemas whose owner has `ORACLE_MAINTAINED` =
+  `N` (role and system grants read every grantee). `snapshot_date` is the task's start (UTC). At most 50,000 tables, 200,000
+  grants of each kind and 1,000,000 columns; a list that returns as many rows as its limit counts as cut, and the stream
+  ends with one more row of its own columns, whose `kind`, `partitioned` or `data_type` reads `truncated`. Columns are read
+  1,000 tables per statement and connection. `DATE` columns are as the server stores them, in its own local time.
+- `catalog_settings`: each `name` starts with its part: `option.` (`V$OPTION`), `parameter.` (`V$PARAMETER`), `policy.`
+  (`AUDIT_UNIFIED_ENABLED_POLICIES`), `statement_audit.`, `privilege_audit.`, `cleanup_job.`, `trail.`, `own_limit.`,
+  `own_password_limit.` and `own_account.`. A part that cannot be read is a row named `unreadable.` and the object, whose
+  `setting` is the Oracle error, and the others are read.
+
+**The statements** are in [`OraSql.cs`](../src/Trailox.Agent/Engines/Oracle/OraSql.cs). None counts the trail, and none reads
+`DBA_SEGMENTS`, `V$ACTIVE_SESSION_HISTORY`, `DBA_HIST_*` or `V$SQL_MONITOR`.
+
+**The probe** reports `caps.oracle` in the check-in: `platform` (`rds`, `self_managed`), `product`, `edition`, `container`,
+`databaseRole`, `ownUser`, `ownProgram` (both as the server gives them), `probedAtMicros`, `unifiedMode` (`pure`, `mixed`),
+`auditTrail`, `trailPartitioned`, `trailInterval`, `trailRows`, `trailBlocks` (statistics, never a count), `todayPartition`,
+`todayPartitionEndMicros`, `todayTablespace`, `configuredTablespace`, `roomBytes`, `growthBytesPerDay`, `spilled`,
+`sourceColumn`, `observedLevel` (`logs_only`, `partial`, `selective`, `full`; empty when the policies
+cannot be read), `policiesRead`, `policies` (`name`, `enabledOption`, `entityName`, `entityType`, `success`, `failure`: the
+`TRAILOX_*` ones enabled), `policyObjectsRead`, `policyObjects` (`policy`, `schema`, `name`: the objects those policies name, at most
+500) and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `container`,
+`platform`, `poll_view`, `audit_trail`, `views`, `partition`, `room`, `spillover`, `failed_signins`, `default_policies`, `level`,
+`profile`, `resource_limit`, `source_column`, `old_audit_settings`, `purge_job`, `password_expiry`.
+
+`earliestEventMicros` and `earliestSessionMicros` are 0: the trail's oldest record is never read.
+
+`databaseRole` is `SYS_CONTEXT('USERENV', 'DATABASE_ROLE')` as the server gives it: `PRIMARY`, `PHYSICAL STANDBY`,
+`LOGICAL STANDBY` or `SNAPSHOT STANDBY`. It needs no grant and decides no check, and it is absent when it cannot be read. A
+read-only standby always writes to spillover files, so `spilled` means something different there.
+
+`growthBytesPerDay` is the used space of the trail's tablespace at this process's probes of the last 24 hours, projected to a
+day; it takes two probes an hour apart. Space that falls, a purge, counts as no growth. `room` warns when the tablespace holds
+under 8 days of it. The size of a day fails no check.
+
+`failed_signins` says whether a failed sign-in reaches the trail, from the enabled policies: `ok` when `ORA_LOGON_FAILURES`,
+`ORA_LOGIN_LOGOUT` or `TRAILOX_LOGON` is enabled for failures for every user, or every user but those it names. It warns when one
+covers some users only, when none is enabled for failures (a policy of your own is not looked into), and when the policies
+cannot be read. `purge_job` says how the trail is purged, from `DBA_AUDIT_MGMT_CLEANUP_JOBS` and
+`DBA_AUDIT_MGMT_LAST_ARCH_TS`: a purge job, the time the trail is purged up to (UTC, to the minute), or that no purge has run. A
+job of the database's own scheduler shows only by that time. It is `ok` either way, and warns only when neither view can be
+read: whether to purge is your call.
+
+An optional read that fails for any reason but a lost session is listed in `views`, and the probe goes on. One that a limit
+stopped is listed there too, as slow rather than as a missing grant, and fails no check, `poll_view` included.
+
+`policiesRead` and `policyObjectsRead` are true only when that view was read, so an empty list after a missing grant is not taken
+for a policy that is not enabled.
+
+**A failed check refuses the source:** the check-in reports `probeError`, the failed checks' messages joined, with the
+caps and every check beside it. The agent runs no task on a refused source, and probes it again every 5 minutes.
+
+A sign-in the server refuses (`ORA-01017`, `ORA-28001`, `ORA-01045`) fails the probe or the task, and the agent then does not
+sign in to that source again, for a probe or a task, until it restarts. `ORA-28000`, a locked account, is held the same way
+for an hour; then one sign-in is tried, and the agent goes on with no restart once the account is open. Network errors keep
+the retry at each check-in.
 
 ## 7. Configuration
 

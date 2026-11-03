@@ -26,6 +26,9 @@ public class TaskFailureTests
     {
         public Func<HttpResponseMessage> Failed { get; set; } = () => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") };
 
+        /// <summary>When set, an upload ends this way instead of being accepted.</summary>
+        public Action? Upload { get; set; }
+
         public List<(string Path, string Body)> Seen { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -38,6 +41,7 @@ public class TaskFailureTests
             }
             Seen.Add((path, "(rows)"));
             await request.Content!.CopyToAsync(Stream.Null, cancellationToken);
+            Upload?.Invoke();
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"rowsAccepted":1}""", Encoding.UTF8, "application/json") };
         }
     }
@@ -157,6 +161,121 @@ public class TaskFailureTests
         var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-t/failed", StringComparison.Ordinal));
         Assert.Contains("\"reason\":\"window_too_long\"", failed.Body);
         Assert.Contains("000630", Assert.Single(errors.Snapshot()).Message);
+    }
+
+    [Fact]
+    public async Task A_read_stopped_by_a_bound_is_reported_as_too_large_and_listed()
+    {
+        var (executor, gateway, errors) = Runner();
+        var session = Session(new ScriptedSource((_, _) =>
+            throw new SourceException("ORA-02395: exceeded call limit on IO usage") { TooLargeAtSource = true }));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-b"), session, CancellationToken.None));
+
+        var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-b/failed", StringComparison.Ordinal));
+        Assert.Contains("\"reason\":\"too_large_at_source\"", failed.Body);
+        Assert.Contains("ORA-02395", Assert.Single(errors.Snapshot()).Message);
+    }
+
+    /// <summary>
+    /// With rows already on their way the failure comes through the upload's stream, and the HTTP client wraps it. Without
+    /// its reason the same window would be issued again unchanged, for ever.
+    /// </summary>
+    [Fact]
+    public async Task A_bound_hit_during_the_upload_keeps_its_reason_through_the_http_clients_wrapper()
+    {
+        var (executor, gateway, _) = Runner();
+        gateway.Upload = () => throw new HttpRequestException("Error while copying content to a stream.",
+            new SourceException("ORA-02393: exceeded call limit on CPU usage") { TooLargeAtSource = true });
+        var session = Session(new ScriptedSource((_, _) => OneRow()));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-w"), session, CancellationToken.None));
+
+        var failed = Assert.Single(gateway.Seen, s => s.Path.EndsWith("/chunk-w/failed", StringComparison.Ordinal));
+        Assert.Contains("\"reason\":\"too_large_at_source\"", failed.Body);
+        Assert.Contains("ORA-02393", failed.Body);
+    }
+
+    /// <summary>The real HTTP client, against a real socket: what it does to a failure inside a body is its own to decide.</summary>
+    [Fact]
+    public async Task A_bound_hit_during_a_real_upload_is_still_reported_with_its_reason()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var failures = new List<string>();
+        var server = Task.Run(async () =>
+        {
+            for (var i = 0; i < 2; i++)
+            {
+                using var client = await listener.AcceptTcpClientAsync();
+                await using var stream = client.GetStream();
+                var read = new byte[64 * 1024];
+                var text = new StringBuilder();
+                try
+                {
+                    int n;
+                    while ((n = await stream.ReadAsync(read)) > 0)
+                    {
+                        text.Append(Encoding.Latin1.GetString(read, 0, n));
+                        if (text.ToString().Contains("/failed", StringComparison.Ordinal) && text.ToString().Contains("}", StringComparison.Ordinal))
+                        {
+                            failures.Add(text.ToString());
+                            await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"u8.ToArray());
+                            return;
+                        }
+                    }
+                }
+                catch (IOException)
+                {
+                    // The upload was cut off, which is the point.
+                }
+            }
+        });
+        var http = new HttpClient(new SocketsHttpHandler());
+        var gateway = new GatewayClient(http, new Uri($"http://127.0.0.1:{port}/"), "tlx_not-a-real-key", "0.0.0-test");
+        var executor = new TaskExecutor(gateway, new ErrorRing(), NullLogger.Instance);
+        var body = new FailingBody(new SourceException("ORA-02395: exceeded call limit on IO usage") { TooLargeAtSource = true });
+        var session = Session(new ScriptedSource((_, _) => new RowStream(body, new MemoryStream())));
+
+        Assert.True(await executor.ExecuteAsync(Window("chunk-r"), session, CancellationToken.None));
+
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains("\"reason\":\"too_large_at_source\"", Assert.Single(failures));
+    }
+
+    /// <summary>Rows, then the failure the producer completed the pipe with.</summary>
+    private sealed class FailingBody : Stream
+    {
+        private readonly Exception _failure;
+        private int _reads;
+
+        public FailingBody(Exception failure) => _failure = failure;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_reads++ > 0)
+            {
+                throw _failure;
+            }
+            var row = Encoding.UTF8.GetBytes("{\"n\":1}\n");
+            row.CopyTo(buffer, offset);
+            return row.Length;
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>Other failures carry no reason: the field is left out, as for every agent before 1.8.</summary>

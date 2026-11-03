@@ -78,6 +78,10 @@ public static class ProtocolInfo
         public const string PgLog = "pg_log";
         public const string PgStatSnapshot = "pg_stat_snapshot";
         public const string CatalogStatementText = "catalog_statement_text";
+
+        // Oracle (agent 1.16): one record of the unified audit trail per row, read once a poll; sign-ins and statements
+        // both come from it.
+        public const string OraAudit = "ora_audit";
     }
 }
 
@@ -131,6 +135,9 @@ public sealed class EndpointCaps
 
     /// <summary>PostgreSQL only (agent 1.12): what the probe found. Null, and not sent, for every other engine.</summary>
     public PostgresCaps? Postgres { get; set; }
+
+    /// <summary>Oracle only (agent 1.16): what the probe found. Null, and not sent, for every other engine.</summary>
+    public OracleCaps? Oracle { get; set; }
 }
 
 /// <summary>What the probe of a PostgreSQL source found. Every field is bounded by the gateway.</summary>
@@ -178,6 +185,126 @@ public sealed class PostgresCheck
     public string Name { get; set; } = "";
 
     /// <summary>ok, warn or fail.</summary>
+    public string Status { get; set; } = "";
+    public string Message { get; set; } = "";
+}
+
+/// <summary>What the probe of an Oracle source found. Every field is bounded by the gateway.</summary>
+public sealed class OracleCaps
+{
+    /// <summary>rds or self_managed.</summary>
+    public string Platform { get; set; } = "";
+
+    /// <summary>The product line, e.g. Oracle Database 19c Standard Edition 2 Release 19.0.0.0.0 - Production.</summary>
+    public string Product { get; set; } = "";
+
+    /// <summary>Enterprise, Standard Edition 2, Free...: read from <see cref="Product"/>; empty when it names none.</summary>
+    public string Edition { get; set; } = "";
+
+    /// <summary>The container the agent signs in to: a PDB's name, or a non-CDB's.</summary>
+    public string Container { get; set; } = "";
+
+    /// <summary>The server's role, as it gives it: PRIMARY, PHYSICAL STANDBY, LOGICAL STANDBY or SNAPSHOT STANDBY; null when it cannot be read.</summary>
+    public string? DatabaseRole { get; set; }
+
+    /// <summary>The user the server knows the agent as, in the server's own case.</summary>
+    public string OwnUser { get; set; } = "";
+
+    /// <summary>The program name the server records for the agent's sessions, as the server gives it.</summary>
+    public string OwnProgram { get; set; } = "";
+
+    /// <summary>When this probe read the server, in microseconds.</summary>
+    public long ProbedAtMicros { get; set; }
+
+    /// <summary>pure or mixed; empty when V$OPTION cannot be read.</summary>
+    public string UnifiedMode { get; set; } = "";
+
+    /// <summary>The AUDIT_TRAIL parameter.</summary>
+    public string AuditTrail { get; set; } = "";
+
+    /// <summary>Whether the trail's table is partitioned; null when it cannot be read.</summary>
+    public bool? TrailPartitioned { get; set; }
+
+    /// <summary>The trail's partition interval as the dictionary gives it, e.g. NUMTODSINTERVAL(1, 'DAY').</summary>
+    public string TrailInterval { get; set; } = "";
+
+    /// <summary>The trail's rows from the optimizer's statistics, never a count; null when it has none.</summary>
+    public long? TrailRows { get; set; }
+
+    /// <summary>The trail's blocks from the same statistics.</summary>
+    public long? TrailBlocks { get; set; }
+
+    /// <summary>The partition that holds today's records; empty until the day's first record opens it.</summary>
+    public string TodayPartition { get; set; } = "";
+
+    /// <summary>The end of that partition, in microseconds; 0 when unknown.</summary>
+    public long TodayPartitionEndMicros { get; set; }
+
+    /// <summary>The tablespace today's records go to.</summary>
+    public string TodayTablespace { get; set; } = "";
+
+    /// <summary>The tablespace new partitions go to, as DBMS_AUDIT_MGMT holds it.</summary>
+    public string ConfiguredTablespace { get; set; } = "";
+
+    /// <summary>What that tablespace can still take, counting its maximum; null when it cannot be read.</summary>
+    public long? RoomBytes { get; set; }
+
+    /// <summary>Its growth projected to a day, from this agent's probes of the last 24 hours; null until two are an hour apart.</summary>
+    public long? GrowthBytesPerDay { get; set; }
+
+    /// <summary>Whether a record sits in a spillover file; null when the view cannot be read.</summary>
+    public bool? Spilled { get; set; }
+
+    /// <summary>Whether the audit view has the SOURCE column (19.21 and later), which the poll then reads.</summary>
+    public bool SourceColumn { get; set; }
+
+    /// <summary>logs_only, partial, selective or full: which of the TRAILOX_* policies are enabled; empty when they cannot be read.</summary>
+    public string ObservedLevel { get; set; } = "";
+
+    /// <summary>Whether the enabled policies were read. An empty <see cref="Policies"/> alone could be a missing grant.</summary>
+    public bool PoliciesRead { get; set; }
+
+    /// <summary>The TRAILOX_* policies that are enabled, one row for each user or role.</summary>
+    public List<OraclePolicy> Policies { get; set; } = new();
+
+    /// <summary>Whether the policies' objects were read, as <see cref="PoliciesRead"/>.</summary>
+    public bool PolicyObjectsRead { get; set; }
+
+    /// <summary>The objects the TRAILOX_* policies name.</summary>
+    public List<OraclePolicyObject> PolicyObjects { get; set; } = new();
+
+    /// <summary>The probe's checks, as the source page shows them.</summary>
+    public List<OracleCheck> Checks { get; set; } = new();
+}
+
+/// <summary>One row of AUDIT_UNIFIED_ENABLED_POLICIES.</summary>
+public sealed class OraclePolicy
+{
+    public string Name { get; set; } = "";
+    public string EnabledOption { get; set; } = "";
+    public string EntityName { get; set; } = "";
+    public string EntityType { get; set; } = "";
+
+    /// <summary>YES or NO.</summary>
+    public string Success { get; set; } = "";
+
+    /// <summary>YES or NO.</summary>
+    public string Failure { get; set; } = "";
+}
+
+/// <summary>One row of AUDIT_UNIFIED_POLICIES that names an object.</summary>
+public sealed class OraclePolicyObject
+{
+    public string Policy { get; set; } = "";
+    public string Schema { get; set; } = "";
+    public string Name { get; set; } = "";
+}
+
+public sealed class OracleCheck
+{
+    public string Name { get; set; } = "";
+
+    /// <summary>ok, warn or fail. A failed check refuses the source: the probe's error says so too.</summary>
     public string Status { get; set; } = "";
     public string Message { get; set; } = "";
 }
@@ -269,12 +396,49 @@ public sealed class AgentTask
     public string Stream { get; set; } = "";
     public long StartMicros { get; set; }
     public long EndMicros { get; set; }
+
+    /// <summary>The limit on each call of this task's read, when Trailox sets one (agent 1.16: Oracle's audit poll).</summary>
+    public int? ReadLimitSeconds { get; set; }
+
+    /// <summary>
+    /// Greater than 0: the rows may go in parts, each at most this many bytes before compression (agent 1.16). Otherwise one upload.
+    /// </summary>
+    public long? PartBytes { get; set; }
+
+    /// <summary>With <see cref="PartBytes"/>: how long one part may last. Otherwise <see cref="DefaultPartSeconds"/>.</summary>
+    public int? PartSeconds { get; set; }
+
+    public const int DefaultPartSeconds = 600;
+
+    /// <summary>Filled by the engine as it reads, for the task's report. The agent's own: not part of the task as sent.</summary>
+    [JsonIgnore]
+    public ReadTime ReadTime { get; } = new();
+}
+
+/// <summary>What one task's read has spent waiting on its database, with no upload time in it (agent 1.16).</summary>
+public sealed class ReadTime
+{
+    private long _ticks;
+
+    public void Add(TimeSpan wait) => Interlocked.Add(ref _ticks, wait.Ticks);
+
+    /// <summary>Whole milliseconds, at least 1 once anything was counted; null for an engine that does not measure.</summary>
+    public long? Millis => Interlocked.Read(ref _ticks) is > 0 and var ticks ? Math.Max(1, ticks / TimeSpan.TicksPerMillisecond) : null;
 }
 
 public sealed class ChunkAccepted
 {
     public long RowsAccepted { get; set; }
     public long WatermarkMicros { get; set; }
+}
+
+/// <summary>Ends a read sent in parts: how many there were, and how long it waited on the database (agent 1.16).</summary>
+public sealed class ChunkComplete
+{
+    public int Parts { get; set; }
+
+    /// <summary>See <see cref="ReadTime"/>. Null, and not sent, for an engine that does not measure.</summary>
+    public long? ReadMillis { get; set; }
 }
 
 public sealed class ChunkFailed
@@ -285,10 +449,19 @@ public sealed class ChunkFailed
     /// <summary>The database stopped the read at its time limit; Trailox asks for shorter windows (agent 1.15).</summary>
     public const string WindowTooLong = "window_too_long";
 
+    /// <summary>A bound on the database's side or the agent's stopped the read; Trailox asks for shorter windows (agent 1.16).</summary>
+    public const string TooLargeAtSource = "too_large_at_source";
+
     public string Message { get; set; } = "";
 
-    /// <summary>Why, when the agent knows: <see cref="NotYetPublished"/> or <see cref="WindowTooLong"/>. Null, and not sent, otherwise.</summary>
+    /// <summary>
+    /// Why, when the agent knows: <see cref="NotYetPublished"/>, <see cref="WindowTooLong"/> or <see cref="TooLargeAtSource"/>.
+    /// Null, and not sent, otherwise.
+    /// </summary>
     public string? Reason { get; set; }
+
+    /// <summary>See <see cref="ReadTime"/>, up to where the read stopped. Null, and not sent, for an engine that does not measure.</summary>
+    public long? ReadMillis { get; set; }
 }
 
 public sealed class GatewayError

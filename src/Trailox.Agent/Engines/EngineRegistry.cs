@@ -1,6 +1,7 @@
 using Trailox.Agent.Engines.ClickHouse;
 using Trailox.Agent.Engines.Databricks;
 using Trailox.Agent.Engines.MongoDb;
+using Trailox.Agent.Engines.Oracle;
 using Trailox.Agent.Engines.Postgres;
 using Trailox.Agent.Engines.Redshift;
 using Trailox.Agent.Engines.Snowflake;
@@ -15,6 +16,7 @@ public static class EngineRegistry
         new ClickHouseEngine(),
         new DatabricksEngine(),
         new MongoDbEngine(),
+        new OracleEngine(),
         new PostgresEngine(),
         new RedshiftEngine(),
         new SnowflakeEngine(),

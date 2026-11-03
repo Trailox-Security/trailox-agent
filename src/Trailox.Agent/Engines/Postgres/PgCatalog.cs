@@ -147,7 +147,7 @@ public sealed class PgCatalog
     /// One <c>pg_stat_snapshot</c> per instance, taken now: counters cannot be read for the past. An instance whose
     /// database has no <c>pg_stat_statements</c> is skipped; with none at all the task fails as "not configured".
     /// </summary>
-    public async Task SnapshotAsync(IReadOnlyList<PgInstance> instances, PgRows output, CancellationToken ct)
+    public async Task SnapshotAsync(IReadOnlyList<PgInstance> instances, RowWriter output, CancellationToken ct)
     {
         var read = 0;
         await EachInstanceAsync(instances, async instance =>
@@ -176,7 +176,7 @@ public sealed class PgCatalog
     }
 
     /// <summary><c>catalog_settings</c>, from every instance: a replica can run with other settings.</summary>
-    public async Task SettingsAsync(IReadOnlyList<PgInstance> instances, PgRows output, CancellationToken ct)
+    public async Task SettingsAsync(IReadOnlyList<PgInstance> instances, RowWriter output, CancellationToken ct)
     {
         var date = Today();
         await EachInstanceAsync(instances, async instance =>
@@ -187,7 +187,7 @@ public sealed class PgCatalog
     }
 
     /// <summary><c>catalog_statement_text</c>, from every instance: a statement run only on a replica has its text only there. Passwords are removed.</summary>
-    public async Task StatementTextAsync(IReadOnlyList<PgInstance> instances, PgRows output, CancellationToken ct)
+    public async Task StatementTextAsync(IReadOnlyList<PgInstance> instances, RowWriter output, CancellationToken ct)
     {
         if (!_endpoint.StoreRawQueryText)
         {
@@ -259,7 +259,7 @@ public sealed class PgCatalog
     }
 
     /// <summary><c>catalog_users</c>: roles belong to the server, so one database is enough.</summary>
-    public async Task UsersAsync(IReadOnlyList<PgInstance> candidates, PgRows output, CancellationToken ct)
+    public async Task UsersAsync(IReadOnlyList<PgInstance> candidates, RowWriter output, CancellationToken ct)
     {
         var date = Today();
         await using var conn = await FirstAsync(candidates, instance => OpenAsync(instance.Host, _database, ct));
@@ -270,7 +270,7 @@ public sealed class PgCatalog
     /// A catalog stream that lives in each database (tables, columns, grants): every database the role may connect to, one
     /// at a time, at most <see cref="PgSql.MaxDatabases"/>. A database that refuses the connection is skipped.
     /// </summary>
-    public async Task PerDatabaseAsync(IReadOnlyList<PgInstance> candidates, string stream, PgRows output, CancellationToken ct)
+    public async Task PerDatabaseAsync(IReadOnlyList<PgInstance> candidates, string stream, RowWriter output, CancellationToken ct)
     {
         // One date for the whole task: a sweep that crosses midnight is still one day's catalog.
         var day = Today();
@@ -336,7 +336,7 @@ public sealed class PgCatalog
     /// The columns of one database, in pages of <see cref="PgSql.ColumnPageTables"/> tables, so no statement holds the server
     /// long; and whether its tables reached <see cref="PgSql.MaxTablesPerDatabase"/>, so some had no columns read.
     /// </summary>
-    private static async Task<(long Written, bool TablesCut)> ColumnsAsync(NpgsqlConnection conn, PgRows output, long written,
+    private static async Task<(long Written, bool TablesCut)> ColumnsAsync(NpgsqlConnection conn, RowWriter output, long written,
         (string, object?) date, (string, object?) db, CancellationToken ct)
     {
         var ids = new List<long>();
@@ -417,10 +417,10 @@ public sealed class PgCatalog
         return list;
     }
 
-    private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, PgRows output, CancellationToken ct,
+    private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, RowWriter output, CancellationToken ct,
         params (string Name, object? Value)[] extra) => WriteAsync(conn, sql, output, ct, Array.Empty<object>(), null, extra);
 
-    private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, PgRows output, CancellationToken ct,
+    private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, RowWriter output, CancellationToken ct,
         (string Name, object? Value) a, (string Name, object? Value) b, Func<string, string, string> transform) =>
         WriteAsync(conn, sql, output, ct, Array.Empty<object>(), transform, a, b);
 
@@ -428,7 +428,7 @@ public sealed class PgCatalog
     /// Runs one statement and writes each row as JSON, then the <paramref name="extra"/> columns. An extra column with
     /// no value is the time now. Returns the rows written.
     /// </summary>
-    private static async Task<long> WriteAsync(NpgsqlConnection conn, string sql, PgRows output, CancellationToken ct, object[] parameters,
+    private static async Task<long> WriteAsync(NpgsqlConnection conn, string sql, RowWriter output, CancellationToken ct, object[] parameters,
         Func<string, string, string>? transform, params (string Name, object? Value)[] extra)
     {
         await using var cmd = new NpgsqlCommand(sql, conn);

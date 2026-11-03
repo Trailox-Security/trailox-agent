@@ -27,6 +27,10 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="MongoDB.Driver" Version="3.12.0" />
     <PackageReference Include="Npgsql" Version="10.0.0" />
+    <!-- The Oracle driver (1.16.0): managed, no Oracle client install. Its net8.0 dependencies bring in
+         System.Security.Cryptography.Pkcs 8.0.1, which has advisories, so that package is pinned past it here. -->
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.400" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.0" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>

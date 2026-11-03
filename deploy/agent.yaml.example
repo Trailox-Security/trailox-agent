@@ -138,3 +138,19 @@ endpoints:
   #   options:
   #     log_source: file
   #     log_directory: /var/log/trailox-pg               # the mount point inside the container
+
+  # An Oracle PDB or non-CDB (agent 1.16.0 or later), 19c or later: one endpoint for each. The agent reads the unified
+  # audit trail and the catalog over SQL, and needs no AWS identity, no Oracle client and no wallet.
+  # - alias: ledger
+  #   engine: oracle
+  #   kind: cloud                                        # cloud: Amazon RDS for Oracle; onprem: self-managed
+  #   host: ledger.abc123def456.eu-west-1.rds.amazonaws.com
+  #   port: 1521
+  #   tls: false                                         # true: TCPS (on RDS, the SSL option's port, 2484 by default)
+  #   username: TRAILOX_MONITOR                          # the user the setup script creates
+  #   password_env: TRAILOX_ORA_PASSWORD                 # its password; or password_file
+  #   options:
+  #     service_name: LEDGER                             # the PDB's service, or a non-CDB's; never the CDB root
+  #   storeRawQueryText: true                            # false = no statement text is read or shipped
+  #   pollMinutes: 30
+  #   backfillDays: 7

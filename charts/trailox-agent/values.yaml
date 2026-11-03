@@ -17,7 +17,8 @@ image:
 #    a MongoDB Atlas endpoint adds --from-literal=TRAILOX_ATLAS_SECRET=<the service account's secret>, and with
 #    the optional catalog user (agent 1.9.0) --from-literal=TRAILOX_ATLAS_CATALOG_PASSWORD=<its password>,
 #    referenced as catalog_password_env: TRAILOX_ATLAS_CATALOG_PASSWORD;
-#    a PostgreSQL endpoint adds --from-literal=TRAILOX_PG_PASSWORD=<the monitoring role's password>)
+#    a PostgreSQL endpoint adds --from-literal=TRAILOX_PG_PASSWORD=<the monitoring role's password>;
+#    an Oracle endpoint adds --from-literal=TRAILOX_ORA_PASSWORD=<the monitoring user's password>)
 # The chart mounts no Secret as files, so here every credential, the catalog user's included, comes through
 # password_env / catalog_password_env.
 existingSecret: trailox-agent

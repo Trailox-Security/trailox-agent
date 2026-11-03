@@ -11,20 +11,27 @@ namespace Trailox.Agent.Runner;
 /// </summary>
 public sealed class EndpointSession
 {
+    /// <summary>How soon a refused source is probed again: a fix should show soon, and a probe at every check-in costs a session each.</summary>
+    internal static readonly TimeSpan RefusedProbeInterval = TimeSpan.FromMinutes(5);
+
     private readonly TimeSpan _probeInterval;
+    private readonly Func<DateTime> _utcNow;
     private DateTime _probedAtUtc = DateTime.MinValue;
     private bool _passwordRejected;
+    private DateTime _signInHeldUntilUtc = DateTime.MinValue;
+    private bool _refused;
 
     public EndpointConfig Config { get; }
     public IEngineSource Source { get; }
     public EndpointCaps Caps { get; private set; } = new();
     public string? ProbeError { get; private set; }
 
-    public EndpointSession(EndpointConfig config, IEngineSource source, TimeSpan probeInterval)
+    public EndpointSession(EndpointConfig config, IEngineSource source, TimeSpan probeInterval, Func<DateTime>? utcNow = null)
     {
         Config = config;
         Source = source;
         _probeInterval = probeInterval;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     /// <summary>
@@ -38,8 +45,12 @@ public sealed class EndpointSession
     /// Snowflake that wakes a warehouse on the customer's bill. It matters most when the probe is failing,
     /// because a failed probe is otherwise retried on every check-in.
     /// </summary>
-    /// <remarks>A rejected password stops the probes until the agent restarts (<see cref="SourceException.AuthenticationRejected"/>).</remarks>
-    public bool NeedsProbe => !_passwordRejected && EnabledOnServer != false && (ProbeError != null || DateTime.UtcNow - _probedAtUtc > _probeInterval);
+    /// <remarks>
+    /// A rejected password stops the probes until the agent restarts (<see cref="SourceException.AuthenticationRejected"/>), or
+    /// until <see cref="SourceException.SignInRetryAfter"/> has passed when the refusal can end by itself.
+    /// </remarks>
+    public bool NeedsProbe => !_passwordRejected && _utcNow() >= _signInHeldUntilUtc && EnabledOnServer != false
+        && ((ProbeError != null && !_refused) || _utcNow() - _probedAtUtc > (_refused ? RefusedProbeInterval : _probeInterval));
 
     /// <summary>What a check-in said about this source. Says it in the log once, on the change.</summary>
     public void HeardFromServer(bool enabled, ILogger logger)
@@ -69,7 +80,9 @@ public sealed class EndpointSession
         {
             Caps = await Source.ProbeAsync(ct);
             ProbeError = null;
-            _probedAtUtc = DateTime.UtcNow;
+            _refused = false;
+            _signInHeldUntilUtc = DateTime.MinValue;
+            _probedAtUtc = _utcNow();
             // Probed columns are a ClickHouse notion (optional query_log columns); other engines report none.
             var columns = Caps.Columns.Count > 0 ? $", {Caps.Columns.Count} probed columns present" : "";
             var text = Caps.TextReadable ? "" : ", statement text redacted at source";
@@ -78,14 +91,33 @@ public sealed class EndpointSession
         }
         catch (SourceException ex) when (ex.AuthenticationRejected)
         {
-            _passwordRejected = true;
-            ProbeError = Trim(ex.Message + ". The agent stops signing in to this database until it restarts: fix the password, then restart the agent");
+            var fix = ex.AuthenticationFix ?? "fix the password";
+            if (ex.SignInRetryAfter is { } wait)
+            {
+                _signInHeldUntilUtc = _utcNow() + wait;
+                ProbeError = Trim($"{ex.Message}. The agent signs in again in {wait.TotalMinutes:0} minutes: {fix}, and no restart is needed");
+            }
+            else
+            {
+                _passwordRejected = true;
+                ProbeError = Trim(ex.Message + ". The agent stops signing in to this database until it restarts: " + fix + ", then restart the agent");
+            }
+            _refused = false;
             _probedAtUtc = DateTime.MinValue;
             logger.LogWarning("endpoint {Alias}: probe failed: {Message}", Config.Alias, ProbeError);
+        }
+        catch (SourceException ex) when (ex.RefusedCaps is { } caps)
+        {
+            Caps = caps;
+            ProbeError = Trim(ex.Message);
+            _refused = true;
+            _probedAtUtc = _utcNow();
+            logger.LogWarning("endpoint {Alias}: the probe refused this source: {Message}", Config.Alias, ProbeError);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ProbeError = Trim(ex.Message);
+            _refused = false;
             _probedAtUtc = DateTime.MinValue;
             logger.LogWarning("endpoint {Alias}: probe failed: {Message}", Config.Alias, ProbeError);
         }

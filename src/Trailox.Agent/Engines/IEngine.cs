@@ -56,7 +56,7 @@ public sealed class RowStream : IAsyncDisposable
     /// The body can go quiet for minutes while the source works (agent 1.8: MongoDB's audit files, read while
     /// the rows stream). The upload then writes blank lines (never inside a row) and flushes, so the connection
     /// is never idle long enough for a proxy or firewall on the path to close it. Set only for a stream whose
-    /// body may contain blank lines (PROTOCOL.md §4: MongoDB's log streams, and every PostgreSQL stream).
+    /// body may contain blank lines (PROTOCOL.md §4: MongoDB's log streams, and every PostgreSQL and Oracle stream).
     /// </summary>
     public bool KeepAlive { get; init; }
 
@@ -102,9 +102,32 @@ public class SourceException : Exception
     public bool WindowTooLong { get; init; }
 
     /// <summary>
+    /// A bound stopped the window's read (agent 1.16: Oracle's per-call limits, or the agent's command timeout). Reported
+    /// with reason "too_large_at_source", so Trailox asks for shorter windows. Still listed among the agent's errors: a
+    /// read that a shorter window does not save needs the customer.
+    /// </summary>
+    public bool TooLargeAtSource { get; init; }
+
+    /// <summary>
     /// The database rejected the password (agent 1.12: PostgreSQL's SQLSTATE 28P01). The agent stops signing in to the
     /// source until it restarts: it reads its secrets only at start, so a fixed password needs a restart anyway, and each
     /// attempt would write one more failed sign-in into the database's own log.
     /// </summary>
     public bool AuthenticationRejected { get; init; }
+
+    /// <summary>What to do after <see cref="AuthenticationRejected"/>, when that is not fixing the password.</summary>
+    public string? AuthenticationFix { get; init; }
+
+    /// <summary>
+    /// With <see cref="AuthenticationRejected"/>: the refusal can end with no change on the agent's side (agent 1.16: a locked
+    /// Oracle account), so the agent signs in again after this long instead of waiting for a restart. Null: until a restart.
+    /// </summary>
+    public TimeSpan? SignInRetryAfter { get; init; }
+
+    /// <summary>
+    /// The probe read the source and refuses it (agent 1.16: Oracle, where a poll could never return a record): what it found
+    /// goes to Trailox with the reason, no task is issued, and the source is probed again every few minutes rather than at
+    /// every check-in.
+    /// </summary>
+    public EndpointCaps? RefusedCaps { get; init; }
 }
