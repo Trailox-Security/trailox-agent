@@ -75,7 +75,7 @@ public static class SfRawSelects
     /// <remarks>
     /// ⚠ NO VALUE MAY ESCAPE IT: this text is sent even with storeRawQueryText off. A string may hold '' or a backslash
     ///   escape (O\'Brien, or a backslash-newline), and a string, a comment or a $$ block cut open by QUERY_TEXT's length
-    ///   limit runs to the end. A number is `.5`, `1e10`, `1.5E-3`, `7.` or `0x1F` too, never a name that holds digits.
+    ///   limit runs to the end, even when the cut falls right after a backslash. A number is `.5`, `1e10`, `1.5E-3`, `7.` or `0x1F` too, never a name that holds digits.
     /// ⚠ Nine capturing groups at most: Snowflake refuses a tenth, and the first pattern has nine.
     /// ⚠ TRAILOX RUNS THIS EXACT TEXT TOO, for the sources it reads itself, so one statement has one shape whichever way it
     ///   is collected. The test pins its SHA-256; Trailox's own test pins the same value. Change both or neither.
@@ -83,7 +83,7 @@ public static class SfRawSelects
     /// </remarks>
     public static readonly string ShapeText =
         "REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(QUERY_TEXT, ''), "
-        + """'("([^"]|"")*")|(\')([^\'\\\\]|\'\'|\\\\.|\\\\\\n)*(\'|$)|--[^\\n]*|//[^\\n]*|/\\*([^*]|\\*+[^*/])*(\\*+/|$)|\\$\\$([^$]|\\$[^$])*(\\$\\$|$)', '\\1\\3\\3'), """
+        + """'("([^"]|"")*")|(\')([^\'\\\\]|\'\'|\\\\.|\\\\\\n|\\\\$)*(\'|$)|--[^\\n]*|//[^\\n]*|/\\*([^*]|\\*+[^*/])*(\\*+/|$)|\\$\\$([^$]|\\$[^$])*(\\$\\$|$)', '\\1\\3\\3'), """
         + """'\'\'', '?'), """
         + """'(^|[^A-Za-z0-9_$".])(0[xX][0-9A-Fa-f]+|\\.[0-9]+|[0-9]+(\\.[0-9]*)?)([eE][-+]?[0-9]+)?', '\\1?'), """
         + """'\\(\\s*-?\\?(\\s*,\\s*-?\\?)*\\s*\\)', '(?)'), """
