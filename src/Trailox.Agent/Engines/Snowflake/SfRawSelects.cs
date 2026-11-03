@@ -56,8 +56,8 @@ public static class SfRawSelects
     ///   not the statement's text.
     /// ⚠ From 1.16.0 each row also carries the statement's SHAPE: QUERY_SHAPE_TEXT, its text with every literal masked
     ///   and every name kept, and QUERY_SHAPE_HASH, that text's hash. Snowflake computes both, so they are sent whether or
-    ///   not the text is: with storeRawQueryText off, Trailox still knows which statements are the same statement, and
-    ///   the values in them never leave.
+    ///   not the text is: with storeRawQueryText off, statements that differ only in their values still share one shape,
+    ///   and the values never leave.
     /// </remarks>
     public static string Events(EndpointConfig endpoint, long startMicros, long endMicros)
     {
@@ -75,10 +75,11 @@ public static class SfRawSelects
     /// <remarks>
     /// ⚠ NO VALUE MAY ESCAPE IT: this text is sent even with storeRawQueryText off. A string may hold '' or a backslash
     ///   escape (O\'Brien, or a backslash-newline), and a string, a comment or a $$ block cut open by QUERY_TEXT's length
-    ///   limit runs to the end, even when the cut falls right after a backslash. A number is `.5`, `1e10`, `1.5E-3`, `7.` or `0x1F` too, never a name that holds digits.
+    ///   limit runs to the end, even when the cut falls right after a backslash. A number is `.5`, `1e10`, `1.5E-3`, `7.`
+    ///   or `0x1F` too, never a name that holds digits.
     /// ⚠ Nine capturing groups at most: Snowflake refuses a tenth, and the first pattern has nine.
-    /// ⚠ TRAILOX RUNS THIS EXACT TEXT TOO, for the sources it reads itself, so one statement has one shape whichever way it
-    ///   is collected. The test pins its SHA-256; Trailox's own test pins the same value. Change both or neither.
+    /// ⚠ PART OF THE PROTOCOL: any change, even to whitespace, gives statements a new QUERY_SHAPE_HASH, so it comes only
+    ///   with a new version. The test pins its SHA-256.
     /// ⚠ The patterns are single-quoted with backslash escapes (\' and \\), not $$-quoted: the first one contains $$.
     /// </remarks>
     public static readonly string ShapeText =

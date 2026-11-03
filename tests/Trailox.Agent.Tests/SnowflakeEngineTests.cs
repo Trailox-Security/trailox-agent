@@ -159,11 +159,11 @@ public class SnowflakeEngineTests
     }
 
     /// <summary>
-    /// 1.16: Trailox masks the statements it reads itself with this exact text, and its own test pins the same SHA-256, so
-    /// one statement has one shape whichever way it is collected. Change both or neither.
+    /// 1.16: the masking text is part of the protocol. Any change gives statements a new QUERY_SHAPE_HASH, so it comes only
+    /// with a new version.
     /// </summary>
     [Fact]
-    public void The_shape_masking_is_the_text_Trailox_runs()
+    public void The_shape_masking_text_is_pinned()
     {
         var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(SfRawSelects.ShapeText)));
 

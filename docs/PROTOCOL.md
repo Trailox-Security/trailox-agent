@@ -384,13 +384,15 @@ are at that read, in each window that has its statements.
 
 `BIND_VALUES`, the values a statement was run with, is never read (from 1.15.0; before, it was sent when
 `storeRawQueryText` was true). With `storeRawQueryText` false, `QUERY_TEXT` is excluded too.
+`excludedDatabases` are left out of the catalog streams.
 
 From 1.16.0 each statement also carries its shape, computed by Snowflake: `QUERY_SHAPE_TEXT`, the text with every
 literal masked and every name kept (comments dropped, a list of values written `(?)`), and `QUERY_SHAPE_HASH`, that
-text's hash as unsigned 64-bit text. Both are sent whatever `storeRawQueryText` says, so Trailox can tell which
-statements are the same statement while the values in them stay with you. Trailox masks the statements it reads itself
-with the same text (`SfRawSelects.ShapeText`), so a statement has one shape however it is collected.
-`excludedDatabases` are left out of the catalog streams.
+text's hash as unsigned 64-bit text. Both are sent whatever `storeRawQueryText` says, so statements that differ only in
+their values share one shape while the values stay with you. With `storeRawQueryText` false, each statement's names
+(tables, columns, functions) and keywords still leave the account in `QUERY_SHAPE_TEXT`; no literal value does. The
+masking text is part of this protocol: a change to it gives statements a new `QUERY_SHAPE_HASH`, so it comes only with a
+new version.
 
 From 1.11.0, `catalog_users` also reads `HAS_WORKLOAD_IDENTITY`, `PASSWORD_LAST_SET_TIME`, `DISPLAY_NAME` and
 `EMAIL`, and `catalog_credentials` lists every credential of the account: programmatic access tokens, key pairs,
