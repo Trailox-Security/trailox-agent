@@ -18,6 +18,10 @@ public sealed class ChSource : IEngineSource
     private IReadOnlySet<string> _presentColumns = new HashSet<string>();
     private bool _usersAuthTypeIsArray = true;
 
+    /// <summary>Whether the last probe saw a moved copy of each log (RawSelects.MovedQueryLogs): then the windows read it too.</summary>
+    private bool _queryLogMoved;
+    private bool _sessionLogMoved;
+
     public ChSource(HttpClient http, EndpointConfig endpoint)
     {
         _http = http;
@@ -40,19 +44,32 @@ public sealed class ChSource : IEngineSource
 
         var hasSessionLog = await ScalarLongAsync(RawSelects.ProbeSessionLog, ct) > 0;
         _presentColumns = columns;
+        // A probe of the log tables that fails keeps what the last one saw: turning the copies off in the middle of a
+        // re-read would read its remaining windows from the live log alone. The caps then carry no times.
+        var tables = await LogTablesAsync(ct);
+        var (created, attached, sessionCopies) = tables ?? (0, 0, 0);
+        if (tables != null)
+        {
+            _queryLogMoved = attached > 0;
+            _sessionLogMoved = hasSessionLog && sessionCopies > 0;
+        }
         return new EndpointCaps
         {
             Version = version,
             Columns = RawSelects.ProbedColumns.Where(columns.Contains).ToList(),
             HasSessionLog = hasSessionLog,
+            // The oldest row of the live log only: it bounds a new source's first backfill, and over every copy the hourly
+            // probe would read every row of every copy.
             EarliestEventMicros = await SoftScalarAsync(RawSelects.ProbeEarliestEvent(_endpoint), ct),
             EarliestSessionMicros = hasSessionLog ? await SoftScalarAsync(RawSelects.ProbeEarliestSession(_endpoint), ct) : 0,
+            QueryLogCreatedMicros = created,
+            MovedLogAttachedMicros = attached,
         };
     }
 
     public async Task<RowStream?> OpenAsync(AgentTask task, CancellationToken ct)
     {
-        var sql = RawSelects.ForTask(_endpoint, _presentColumns, task, _usersAuthTypeIsArray);
+        var sql = RawSelects.ForTask(_endpoint, _presentColumns, task, _usersAuthTypeIsArray, _queryLogMoved, _sessionLogMoved);
         if (sql == null)
         {
             return null;
@@ -139,6 +156,27 @@ public sealed class ChSource : IEngineSource
         var e = rows[0][0];
         return e.ValueKind == JsonValueKind.Number ? e.GetInt64() : long.TryParse(e.GetString(), out var n) ? n : 0;
     }
+
+    /// <summary>The log tables the probe sees (RawSelects.ProbeLogTables); null when the probe failed.</summary>
+    private async Task<(long Created, long Attached, long SessionCopies)?> LogTablesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var rows = await QueryRowsAsync(RawSelects.ProbeLogTables(_endpoint), ct);
+            if (rows.Count == 0 || rows[0].Length < 3)
+            {
+                return (0, 0, 0);
+            }
+            return (AsLong(rows[0][0]), AsLong(rows[0][1]), AsLong(rows[0][2]));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private static long AsLong(JsonElement e) =>
+        e.ValueKind == JsonValueKind.Number ? e.GetInt64() : long.TryParse(e.GetString(), out var n) ? n : 0;
 
     /// <summary>Fails soft to 0: the caller treats it as "unknown" and keeps the full backfill window.</summary>
     private async Task<long> SoftScalarAsync(string sql, CancellationToken ct)

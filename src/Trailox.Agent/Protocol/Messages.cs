@@ -124,6 +124,20 @@ public sealed class EndpointCaps
     public long EarliestSessionMicros { get; set; }
 
     /// <summary>
+    /// ClickHouse only (agent 1.16): when system.query_log was created, in epoch micros; 0 when unknown. A newer value than
+    /// before means the server replaced its log. Not sent when 0, so no other engine's caps carry it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long QueryLogCreatedMicros { get; set; }
+
+    /// <summary>
+    /// ClickHouse only (agent 1.16): when the newest copy of the log the server moved aside (query_log_N) was attached, in
+    /// epoch micros; 0 when the monitoring user can see none. From then on the agent's windows read the copies too.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long MovedLogAttachedMicros { get; set; }
+
+    /// <summary>
     /// Whether the source shows this agent statement TEXT. Databricks masks it unless the
     /// principal is in databricks_pii_access; ClickHouse always shows it. Trailox stores no
     /// text and no shapes when this is false.
