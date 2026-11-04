@@ -37,11 +37,32 @@ public static class RawSelects
         "is_internal", "authenticated_user", "hostname", "normalized_query_hash", "used_table_functions", "used_privileges", "missing_privileges",
     };
 
-    public static string QueryLogSource(EndpointConfig endpoint) =>
-        string.IsNullOrEmpty(endpoint.ClusterName) ? "system.query_log" : $"clusterAllReplicas('{endpoint.ClusterName}', system.query_log)";
+    /// <param name="moved">Also every copy of the log the server moved aside (<see cref="MovedQueryLogs"/>).</param>
+    public static string QueryLogSource(EndpointConfig endpoint, bool moved = false) =>
+        OnEveryReplica(endpoint, moved ? MovedQueryLogs : "system.query_log");
 
-    public static string SessionLogSource(EndpointConfig endpoint) =>
-        string.IsNullOrEmpty(endpoint.ClusterName) ? "system.session_log" : $"clusterAllReplicas('{endpoint.ClusterName}', system.session_log)";
+    /// <param name="moved">Also every copy of the log the server moved aside (<see cref="MovedSessionLogs"/>).</param>
+    public static string SessionLogSource(EndpointConfig endpoint, bool moved = false) =>
+        OnEveryReplica(endpoint, moved ? MovedSessionLogs : "system.session_log");
+
+    private static string OnEveryReplica(EndpointConfig endpoint, string source) =>
+        string.IsNullOrEmpty(endpoint.ClusterName) ? source : $"clusterAllReplicas('{endpoint.ClusterName}', {source})";
+
+    /// <summary>
+    /// system.query_log and every copy of it the server moved aside: query_log_1, query_log_2 and so on.
+    /// </summary>
+    /// <remarks>
+    /// When ClickHouse Cloud replaces a service's servers, the new servers start with an empty system.query_log and,
+    /// minutes later, attach the old servers' tables as query_log_N; a self-hosted server renames its log the same way
+    /// when an upgrade changes the log's columns. A window read from system.query_log alone then misses the old
+    /// servers' statements. The copies need their own grant (`GRANT SELECT ON system.query_log*`, ClickHouse 24.10 or
+    /// later), and the agent reads them only when the probe could see one (<see cref="ProbeLogTables"/>): otherwise
+    /// every statement is exactly what it was.
+    /// </remarks>
+    public const string MovedQueryLogs = "merge('system', '^query_log(_[0-9]+)?$')";
+
+    /// <summary>system.session_log and every copy of it the server moved aside, at the same replacements.</summary>
+    public const string MovedSessionLogs = "merge('system', '^session_log(_[0-9]+)?$')";
 
     private static string Window(long startMicros, long endMicros) =>
         $"event_time_microseconds > fromUnixTimestamp64Micro({startMicros}) AND event_time_microseconds <= fromUnixTimestamp64Micro({endMicros})";
@@ -52,7 +73,8 @@ public static class RawSelects
     /// The events SELECT for one window. <paramref name="presentColumns"/> is what the probe found
     /// in system.columns; columns not present are omitted.
     /// </summary>
-    public static string Events(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, long startMicros, long endMicros)
+    /// <param name="moved">Read the moved copies of the log too (<see cref="MovedQueryLogs"/>).</param>
+    public static string Events(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, long startMicros, long endMicros, bool moved = false)
     {
         var columns = QueryLogColumns.Where(presentColumns.Contains).Select(c => c switch
         {
@@ -84,14 +106,15 @@ public static class RawSelects
             where += " AND NOT hasAny(databases, [" + string.Join(", ", endpoint.ExcludedDatabases.Select(Lit)) + "])";
         }
 
-        return $"SELECT {string.Join(", ", columns)}\nFROM {QueryLogSource(endpoint)}\nWHERE {where}\nFORMAT JSONEachRow";
+        return $"SELECT {string.Join(", ", columns)}\nFROM {QueryLogSource(endpoint, moved)}\nWHERE {where}\nFORMAT JSONEachRow";
     }
 
-    public static string Sessions(EndpointConfig endpoint, long startMicros, long endMicros) =>
+    /// <param name="moved">Read the moved copies of the log too (<see cref="MovedSessionLogs"/>).</param>
+    public static string Sessions(EndpointConfig endpoint, long startMicros, long endMicros, bool moved = false) =>
         "SELECT hostname, toString(type) AS type, toString(auth_id) AS auth_id, session_id, event_time_microseconds, user, " +
         "toString(auth_type) AS auth_type, toString(client_address) AS client_address, toString(interface) AS interface, " +
         "client_name, client_version_major, client_version_minor, client_version_patch, failure_reason\n" +
-        $"FROM {SessionLogSource(endpoint)}\nWHERE {Window(startMicros, endMicros)}\nFORMAT JSONEachRow";
+        $"FROM {SessionLogSource(endpoint, moved)}\nWHERE {Window(startMicros, endMicros)}\nFORMAT JSONEachRow";
 
     /// <summary>The customer's tables plus the two system rows Trailox reads retention settings from.</summary>
     public const string CatalogTables =
@@ -152,18 +175,36 @@ public static class RawSelects
 
     public const string ProbeSessionLog = "SELECT count() FROM system.tables WHERE database = 'system' AND name = 'session_log'";
 
-    public static string ProbeEarliestEvent(EndpointConfig endpoint) =>
-        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {QueryLogSource(endpoint)}";
+    public static string ProbeEarliestEvent(EndpointConfig endpoint, bool moved = false) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {QueryLogSource(endpoint, moved)}";
 
-    public static string ProbeEarliestSession(EndpointConfig endpoint) =>
-        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {SessionLogSource(endpoint)}";
+    public static string ProbeEarliestSession(EndpointConfig endpoint, bool moved = false) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {SessionLogSource(endpoint, moved)}";
+
+    /// <summary>
+    /// The log tables the monitoring user can see, in one row: when system.query_log was created and when the newest
+    /// moved copy of it was attached (epoch micros, 0 = none), and how many moved copies of system.session_log there are.
+    /// </summary>
+    /// <remarks>
+    /// system.tables lists only the tables the user may read, so a copy shows here exactly when the agent can read it.
+    /// A newer creation time means the server replaced its log; the attach time says when the old one could be read
+    /// again. Both go to Trailox in the probe's caps.
+    /// </remarks>
+    public static string ProbeLogTables(EndpointConfig endpoint) =>
+        "SELECT toInt64(toUnixTimestamp(maxIf(metadata_modification_time, name = 'query_log'))) * 1000000, " +
+        "toInt64(toUnixTimestamp(maxIf(metadata_modification_time, match(name, '^query_log_[0-9]+$')))) * 1000000, " +
+        "countIf(match(name, '^session_log_[0-9]+$'))" +
+        $" FROM {OnEveryReplica(endpoint, "system.tables")} WHERE database = 'system' AND match(name, '^(query|session)_log(_[0-9]+)?$')";
 
     /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
-    public static string? ForTask(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, AgentTask task, bool usersAuthTypeIsArray = true) =>
+    /// <param name="queryLogMoved">The probe saw a moved copy of system.query_log: the statement windows read it too.</param>
+    /// <param name="sessionLogMoved">The same for system.session_log and the sign-in windows.</param>
+    public static string? ForTask(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, AgentTask task, bool usersAuthTypeIsArray = true,
+        bool queryLogMoved = false, bool sessionLogMoved = false) =>
         task.Stream switch
         {
-            ProtocolInfo.Streams.Events => Events(endpoint, presentColumns, task.StartMicros, task.EndMicros),
-            ProtocolInfo.Streams.Sessions => Sessions(endpoint, task.StartMicros, task.EndMicros),
+            ProtocolInfo.Streams.Events => Events(endpoint, presentColumns, task.StartMicros, task.EndMicros, queryLogMoved),
+            ProtocolInfo.Streams.Sessions => Sessions(endpoint, task.StartMicros, task.EndMicros, sessionLogMoved),
             ProtocolInfo.Streams.CatalogTables => CatalogTables,
             ProtocolInfo.Streams.CatalogUsers => usersAuthTypeIsArray ? CatalogUsersArray : CatalogUsersScalar,
             ProtocolInfo.Streams.CatalogGrants => CatalogGrants,

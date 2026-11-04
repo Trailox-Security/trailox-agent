@@ -61,7 +61,9 @@ found there, and receives the tasks to run.
         "hasSessionLog": true,
         "textReadable": true,               // false when the database masks statement text
         "earliestEventMicros": 1757894400000000,     // oldest retained statement, 0 = unknown
-        "earliestSessionMicros": 1757894400000000
+        "earliestSessionMicros": 1757894400000000,
+        "queryLogCreatedMicros": 1793781488000000,   // ClickHouse, 1.16.0: when system.query_log was created
+        "movedLogAttachedMicros": 1793782023000000   // ClickHouse, 1.16.0: newest moved copy attached; omitted when none
       },
       "probeError": null                    // the probe's error when the endpoint was unreachable
     }
@@ -189,6 +191,17 @@ so every other statement that carries it - a change, or another user's statement
 like any other (from 1.12.0). When `clusterName` is set, `system.query_log` and
 `system.session_log` are read through `clusterAllReplicas('<clusterName>', ...)`.
 
+A server can move its log aside: ClickHouse Cloud does when it replaces a service's servers (the
+new servers start with an empty `system.query_log` and, minutes later, attach the old servers'
+tables as `system.query_log_1`, `_2`, ...), and a self-hosted server renames its log when an
+upgrade changes the log's columns. From 1.16.0, when the probe can see such a copy, the statement
+windows (and the oldest-row probe) read `merge('system', '^query_log(_[0-9]+)?$')` instead of
+`system.query_log`, and the same for `session_log`. The copies need their own grant,
+`GRANT SELECT ON system.query_log*` and `system.session_log*` (ClickHouse 24.10 or later); without
+it the probe sees no copy, and every statement is as before. The probe reports when the log was
+created and when the newest copy was attached (`queryLogCreatedMicros`, `movedLogAttachedMicros`
+in the caps, section 2), so Trailox can read again the windows read before the copy was attached.
+
 The statement column list is the fixed list below, intersected with the columns the probe found
 on `system.query_log`.
 
@@ -198,6 +211,10 @@ SELECT version()
 SELECT groupArray(name) FROM system.columns WHERE database = 'system' AND table = 'query_log'
   AND name IN (<the column list below>)
 SELECT count() FROM system.tables WHERE database = 'system' AND name = 'session_log'
+SELECT toInt64(toUnixTimestamp(maxIf(metadata_modification_time, name = 'query_log'))) * 1000000,
+       toInt64(toUnixTimestamp(maxIf(metadata_modification_time, match(name, '^query_log_[0-9]+$')))) * 1000000,
+       countIf(match(name, '^session_log_[0-9]+$'))
+FROM system.tables WHERE database = 'system' AND match(name, '^(query|session)_log(_[0-9]+)?$')   -- 1.16.0
 SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM system.query_log
 SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM system.session_log
 
@@ -212,7 +229,7 @@ SELECT hostname, query_id, toString(type) AS type, event_time_microseconds, user
        http_user_agent, client_version_major, client_version_minor, client_version_patch,
        log_comment, is_initial_query, distributed_depth, is_internal
        [, query]                                        -- only when storeRawQueryText
-FROM system.query_log
+FROM system.query_log                                   -- or the merge() above, when the probe saw a copy
 WHERE event_time_microseconds > fromUnixTimestamp64Micro(<start>)
   AND event_time_microseconds <= fromUnixTimestamp64Micro(<end>)
   AND type != 'QueryStart' AND is_initial_query = 1
