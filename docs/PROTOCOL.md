@@ -62,8 +62,8 @@ found there, and receives the tasks to run.
         "textReadable": true,               // false when the database masks statement text
         "earliestEventMicros": 1757894400000000,     // oldest retained statement, 0 = unknown
         "earliestSessionMicros": 1757894400000000,
-        "queryLogCreatedMicros": 1793781488000000,   // ClickHouse, 1.16.0: when system.query_log was created
-        "movedLogAttachedMicros": 1793782023000000   // ClickHouse, 1.16.0: newest moved copy attached; omitted when none
+        "queryLogCreatedMicros": 1760000000000000,   // ClickHouse, 1.16.0: when system.query_log was created
+        "movedLogAttachedMicros": 1760000600000000   // ClickHouse, 1.16.0: newest moved copy attached; omitted when none
       },
       "probeError": null                    // the probe's error when the endpoint was unreachable
     }
@@ -202,7 +202,7 @@ log only. A probe of the log tables that fails keeps what the last one saw. The 
 `GRANT SELECT ON system.query_log*` and `system.session_log*` (ClickHouse 24.10 or later); without
 it the probe sees no copy, and every statement is as before. The probe reports when the log was
 created and when the newest copy was attached (`queryLogCreatedMicros`, `movedLogAttachedMicros`
-in the caps, section 2), so Trailox can read again the windows read before the copy was attached.
+in the caps, section 2).
 
 The statement column list is the fixed list below, intersected with the columns the probe found
 on `system.query_log`.

@@ -95,15 +95,15 @@ public class MovedLogsTests
     [Fact]
     public async Task A_visible_copy_is_reported_in_the_caps_and_read_by_the_next_windows()
     {
-        var server = new Server { Created = 1793781488000000, Attached = 1793782023000000, SessionCopies = 1 };
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1 };
         var source = new ChSource(new HttpClient(server), Endpoint());
 
         var caps = await source.ProbeAsync(CancellationToken.None);
         await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
         await using (await source.OpenAsync(new AgentTask { ChunkId = "s", Stream = ProtocolInfo.Streams.Sessions, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
 
-        Assert.Equal(1793781488000000, caps.QueryLogCreatedMicros);
-        Assert.Equal(1793782023000000, caps.MovedLogAttachedMicros);
+        Assert.Equal(1760000000000000, caps.QueryLogCreatedMicros);
+        Assert.Equal(1760000600000000, caps.MovedLogAttachedMicros);
         // The oldest-row probe stays on the live log: it reads every row it covers.
         Assert.Contains(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM system.query_log"));
         Assert.DoesNotContain(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM merge("));
@@ -114,7 +114,7 @@ public class MovedLogsTests
     [Fact]
     public async Task A_log_table_probe_that_fails_later_keeps_reading_the_copies()
     {
-        var server = new Server { Created = 1793781488000000, Attached = 1793782023000000, SessionCopies = 1 };
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1 };
         var source = new ChSource(new HttpClient(server), Endpoint());
         await source.ProbeAsync(CancellationToken.None);
 
@@ -129,7 +129,7 @@ public class MovedLogsTests
     [Fact]
     public async Task No_visible_copy_or_a_failed_probe_leaves_every_statement_as_it_was()
     {
-        foreach (var server in new[] { new Server { Created = 1793781488000000 }, new Server { LogTablesFail = true } })
+        foreach (var server in new[] { new Server { Created = 1760000000000000 }, new Server { LogTablesFail = true } })
         {
             var source = new ChSource(new HttpClient(server), Endpoint());
 
