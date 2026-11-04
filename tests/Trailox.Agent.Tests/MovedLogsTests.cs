@@ -40,6 +40,13 @@ public class MovedLogsTests
         Assert.Contains("\nFROM merge('system', '^session_log(_[0-9]+)?$')\n", RawSelects.ForTask(Endpoint(), AllColumns, sessions, sessionLogMoved: true));
         Assert.Contains("\nFROM system.query_log\n", RawSelects.ForTask(Endpoint(), AllColumns, events, sessionLogMoved: true));
         Assert.Contains("\nFROM system.session_log\n", RawSelects.ForTask(Endpoint(), AllColumns, sessions, queryLogMoved: true));
+
+        // A moved read is bounded by its days, so each copy is pruned by partition; the live log's read is as it was.
+        const string days = " AND event_date BETWEEN toDate(fromUnixTimestamp64Micro(1)) AND toDate(fromUnixTimestamp64Micro(2))";
+        Assert.Contains(days, RawSelects.ForTask(Endpoint(), AllColumns, events, queryLogMoved: true));
+        Assert.Contains(days, RawSelects.ForTask(Endpoint(), AllColumns, sessions, sessionLogMoved: true));
+        Assert.DoesNotContain("event_date", RawSelects.ForTask(Endpoint(), AllColumns, events));
+        Assert.DoesNotContain("event_date", RawSelects.ForTask(Endpoint(), AllColumns, sessions));
     }
 
     [Fact]
@@ -59,7 +66,7 @@ public class MovedLogsTests
         public long Created { get; init; }
         public long Attached { get; init; }
         public long SessionCopies { get; init; }
-        public bool LogTablesFail { get; init; }
+        public bool LogTablesFail { get; set; }
         public List<string> Sent { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -102,6 +109,21 @@ public class MovedLogsTests
         Assert.DoesNotContain(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM merge("));
         Assert.Contains("\nFROM merge('system', '^query_log(_[0-9]+)?$')\n", server.Sent[^2]);
         Assert.Contains("\nFROM merge('system', '^session_log(_[0-9]+)?$')\n", server.Sent[^1]);
+    }
+
+    [Fact]
+    public async Task A_log_table_probe_that_fails_later_keeps_reading_the_copies()
+    {
+        var server = new Server { Created = 1793781488000000, Attached = 1793782023000000, SessionCopies = 1 };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+        await source.ProbeAsync(CancellationToken.None);
+
+        server.LogTablesFail = true;                      // the hourly re-probe, while the replicas churn
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);     // no times to report
+        Assert.Contains("\nFROM merge('system', '^query_log(_[0-9]+)?$')\n", server.Sent[^1]);
     }
 
     [Fact]

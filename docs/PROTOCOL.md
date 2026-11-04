@@ -196,7 +196,9 @@ new servers start with an empty `system.query_log` and, minutes later, attach th
 tables as `system.query_log_1`, `_2`, ...), and a self-hosted server renames its log when an
 upgrade changes the log's columns. From 1.16.0, when the probe can see such a copy, the statement
 windows read `merge('system', '^query_log(_[0-9]+)?$')` instead of `system.query_log`, and the
-sign-in windows the same for `session_log`; the oldest-row probe still reads the live log only. The copies need their own grant,
+sign-in windows the same for `session_log`, bounded by the window's days as well
+(`AND event_date BETWEEN toDate(<start>) AND toDate(<end>)`); the oldest-row probe still reads the live
+log only. A probe of the log tables that fails keeps what the last one saw. The copies need their own grant,
 `GRANT SELECT ON system.query_log*` and `system.session_log*` (ClickHouse 24.10 or later); without
 it the probe sees no copy, and every statement is as before. The probe reports when the log was
 created and when the newest copy was attached (`queryLogCreatedMicros`, `movedLogAttachedMicros`

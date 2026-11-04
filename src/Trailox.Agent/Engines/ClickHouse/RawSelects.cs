@@ -67,6 +67,15 @@ public static class RawSelects
     private static string Window(long startMicros, long endMicros) =>
         $"event_time_microseconds > fromUnixTimestamp64Micro({startMicros}) AND event_time_microseconds <= fromUnixTimestamp64Micro({endMicros})";
 
+    /// <summary>
+    /// A read of the moved copies is bounded by the window's days too, so each copy is pruned by its partitions: a
+    /// self-hosted server's copies keep no TTL by default and can be large. Empty for the live log, whose read is as it was.
+    /// </summary>
+    private static string MovedDays(bool moved, long startMicros, long endMicros) =>
+        moved
+            ? $" AND event_date BETWEEN toDate(fromUnixTimestamp64Micro({startMicros})) AND toDate(fromUnixTimestamp64Micro({endMicros}))"
+            : "";
+
     private static string Lit(string value) => "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'";
 
     /// <summary>
@@ -94,7 +103,7 @@ public static class RawSelects
         // The agent's own reads are tagged (see LogComment) and excluded here: a read by the user the agent signs in
         // as. The tag is a setting any user may send, so a tagged statement that is not one of those reads - a GRANT
         // sent with the tag, or anything another user tags - is reported like any other.
-        var where = Window(startMicros, endMicros)
+        var where = Window(startMicros, endMicros) + MovedDays(moved, startMicros, endMicros)
                     + " AND type != 'QueryStart' AND is_initial_query = 1"
                     + $" AND NOT (log_comment = '{LogComment}' AND query_kind IN {ReadKinds} AND user = {Lit(endpoint.Username)})";
         if (presentColumns.Contains("is_internal"))
@@ -114,7 +123,7 @@ public static class RawSelects
         "SELECT hostname, toString(type) AS type, toString(auth_id) AS auth_id, session_id, event_time_microseconds, user, " +
         "toString(auth_type) AS auth_type, toString(client_address) AS client_address, toString(interface) AS interface, " +
         "client_name, client_version_major, client_version_minor, client_version_patch, failure_reason\n" +
-        $"FROM {SessionLogSource(endpoint, moved)}\nWHERE {Window(startMicros, endMicros)}\nFORMAT JSONEachRow";
+        $"FROM {SessionLogSource(endpoint, moved)}\nWHERE {Window(startMicros, endMicros)}{MovedDays(moved, startMicros, endMicros)}\nFORMAT JSONEachRow";
 
     /// <summary>The customer's tables plus the two system rows Trailox reads retention settings from.</summary>
     public const string CatalogTables =

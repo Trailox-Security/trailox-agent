@@ -44,9 +44,15 @@ public sealed class ChSource : IEngineSource
 
         var hasSessionLog = await ScalarLongAsync(RawSelects.ProbeSessionLog, ct) > 0;
         _presentColumns = columns;
-        var (created, attached, sessionCopies) = await LogTablesAsync(ct);
-        _queryLogMoved = attached > 0;
-        _sessionLogMoved = hasSessionLog && sessionCopies > 0;
+        // A probe of the log tables that fails keeps what the last one saw: turning the copies off in the middle of a
+        // re-read would read its remaining windows from the live log alone. The caps then carry no times.
+        var tables = await LogTablesAsync(ct);
+        var (created, attached, sessionCopies) = tables ?? (0, 0, 0);
+        if (tables != null)
+        {
+            _queryLogMoved = attached > 0;
+            _sessionLogMoved = hasSessionLog && sessionCopies > 0;
+        }
         return new EndpointCaps
         {
             Version = version,
@@ -151,8 +157,8 @@ public sealed class ChSource : IEngineSource
         return e.ValueKind == JsonValueKind.Number ? e.GetInt64() : long.TryParse(e.GetString(), out var n) ? n : 0;
     }
 
-    /// <summary>The log tables the probe sees (RawSelects.ProbeLogTables). Fails soft to zeros: the windows then read system.query_log alone.</summary>
-    private async Task<(long Created, long Attached, long SessionCopies)> LogTablesAsync(CancellationToken ct)
+    /// <summary>The log tables the probe sees (RawSelects.ProbeLogTables); null when the probe failed.</summary>
+    private async Task<(long Created, long Attached, long SessionCopies)?> LogTablesAsync(CancellationToken ct)
     {
         try
         {
@@ -165,7 +171,7 @@ public sealed class ChSource : IEngineSource
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return (0, 0, 0);
+            return null;
         }
     }
 
