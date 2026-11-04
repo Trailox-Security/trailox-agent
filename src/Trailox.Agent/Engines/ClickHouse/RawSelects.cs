@@ -175,11 +175,11 @@ public static class RawSelects
 
     public const string ProbeSessionLog = "SELECT count() FROM system.tables WHERE database = 'system' AND name = 'session_log'";
 
-    public static string ProbeEarliestEvent(EndpointConfig endpoint, bool moved = false) =>
-        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {QueryLogSource(endpoint, moved)}";
+    public static string ProbeEarliestEvent(EndpointConfig endpoint) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {QueryLogSource(endpoint)}";
 
-    public static string ProbeEarliestSession(EndpointConfig endpoint, bool moved = false) =>
-        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {SessionLogSource(endpoint, moved)}";
+    public static string ProbeEarliestSession(EndpointConfig endpoint) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {SessionLogSource(endpoint)}";
 
     /// <summary>
     /// The log tables the monitoring user can see, in one row: when system.query_log was created and when the newest

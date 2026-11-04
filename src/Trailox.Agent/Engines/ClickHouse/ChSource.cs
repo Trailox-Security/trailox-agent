@@ -52,8 +52,10 @@ public sealed class ChSource : IEngineSource
             Version = version,
             Columns = RawSelects.ProbedColumns.Where(columns.Contains).ToList(),
             HasSessionLog = hasSessionLog,
-            EarliestEventMicros = await SoftScalarAsync(RawSelects.ProbeEarliestEvent(_endpoint, _queryLogMoved), ct),
-            EarliestSessionMicros = hasSessionLog ? await SoftScalarAsync(RawSelects.ProbeEarliestSession(_endpoint, _sessionLogMoved), ct) : 0,
+            // The oldest row of the live log only: it bounds a new source's first backfill, and over every copy it read
+            // 28 million rows each hour on a server with ten of them (measured 2026-11-04).
+            EarliestEventMicros = await SoftScalarAsync(RawSelects.ProbeEarliestEvent(_endpoint), ct),
+            EarliestSessionMicros = hasSessionLog ? await SoftScalarAsync(RawSelects.ProbeEarliestSession(_endpoint), ct) : 0,
             QueryLogCreatedMicros = created,
             MovedLogAttachedMicros = attached,
         };

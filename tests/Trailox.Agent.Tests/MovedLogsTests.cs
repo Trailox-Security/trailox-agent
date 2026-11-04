@@ -97,7 +97,9 @@ public class MovedLogsTests
 
         Assert.Equal(1793781488000000, caps.QueryLogCreatedMicros);
         Assert.Equal(1793782023000000, caps.MovedLogAttachedMicros);
-        Assert.Contains(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM merge('system', '^query_log(_[0-9]+)?$')"));
+        // The oldest-row probe stays on the live log: it reads every row it covers.
+        Assert.Contains(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM system.query_log"));
+        Assert.DoesNotContain(server.Sent, s => s.Contains("min(event_time_microseconds)), 0)) FROM merge("));
         Assert.Contains("\nFROM merge('system', '^query_log(_[0-9]+)?$')\n", server.Sent[^2]);
         Assert.Contains("\nFROM merge('system', '^session_log(_[0-9]+)?$')\n", server.Sent[^1]);
     }
