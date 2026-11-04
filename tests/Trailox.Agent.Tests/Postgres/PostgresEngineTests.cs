@@ -249,6 +249,24 @@ public class PostgresEngineTests
     }
 
     [Fact]
+    public void One_replica_is_said_in_the_singular()
+    {
+        Assert.Equal("the agent signs in to the replica", PgProbeChecks.ReplicasAnswer(1, Array.Empty<string>()).Message);
+        Assert.Equal("the agent signs in to all 2 replicas", PgProbeChecks.ReplicasAnswer(2, Array.Empty<string>()).Message);
+        Assert.StartsWith("the replica cannot be signed in to, so its counters", PgProbeChecks.ReplicasAnswer(1, new[] { "x" }).Message);
+        Assert.StartsWith("1 of 2 replicas cannot be signed in to, so its counters", PgProbeChecks.ReplicasAnswer(2, new[] { "x" }).Message);
+        Assert.StartsWith("2 of 3 replicas cannot be signed in to, so their counters", PgProbeChecks.ReplicasAnswer(3, new[] { "x", "y" }).Message);
+
+        Assert.Equal("1 replica is read", PgProbeChecks.Replicas(1, 1).Message);
+        Assert.Equal("2 replicas are read", PgProbeChecks.Replicas(2, 2).Message);
+        Assert.Equal("1 replica streams from the primary and 0 are listed in options.instances: the sign-ins of 1 replica are not read",
+            PgProbeChecks.Replicas(1, 0).Message);
+        Assert.Equal("2 replicas stream from the primary and 1 is listed in options.instances: the sign-ins of 1 replica are not read",
+            PgProbeChecks.Replicas(2, 1).Message);
+        Assert.EndsWith("the sign-ins of 2 replicas are not read", PgProbeChecks.Replicas(3, 1).Message);
+    }
+
+    [Fact]
     public void File_length_comes_from_the_newest_names()
     {
         const long Minute = 60_000_000;

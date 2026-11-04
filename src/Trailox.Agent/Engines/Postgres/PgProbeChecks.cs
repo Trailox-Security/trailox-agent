@@ -104,13 +104,17 @@ public static class PgProbeChecks
 
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0
-        ? Ok("instances", $"the agent signs in to all {listed} replicas")
-        : Warn("instances", $"{failures.Count} of {listed} replicas cannot be signed in to, so their counters, settings and statement "
-            + "texts are skipped: " + string.Join("; ", failures));
+        ? Ok("instances", listed == 1 ? "the agent signs in to the replica" : $"the agent signs in to all {listed} replicas")
+        : Warn("instances", (listed == 1 ? "the replica" : $"{failures.Count} of {listed} replicas")
+            + $" cannot be signed in to, so {(failures.Count == 1 ? "its" : "their")} counters, settings and statement texts are skipped: "
+            + string.Join("; ", failures));
 
     public static PostgresCheck Replicas(long streaming, int listed) => streaming > listed
-        ? Warn("replicas", $"{streaming} replicas stream from the primary and {listed} are listed in options.instances: the others' sign-ins are not read")
-        : Ok("replicas", listed == 0 ? "no replica" : $"{listed} replicas are read");
+        ? Warn("replicas", $"{ReplicaCount(streaming)} {(streaming == 1 ? "streams" : "stream")} from the primary and {listed} "
+            + $"{(listed == 1 ? "is" : "are")} listed in options.instances: the sign-ins of {ReplicaCount(streaming - listed)} are not read")
+        : Ok("replicas", listed == 0 ? "no replica" : $"{ReplicaCount(listed)} {(listed == 1 ? "is" : "are")} read");
+
+    private static string ReplicaCount(long n) => n == 1 ? "1 replica" : $"{n} replicas";
 
     /// <summary>How many minutes one file covers: the smallest gap between the names of the newest files; 0 when unknown.</summary>
     public static int FileMinutes(IReadOnlyList<long> startsMicros)
