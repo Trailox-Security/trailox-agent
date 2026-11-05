@@ -159,16 +159,31 @@ public class SnowflakeEngineTests
     }
 
     /// <summary>
-    /// 1.16: the masking text is part of the protocol. Any change gives statements a new QUERY_SHAPE_HASH, so it comes only
-    /// with a new version.
+    /// 1.16: the masking text and the hash expression are part of the protocol. Any change to either gives statements a new
+    /// QUERY_SHAPE_HASH, so it comes only with a new version.
     /// </summary>
     [Fact]
-    public void The_shape_masking_text_is_pinned()
+    public void The_shape_masking_text_and_hash_are_pinned()
     {
-        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(SfRawSelects.ShapeText)));
+        static string Digest(string text) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
 
-        Assert.Equal("596B1A47E947C69871560E40B367B34051C0F48193051B0623CC957E9C94B3F1", digest);
-        Assert.Equal("TO_VARCHAR(HASH(" + SfRawSelects.ShapeText + ") + 9223372036854775808)", SfRawSelects.ShapeHash);
+        Assert.Equal("596B1A47E947C69871560E40B367B34051C0F48193051B0623CC957E9C94B3F1", Digest(SfRawSelects.ShapeText));
+        Assert.Equal("4D53AD7E38133A2AF02509F4017A25DEE16428D3C5BF079FAAC2C10557523EC1", Digest(SfRawSelects.ShapeHash));
+    }
+
+    /// <summary>
+    /// 1.16: Snowflake shows no text for some statements, its own SYSTEM user's among them. Masked text alone would give
+    /// every one the hash of an empty text, so a GRANT and a SELECT would share one QUERY_SHAPE_HASH; such a statement's hash
+    /// is QUERY_PARAMETERIZED_HASH's, which still tells them apart.
+    /// </summary>
+    [Fact]
+    public void A_statement_with_no_text_is_hashed_from_Snowflakes_own_hash()
+    {
+        Assert.Equal(
+            "TO_VARCHAR(IFF(COALESCE(QUERY_TEXT, '') = '', HASH(COALESCE(QUERY_PARAMETERIZED_HASH, '')), HASH("
+            + SfRawSelects.ShapeText + ")) + 9223372036854775808)",
+            SfRawSelects.ShapeHash);
     }
 
     private const long Start = 1_790_000_000_000_000;

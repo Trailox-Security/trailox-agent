@@ -55,9 +55,9 @@ public static class SfRawSelects
     /// ⚠ Not even with storeRawQueryText on, as it was before 1.15.0: bound values are the customer's data,
     ///   not the statement's text.
     /// ⚠ From 1.16.0 each row also carries the statement's SHAPE: QUERY_SHAPE_TEXT, its text with every literal masked
-    ///   and every name kept, and QUERY_SHAPE_HASH, that text's hash. Snowflake computes both, so they are sent whether or
-    ///   not the text is: with storeRawQueryText off, statements that differ only in their values still share one shape,
-    ///   and the values never leave.
+    ///   and every name kept, and QUERY_SHAPE_HASH, that text's hash (Snowflake's own hash, hashed, for a statement it shows
+    ///   no text for). Snowflake computes both, so they are sent whether or not the text is: with storeRawQueryText off,
+    ///   statements that differ only in their values still share one shape, and the values never leave.
     /// </remarks>
     public static string Events(EndpointConfig endpoint, long startMicros, long endMicros)
     {
@@ -91,8 +91,19 @@ public static class SfRawSelects
         + """'\\(\\?\\)(\\s*,\\s*\\(\\?\\))+', '(?)'), """
         + """'\\s+', ' ')""";
 
-    /// <summary>The shape's hash, as unsigned 64-bit text.</summary>
-    public static readonly string ShapeHash = "TO_VARCHAR(HASH(" + ShapeText + ") + 9223372036854775808)";
+    /// <summary>
+    /// The shape's hash, as unsigned 64-bit text; for a statement Snowflake shows no text for, the hash of its
+    /// QUERY_PARAMETERIZED_HASH.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NO TEXT IS NOT ONE SHAPE: Snowflake shows no text for its own SYSTEM user's statements, and the masked text alone
+    ///   would give every one of them, a GRANT and a SELECT alike, the hash of an empty text. QUERY_PARAMETERIZED_HASH still
+    ///   tells them apart. The test is on the raw text, so a statement that masks to nothing (a comment alone) keeps the
+    ///   masked text's hash.
+    /// ⚠ PART OF THE PROTOCOL, like the masking text: the test pins its SHA-256.
+    /// </remarks>
+    public static readonly string ShapeHash =
+        "TO_VARCHAR(IFF(COALESCE(QUERY_TEXT, '') = '', HASH(COALESCE(QUERY_PARAMETERIZED_HASH, '')), HASH(" + ShapeText + ")) + 9223372036854775808)";
 
     /// <summary>How far before a window a statement that ended in it may have started, and still be attributed.</summary>
     internal const long StatementLookbackMicros = 24L * 3600 * 1_000_000;
