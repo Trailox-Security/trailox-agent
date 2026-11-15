@@ -190,6 +190,15 @@ public static class RawSelects
         " UNION ALL SELECT today(), NULL, NULL, '', 0, 0" +
         "\nFORMAT JSONEachRow";
 
+    /// <summary>catalog_show_grants (agent 1.17): the server's date, read first, because a SHOW statement cannot carry it.</summary>
+    public const string ServerToday = "SELECT toString(today())";
+
+    /// <summary>
+    /// catalog_show_grants (agent 1.17): every user's and every role's grants, one statement per row. Needs SHOW USERS and
+    /// SHOW ROLES, which every setup script grants.
+    /// </summary>
+    public const string ShowGrants = "SHOW GRANTS FOR ALL";
+
     // ---- probe (once per endpoint per probe interval) ----
 
     public const string ProbeVersion = "SELECT version()";

@@ -36,6 +36,10 @@ public static class ProtocolInfo
         // privileges through its roles.
         public const string CatalogRoleGrants = "catalog_role_grants";
 
+        // ClickHouse (agent 1.17): every grant as SHOW GRANTS prints it, so Trailox can tell a wildcard grant
+        // (ON db*.*) from an exact one.
+        public const string CatalogShowGrants = "catalog_show_grants";
+
         // Databricks (agent 1.1): statements and lineage are joined on the Trailox side; the
         // catalog is four information_schema views, one stream each.
         public const string LineageTables = "lineage_tables";

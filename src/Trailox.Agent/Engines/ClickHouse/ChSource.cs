@@ -69,6 +69,10 @@ public sealed class ChSource : IEngineSource
 
     public async Task<RowStream?> OpenAsync(AgentTask task, CancellationToken ct)
     {
+        if (task.Stream == ProtocolInfo.Streams.CatalogShowGrants)
+        {
+            return await ShowGrantsAsync(ct);
+        }
         var sql = RawSelects.ForTask(_endpoint, _presentColumns, task, _usersAuthTypeIsArray, _queryLogMoved, _sessionLogMoved);
         if (sql == null)
         {
@@ -120,6 +124,30 @@ public sealed class ChSource : IEngineSource
         }
         var body = await response.Content.ReadAsStringAsync(ct);
         throw new ChException((int)response.StatusCode, body.Length > 600 ? body[..600] : body);
+    }
+
+    /// <summary>
+    /// catalog_show_grants (agent 1.17): every user's and every role's grants as SHOW GRANTS prints them, one statement
+    /// per row, each with the server's date. Only the statement text shows that a grant is a wildcard (ON db*.*).
+    /// </summary>
+    /// <remarks>
+    /// SHOW GRANTS names its one column after itself ("GRANTS FOR ALL") and cannot carry a date, so the agent reads the
+    /// server's date first and sends each statement under the name <c>statement</c>. The statements are sent as the
+    /// server printed them. The list is small (one row per grant), so it is read whole, like a probe.
+    /// </remarks>
+    private async Task<RowStream> ShowGrantsAsync(CancellationToken ct)
+    {
+        var date = await ScalarStringAsync(RawSelects.ServerToday, ct);
+        var rows = await QueryRowsAsync(RawSelects.ShowGrants, ct);
+        var body = new MemoryStream();
+        foreach (var row in rows)
+        {
+            var statement = row.Length > 0 ? row[0].GetString() ?? "" : "";
+            body.Write(JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string> { ["snapshot_date"] = date, ["statement"] = statement }));
+            body.WriteByte((byte)'\n');
+        }
+        body.Position = 0;
+        return new RowStream(body, body);
     }
 
     /// <summary>Probe queries are small and must fail fast; only the row streams get the long client timeout.</summary>

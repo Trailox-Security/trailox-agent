@@ -168,7 +168,7 @@ public class RawSelectsTests
         {
             RawSelects.Events(Endpoint(), AllColumns, 1, 2), RawSelects.Sessions(Endpoint(), 1, 2), RawSelects.CatalogTables,
             RawSelects.CatalogUsersArray, RawSelects.CatalogUsersScalar, RawSelects.CatalogGrants, RawSelects.CatalogSettings,
-            RawSelects.CatalogRoleGrants, RawSelects.ProbeVersion,
+            RawSelects.CatalogRoleGrants, RawSelects.ServerToday, RawSelects.ProbeVersion,
             RawSelects.ProbeColumns, RawSelects.ProbeSessionLog, RawSelects.ProbeEarliestEvent(Endpoint()), RawSelects.ProbeEarliestSession(Endpoint()),
         };
         foreach (var sql in all)
@@ -180,5 +180,7 @@ public class RawSelectsTests
                 Assert.DoesNotMatch(@"(?i)(^|[^A-Za-z0-9_])" + verb + @"([^A-Za-z0-9_]|$)", sql);
             }
         }
+        // The one statement that is not a SELECT (agent 1.17): it only lists grants.
+        Assert.Equal("SHOW GRANTS FOR ALL", RawSelects.ShowGrants);
     }
 }

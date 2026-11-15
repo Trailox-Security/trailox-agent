@@ -296,6 +296,13 @@ SELECT today() AS snapshot_date, user_name, role_name, granted_role_name, grante
 FROM system.role_grants
 UNION ALL SELECT today(), NULL, NULL, '', 0, 0
 FORMAT JSONEachRow
+
+-- catalog_show_grants (daily; agent 1.17 and newer). Every grant as SHOW GRANTS prints it, so that a wildcard
+-- grant (ON db*.*) can be told from an exact one. Needs SHOW USERS and SHOW ROLES, which every setup script
+-- grants. SHOW GRANTS names its one column after itself and cannot carry a date, so the agent reads the date
+-- first and sends each statement as {"snapshot_date": "<that date>", "statement": "<the statement>"}.
+SELECT toString(today())
+SHOW GRANTS FOR ALL
 ```
 
 ## 6b. Databricks (engine `databricks`)
