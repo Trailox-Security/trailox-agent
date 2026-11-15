@@ -288,6 +288,14 @@ WHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_
                        'log_queries_min_query_duration_ms', 'log_queries_probability', 'log_query_settings',
                        'log_queries_cut_to_length') OR inherit_profile IS NOT NULL
 FORMAT JSONEachRow
+
+-- catalog_role_grants (daily; agent 1.17 and newer). Needs SELECT ON system.role_grants and SHOW USERS,
+-- SHOW ROLES, which every setup script grants. The last row has both names null and an empty role: it says
+-- the read ran, also when no one holds a role.
+SELECT today() AS snapshot_date, user_name, role_name, granted_role_name, granted_role_is_default, with_admin_option
+FROM system.role_grants
+UNION ALL SELECT today(), NULL, NULL, '', 0, 0
+FORMAT JSONEachRow
 ```
 
 ## 6b. Databricks (engine `databricks`)

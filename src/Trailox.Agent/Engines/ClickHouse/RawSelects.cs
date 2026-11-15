@@ -174,6 +174,22 @@ public static class RawSelects
         "'log_queries_probability', 'log_query_settings', 'log_queries_cut_to_length') OR inherit_profile IS NOT NULL\n" +
         "FORMAT JSONEachRow";
 
+    /// <summary>
+    /// The roles each user and each role holds (agent 1.17), as system.role_grants has them, and one more row: both names
+    /// null and an empty role, dated like the others. That row says the read ran, also on a server where no one holds a
+    /// role, so an empty answer is not taken for a read that did not happen.
+    /// </summary>
+    /// <remarks>
+    /// Needs SELECT ON system.role_grants and SHOW USERS, SHOW ROLES, which every setup script grants. On a server with
+    /// select_from_system_db_requires_grant = true the SELECT alone is enough. The server returns every row or refuses
+    /// the read: it does not return part of them.
+    /// </remarks>
+    public const string CatalogRoleGrants =
+        "SELECT today() AS snapshot_date, user_name, role_name, granted_role_name, granted_role_is_default, with_admin_option" +
+        " FROM system.role_grants" +
+        " UNION ALL SELECT today(), NULL, NULL, '', 0, 0" +
+        "\nFORMAT JSONEachRow";
+
     // ---- probe (once per endpoint per probe interval) ----
 
     public const string ProbeVersion = "SELECT version()";
@@ -218,6 +234,7 @@ public static class RawSelects
             ProtocolInfo.Streams.CatalogUsers => usersAuthTypeIsArray ? CatalogUsersArray : CatalogUsersScalar,
             ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
             ProtocolInfo.Streams.CatalogSettings => CatalogSettings,
+            ProtocolInfo.Streams.CatalogRoleGrants => CatalogRoleGrants,
             _ => null,
         };
 }

@@ -32,6 +32,10 @@ public static class ProtocolInfo
         // users a readonly setting stops from writing.
         public const string CatalogSettings = "catalog_settings";
 
+        // ClickHouse (agent 1.17): the roles each user and each role holds, so Trailox can follow a user's
+        // privileges through its roles.
+        public const string CatalogRoleGrants = "catalog_role_grants";
+
         // Databricks (agent 1.1): statements and lineage are joined on the Trailox side; the
         // catalog is four information_schema views, one stream each.
         public const string LineageTables = "lineage_tables";

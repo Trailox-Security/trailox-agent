@@ -114,7 +114,7 @@ public class RawSelectsTests
     [Fact]
     public void Every_protocol_stream_maps_to_a_select_and_unknown_ones_to_null()
     {
-        foreach (var stream in new[] { ProtocolInfo.Streams.Events, ProtocolInfo.Streams.Sessions, ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants, ProtocolInfo.Streams.CatalogSettings })
+        foreach (var stream in new[] { ProtocolInfo.Streams.Events, ProtocolInfo.Streams.Sessions, ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants, ProtocolInfo.Streams.CatalogSettings, ProtocolInfo.Streams.CatalogRoleGrants })
         {
             Assert.NotNull(RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = stream, StartMicros = 1, EndMicros = 2 }));
         }
@@ -143,6 +143,23 @@ public class RawSelectsTests
         Assert.Equal(sql, RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = ProtocolInfo.Streams.CatalogSettings }));
     }
 
+    /// <summary>
+    /// The roles each user and each role holds, every column of system.role_grants but the role's id, and one more row
+    /// with both names null and an empty role, dated with the same today(). The column names are part of what the agent
+    /// sends.
+    /// </summary>
+    [Fact]
+    public void The_role_grants_select_sends_each_row_and_one_row_that_says_the_read_ran()
+    {
+        var sql = RawSelects.CatalogRoleGrants;
+
+        Assert.Equal("SELECT today() AS snapshot_date, user_name, role_name, granted_role_name, granted_role_is_default, with_admin_option"
+                     + " FROM system.role_grants UNION ALL SELECT today(), NULL, NULL, '', 0, 0\nFORMAT JSONEachRow", sql);
+        Assert.DoesNotContain("granted_role_id", sql);
+        Assert.Equal(sql, RawSelects.ForTask(Endpoint(), AllColumns, new AgentTask { Stream = ProtocolInfo.Streams.CatalogRoleGrants }));
+        Assert.Equal("catalog_role_grants", ProtocolInfo.Streams.CatalogRoleGrants);
+    }
+
     /// <summary>No statement the agent can ever send modifies anything.</summary>
     [Fact]
     public void Nothing_here_writes()
@@ -150,7 +167,8 @@ public class RawSelectsTests
         var all = new[]
         {
             RawSelects.Events(Endpoint(), AllColumns, 1, 2), RawSelects.Sessions(Endpoint(), 1, 2), RawSelects.CatalogTables,
-            RawSelects.CatalogUsersArray, RawSelects.CatalogUsersScalar, RawSelects.CatalogGrants, RawSelects.CatalogSettings, RawSelects.ProbeVersion,
+            RawSelects.CatalogUsersArray, RawSelects.CatalogUsersScalar, RawSelects.CatalogGrants, RawSelects.CatalogSettings,
+            RawSelects.CatalogRoleGrants, RawSelects.ProbeVersion,
             RawSelects.ProbeColumns, RawSelects.ProbeSessionLog, RawSelects.ProbeEarliestEvent(Endpoint()), RawSelects.ProbeEarliestSession(Endpoint()),
         };
         foreach (var sql in all)
