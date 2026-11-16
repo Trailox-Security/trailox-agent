@@ -367,7 +367,7 @@ public class SnowflakeEngineTests
         {
             ProtocolInfo.Streams.Events, ProtocolInfo.Streams.AccessHistory, ProtocolInfo.Streams.Logins, ProtocolInfo.Streams.Sessions,
             ProtocolInfo.Streams.CatalogTables, ProtocolInfo.Streams.CatalogColumns, ProtocolInfo.Streams.CatalogUsers, ProtocolInfo.Streams.CatalogGrants,
-            ProtocolInfo.Streams.CatalogCredentials,
+            ProtocolInfo.Streams.CatalogCredentials, ProtocolInfo.Streams.CatalogRoleGrants,
         };
         foreach (var stream in streams)
         {
@@ -398,7 +398,8 @@ public class SnowflakeEngineTests
         var sql = SfRawSelects.CatalogTables(Endpoint(true, "HR_PRIVATE", "it's"));
         Assert.StartsWith("SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, TABLE_ID,", sql);
         Assert.EndsWith("WHERE DELETED IS NULL AND TABLE_CATALOG NOT IN ('SNOWFLAKE', 'HR_PRIVATE', 'it''s')", sql);
-        Assert.EndsWith("GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')", SfRawSelects.CatalogGrants);
+        Assert.EndsWith("GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA', 'ROLE', 'DATABASE_ROLE')", SfRawSelects.CatalogGrants);
+        Assert.EndsWith("GRANTS_TO_USERS WHERE DELETED_ON IS NULL", SfRawSelects.CatalogRoleGrants);
         Assert.EndsWith("USERS WHERE DELETED_ON IS NULL", SfRawSelects.CatalogUsers);
     }
 

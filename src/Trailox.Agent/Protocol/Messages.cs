@@ -32,9 +32,13 @@ public static class ProtocolInfo
         // users a readonly setting stops from writing.
         public const string CatalogSettings = "catalog_settings";
 
-        // ClickHouse (agent 1.17): the roles each user and each role holds, so Trailox can follow a user's
-        // privileges through its roles.
+        // ClickHouse (agent 1.17), Redshift and Snowflake (agent 1.18): the roles each user and each role holds (on
+        // Redshift also each user's groups), so Trailox can follow a user's privileges through its roles.
         public const string CatalogRoleGrants = "catalog_role_grants";
+
+        // Redshift (agent 1.18): the grants that reach tables beyond svv_relation_privileges - system privileges on
+        // every table, permissions on every table of a schema or a database, and table and view owners.
+        public const string CatalogOtherGrants = "catalog_other_grants";
 
         // ClickHouse (agent 1.17): every grant as SHOW GRANTS prints it, so Trailox can tell a wildcard grant
         // (ON db*.*) from an exact one.

@@ -94,6 +94,48 @@ public static class RsRawSelects
     public static readonly string CatalogUsers = $"SELECT CURRENT_DATE AS snapshot_date, {UserColumns} FROM pg_user";
     public const string CatalogGrants = "SELECT CURRENT_DATE AS snapshot_date, * FROM svv_relation_privileges";
 
+    /// <summary>The schemas whose owners are not read: the catalog streams leave their tables out on the Trailox side.</summary>
+    private const string SystemSchemas = "('pg_catalog', 'information_schema', 'pg_internal', 'pg_auto_copy')";
+
+    /// <summary>
+    /// From 1.18: who holds which role or group - svv_user_grants (user to role), svv_role_grants (role to role) and
+    /// pg_group (user to group) - in one statement, and one more row with every name empty. That row says the read
+    /// ran, also on a cluster where no one holds a role or a group.
+    /// </summary>
+    /// <remarks>
+    /// The one join in this file: pg_group lists its members by user id only, so they are named through pg_user. The
+    /// two svv views need ACCESS SYSTEM TABLE, which the sys:monitor role holds; pg_group and pg_user every user reads.
+    /// </remarks>
+    public const string CatalogRoleGrants =
+        "SELECT CURRENT_DATE AS snapshot_date, TRIM(user_name) AS member, 'user' AS member_type, TRIM(role_name) AS role," +
+        " 'role' AS role_type, admin_option FROM svv_user_grants" +
+        " UNION ALL SELECT CURRENT_DATE, TRIM(role_name), 'role', TRIM(granted_role_name), 'role', FALSE FROM svv_role_grants" +
+        " UNION ALL SELECT CURRENT_DATE, TRIM(u.usename), 'user', TRIM(g.groname), 'group', FALSE" +
+        " FROM pg_group g JOIN pg_user u ON u.usesysid = ANY(g.grolist)" +
+        " UNION ALL SELECT CURRENT_DATE, '', '', '', '', FALSE";
+
+    /// <summary>
+    /// From 1.18: the grants that reach tables beyond svv_relation_privileges, one row per grant, its view named in
+    /// kind: 'system' (ALTER, DROP and TRUNCATE TABLE held as system privileges), 'schema' and 'database' (permissions
+    /// FOR TABLES IN SCHEMA / DATABASE, on every table there now and later), and 'owner' (each table's and view's owner).
+    /// </summary>
+    /// <remarks>
+    /// svv_system_privileges, svv_schema_privileges and svv_database_privileges need ACCESS SYSTEM TABLE, which the
+    /// sys:monitor role holds; pg_tables and pg_views every user reads. One statement: it is read whole or not at all.
+    /// </remarks>
+    public const string CatalogOtherGrants =
+        "SELECT CURRENT_DATE AS snapshot_date, 'system' AS kind, TRIM(identity_name) AS identity_name, TRIM(identity_type) AS identity_type," +
+        " TRIM(system_privilege) AS privilege_type, '' AS namespace_name, '' AS relation_name, '' AS database_name, FALSE AS admin_option" +
+        " FROM svv_system_privileges WHERE TRIM(system_privilege) IN ('ALTER TABLE', 'DROP TABLE', 'TRUNCATE TABLE')" +
+        " UNION ALL SELECT CURRENT_DATE, 'schema', TRIM(identity_name), TRIM(identity_type), TRIM(privilege_type), TRIM(namespace_name), '', ''," +
+        " admin_option FROM svv_schema_privileges WHERE TRIM(privilege_scope) = 'TABLES'" +
+        " UNION ALL SELECT CURRENT_DATE, 'database', TRIM(identity_name), TRIM(identity_type), TRIM(privilege_type), '', '', TRIM(database_name)," +
+        " admin_option FROM svv_database_privileges WHERE TRIM(privilege_scope) = 'TABLES'" +
+        " UNION ALL SELECT CURRENT_DATE, 'owner', TRIM(tableowner), 'user', 'OWNERSHIP', TRIM(schemaname), TRIM(tablename), '', FALSE" +
+        " FROM pg_tables WHERE schemaname NOT IN " + SystemSchemas + " AND schemaname NOT LIKE 'pg_temp%'" +
+        " UNION ALL SELECT CURRENT_DATE, 'owner', TRIM(viewowner), 'user', 'OWNERSHIP', TRIM(schemaname), TRIM(viewname), '', FALSE" +
+        " FROM pg_views WHERE schemaname NOT IN " + SystemSchemas + " AND schemaname NOT LIKE 'pg_temp%'";
+
     /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
     public static string? ForTask(EndpointConfig endpoint, AgentTask task) => task.Stream switch
     {
@@ -106,6 +148,8 @@ public static class RsRawSelects
         ProtocolInfo.Streams.CatalogColumns => CatalogColumns,
         ProtocolInfo.Streams.CatalogUsers => CatalogUsers,
         ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
+        ProtocolInfo.Streams.CatalogRoleGrants => CatalogRoleGrants,
+        ProtocolInfo.Streams.CatalogOtherGrants => CatalogOtherGrants,
         _ => null,
     };
 }

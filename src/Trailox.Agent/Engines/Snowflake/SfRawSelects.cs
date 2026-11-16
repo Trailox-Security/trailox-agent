@@ -203,7 +203,16 @@ public static class SfRawSelects
     public const string CatalogGrants =
         "SELECT " + SnapshotDate + ", CREATED_ON, MODIFIED_ON, PRIVILEGE, GRANTED_ON, NAME, TABLE_CATALOG, TABLE_SCHEMA, GRANTED_TO, " +
         "GRANTEE_NAME, GRANT_OPTION, GRANTED_BY, DELETED_ON, GRANTED_BY_ROLE_TYPE, OBJECT_INSTANCE FROM " + AccountUsage + ".GRANTS_TO_ROLES " +
-        "WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')";
+        "WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA', 'ROLE', 'DATABASE_ROLE')";
+
+    /// <summary>
+    /// From 1.18: every role each user holds. With the ROLE and DATABASE_ROLE rows that catalog_grants reads from 1.18
+    /// (the roles each role holds), Trailox can follow a user's privileges through its roles. SNOWFLAKE.SECURITY_VIEWER
+    /// covers the view, like GRANTS_TO_ROLES.
+    /// </summary>
+    public const string CatalogRoleGrants =
+        "SELECT " + SnapshotDate + ", CREATED_ON, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY FROM " + AccountUsage +
+        ".GRANTS_TO_USERS WHERE DELETED_ON IS NULL";
 
     /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
     /// <param name="accessFromMicros">For an access history task, where the read starts (<see cref="AccessFrom"/>); without it, the whole day before the window.</param>
@@ -219,6 +228,7 @@ public static class SfRawSelects
         ProtocolInfo.Streams.CatalogUsers => CatalogUsers,
         ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
         ProtocolInfo.Streams.CatalogCredentials => CatalogCredentials,
+        ProtocolInfo.Streams.CatalogRoleGrants => CatalogRoleGrants,
         _ => null,
     };
 }

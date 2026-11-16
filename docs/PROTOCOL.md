@@ -387,6 +387,15 @@ numbers, booleans, strings or null; timestamps as ISO 8601 text with microsecond
 | `catalog_columns` | `svv_all_columns` | | yes |
 | `catalog_users` | `pg_user` (name, id and privilege flags only) | | yes |
 | `catalog_grants` | `svv_relation_privileges` | | yes |
+| `catalog_role_grants` | `svv_user_grants`, `svv_role_grants`, `pg_group` (from 1.18.0) | | yes |
+| `catalog_other_grants` | `svv_system_privileges`, `svv_schema_privileges`, `svv_database_privileges`, `pg_tables`, `pg_views` (from 1.18.0) | | yes |
+
+From 1.18.0 the agent also reads who holds which role or group (`catalog_role_grants`, with one last row whose names are
+all empty: it says the read ran, also when no one holds a role), and the grants that reach tables beyond
+`svv_relation_privileges` (`catalog_other_grants`): `ALTER TABLE`, `DROP TABLE` and `TRUNCATE TABLE` held as system
+privileges, permissions `FOR TABLES IN SCHEMA` or `DATABASE`, and each table's and view's owner. The `svv` views need
+`ACCESS SYSTEM TABLE`, which `sys:monitor` holds, so no grant is added. An agent older than 1.18.0 is never asked for
+either stream.
 
 `excludedDatabases` filters `database_name` on the statement, text and unload streams. The
 detail stream and the catalog streams are not filtered.
@@ -412,6 +421,23 @@ SELECT CURRENT_DATE AS snapshot_date, * FROM svv_table_info
 SELECT CURRENT_DATE AS snapshot_date, * FROM svv_all_columns
 SELECT CURRENT_DATE AS snapshot_date, usename, usesysid, usecreatedb, usesuper, usecatupd FROM pg_user
 SELECT CURRENT_DATE AS snapshot_date, * FROM svv_relation_privileges
+-- catalog_role_grants (from 1.18.0)
+SELECT CURRENT_DATE AS snapshot_date, TRIM(user_name) AS member, 'user' AS member_type, TRIM(role_name) AS role, 'role' AS role_type, admin_option FROM svv_user_grants
+  UNION ALL SELECT CURRENT_DATE, TRIM(role_name), 'role', TRIM(granted_role_name), 'role', FALSE FROM svv_role_grants
+  UNION ALL SELECT CURRENT_DATE, TRIM(u.usename), 'user', TRIM(g.groname), 'group', FALSE FROM pg_group g JOIN pg_user u ON u.usesysid = ANY(g.grolist)
+  UNION ALL SELECT CURRENT_DATE, '', '', '', '', FALSE
+-- catalog_other_grants (from 1.18.0); <system> = ('pg_catalog', 'information_schema', 'pg_internal', 'pg_auto_copy')
+SELECT CURRENT_DATE AS snapshot_date, 'system' AS kind, TRIM(identity_name) AS identity_name, TRIM(identity_type) AS identity_type,
+       TRIM(system_privilege) AS privilege_type, '' AS namespace_name, '' AS relation_name, '' AS database_name, FALSE AS admin_option
+  FROM svv_system_privileges WHERE TRIM(system_privilege) IN ('ALTER TABLE', 'DROP TABLE', 'TRUNCATE TABLE')
+  UNION ALL SELECT CURRENT_DATE, 'schema', TRIM(identity_name), TRIM(identity_type), TRIM(privilege_type), TRIM(namespace_name), '', '', admin_option
+    FROM svv_schema_privileges WHERE TRIM(privilege_scope) = 'TABLES'
+  UNION ALL SELECT CURRENT_DATE, 'database', TRIM(identity_name), TRIM(identity_type), TRIM(privilege_type), '', '', TRIM(database_name), admin_option
+    FROM svv_database_privileges WHERE TRIM(privilege_scope) = 'TABLES'
+  UNION ALL SELECT CURRENT_DATE, 'owner', TRIM(tableowner), 'user', 'OWNERSHIP', TRIM(schemaname), TRIM(tablename), '', FALSE
+    FROM pg_tables WHERE schemaname NOT IN <system> AND schemaname NOT LIKE 'pg_temp%'
+  UNION ALL SELECT CURRENT_DATE, 'owner', TRIM(viewowner), 'user', 'OWNERSHIP', TRIM(schemaname), TRIM(viewname), '', FALSE
+    FROM pg_views WHERE schemaname NOT IN <system> AND schemaname NOT LIKE 'pg_temp%'
 ```
 
 ## 6d. Snowflake (engine `snowflake`)
@@ -445,8 +471,14 @@ names in lower case (`QUERY_ID` becomes `query_id`).
 | `catalog_tables` | `TABLES` (existing, outside `SNOWFLAKE`) | | yes |
 | `catalog_columns` | `COLUMNS` (existing, outside `SNOWFLAKE`) | | yes |
 | `catalog_users` | `USERS` (existing) | | yes |
-| `catalog_grants` | `GRANTS_TO_ROLES` (current, on tables, views, databases and schemas) | | yes |
+| `catalog_grants` | `GRANTS_TO_ROLES` (current, on tables, views, databases and schemas; from 1.18.0 also roles and database roles) | | yes |
 | `catalog_credentials` | `CREDENTIALS` (from 1.11.0) | | yes |
+| `catalog_role_grants` | `GRANTS_TO_USERS` (current; from 1.18.0) | | yes |
+
+From 1.18.0, `catalog_grants` also sends the roles and database roles each role holds (`GRANTED_ON` `ROLE` or
+`DATABASE_ROLE`), and `catalog_role_grants` the roles each user holds, so that Trailox can follow a user's privileges
+through its roles. `SNOWFLAKE.SECURITY_VIEWER` covers `GRANTS_TO_USERS`, so no grant is added. An agent older than 1.18.0
+is never asked for `catalog_role_grants`.
 
 From 1.15.0, `access_history` and `sessions` are cut by the statements that ended in the window, as `events` is: the
 access row of a statement that ran for hours comes once the statement is complete, and a statement's session comes
@@ -514,7 +546,10 @@ SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, USER_ID, NAME,
   FROM SNOWFLAKE.ACCOUNT_USAGE.USERS WHERE DELETED_ON IS NULL
 SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREATED_ON, MODIFIED_ON, PRIVILEGE, GRANTED_ON, NAME, TABLE_CATALOG,
        TABLE_SCHEMA, GRANTED_TO, GRANTEE_NAME, GRANT_OPTION, GRANTED_BY, DELETED_ON, GRANTED_BY_ROLE_TYPE, OBJECT_INSTANCE
-  FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')
+  FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA', 'ROLE', 'DATABASE_ROLE')
+  -- before 1.18.0: GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA')
+SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREATED_ON, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY
+  FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS WHERE DELETED_ON IS NULL      -- catalog_role_grants, from 1.18.0
 SELECT TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE, CREDENTIAL_ID, NAME, USER_NAME, TYPE, DOMAIN, COMMENT, STATUS,
        ADDITIONAL_DETAILS, CREATED_BY, LAST_ALTERED_BY, CREATED_ON, LAST_USED_ON, LAST_ALTERED, EXPIRATION_DATE
   FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
