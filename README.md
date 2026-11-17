@@ -254,7 +254,10 @@ A provisioned cluster or Serverless workgroup, over the Postgres wire protocol (
 
 - **Reads:** `sys_query_history`, `sys_query_text`, `sys_query_detail` (scan and write steps
   only), `sys_unload_history`, `sys_connection_log`, and daily `svv_table_info`,
-  `svv_all_columns`, `pg_user` and `svv_relation_privileges`.
+  `svv_all_columns`, `pg_user` and `svv_relation_privileges`. From 1.18 also daily who holds which role or
+  group (`svv_user_grants`, `svv_role_grants`, `pg_group`) and the grants beyond `svv_relation_privileges`
+  (`svv_system_privileges`, `svv_schema_privileges`, `svv_database_privileges`, and the owners in `pg_tables` and
+  `pg_views`). `sys:monitor` covers them: no grant is added.
 - **Account:** a database user with the `sys:monitor` role; the password stays with the agent.
 - **agent.yaml:** `host` = the cluster or workgroup endpoint; `port` 5439; `clusterName` = the
   cluster identifier or workgroup name (descriptive); `username`; `password_env`/`password_file`;
@@ -268,7 +271,9 @@ Through the Snowflake SQL API over HTTPS, as a key-pair service user.
 
 - **Reads:** `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, `ACCESS_HISTORY`, `LOGIN_HISTORY`,
   `SESSIONS`, and daily `TABLES`, `COLUMNS`, `USERS`, `GRANTS_TO_ROLES` and (from 1.11.0) `CREDENTIALS`.
-  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it. Never `BIND_VALUES`, the
+  `CREDENTIALS` needs no further grant: `SNOWFLAKE.SECURITY_VIEWER` covers it. From 1.18 also daily
+  `GRANTS_TO_USERS`, and the role rows of `GRANTS_TO_ROLES`, so a user's privileges can be followed through its
+  roles; `SNOWFLAKE.SECURITY_VIEWER` covers them too. Never `BIND_VALUES`, the
   values a statement was run with (from 1.15.0; before, they were sent with the statement text).
 - **Account:** a `TYPE = SERVICE` user with a key pair you generate. The private key stays with
   the agent; Trailox never sees either half. Its role needs the `SNOWFLAKE.GOVERNANCE_VIEWER`,

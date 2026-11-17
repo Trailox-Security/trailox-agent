@@ -76,6 +76,31 @@ public class RedshiftEngineTests
         Assert.DoesNotContain("valuntil", RsRawSelects.CatalogUsers);
     }
 
+    /// <summary>
+    /// 1.18: who holds which role or group, and the grants beyond svv_relation_privileges. Each is one statement, read
+    /// whole or not at all; the role read ends with a row of empty names that says it ran.
+    /// </summary>
+    [Fact]
+    public void The_role_and_other_grant_reads_are_one_statement_each_and_the_role_read_ends_with_its_marker()
+    {
+        Assert.Equal(RsRawSelects.CatalogRoleGrants,
+            RsRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.CatalogRoleGrants }));
+        Assert.Equal(RsRawSelects.CatalogOtherGrants,
+            RsRawSelects.ForTask(Endpoint(), new AgentTask { Stream = ProtocolInfo.Streams.CatalogOtherGrants }));
+        Assert.EndsWith("UNION ALL SELECT CURRENT_DATE, '', '', '', '', FALSE", RsRawSelects.CatalogRoleGrants);
+        foreach (var view in new[] { "svv_user_grants", "svv_role_grants", "pg_group" })
+        {
+            Assert.Contains(view, RsRawSelects.CatalogRoleGrants);
+        }
+        foreach (var view in new[] { "svv_system_privileges", "svv_schema_privileges", "svv_database_privileges", "pg_tables", "pg_views" })
+        {
+            Assert.Contains(view, RsRawSelects.CatalogOtherGrants);
+        }
+        Assert.DoesNotContain(";", RsRawSelects.CatalogRoleGrants);
+        Assert.DoesNotContain(";", RsRawSelects.CatalogOtherGrants);
+        Assert.DoesNotContain("JOIN", RsRawSelects.CatalogOtherGrants, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Excluded_databases_filter_the_statement_streams_with_postgres_escaping()
     {
