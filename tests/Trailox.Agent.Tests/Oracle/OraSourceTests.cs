@@ -11,6 +11,7 @@ using Streams = Trailox.Agent.Protocol.ProtocolInfo.Streams;
 namespace Trailox.Agent.Tests.Oracle;
 
 /// <summary>A task end to end, from the rows behind the driver seam to the rows the upload reads; and the probe on the same seam.</summary>
+[Collection(TaskHeartbeatCollection.Name)]
 public class OraSourceTests
 {
     private static readonly DateTime Now = new(2026, 10, 22, 7, 0, 0, DateTimeKind.Utc);

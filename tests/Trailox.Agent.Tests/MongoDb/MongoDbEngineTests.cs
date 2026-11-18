@@ -6,6 +6,7 @@ using Trailox.Agent.Runner;
 namespace Trailox.Agent.Tests.MongoDb;
 
 /// <summary>agent.yaml for engine mongodb: the Atlas project, the cluster and the service account, and nothing else.</summary>
+[Collection(TaskHeartbeatCollection.Name)]
 public class MongoDbEngineTests
 {
     private static EndpointConfig Endpoint() => new()
