@@ -200,9 +200,21 @@ sign-in windows the same for `session_log`, bounded by the window's days as well
 (`AND event_date BETWEEN toDate(<start>) AND toDate(<end>)`); the oldest-row probe still reads the live
 log only. A probe of the log tables that fails keeps what the last one saw. The copies need their own grant,
 `GRANT SELECT ON system.query_log*` and `system.session_log*` (ClickHouse 24.10 or later); without
-it the probe sees no copy, and every statement is as before. The probe reports when the log was
+it the copies cannot be read, and every statement is as before (see below). The probe reports when the log was
 created and when the newest copy was attached (`queryLogCreatedMicros`, `movedLogAttachedMicros`
-in the caps, section 2).
+in the caps, section 2). From 1.18.1 the probe first proves the read across the copies: it runs
+each window's own SELECT over `merge()` with `LIMIT 0`, with `wait_end_of_query=1`. A user can see a
+copy it may not read - the setup script's `SHOW TABLES` lists it, and without the grant above the read
+is refused; ClickHouse 23.10 also runs `merge()` only for a user holding `CREATE TEMPORARY TABLE`. And
+a copy written before an upgrade can lack a column the window reads (a server upgraded from 23.10 keeps
+copies without `hostname`). When the server refuses the read or names a missing column, the windows
+read the live log alone, and no copy is reported; any other failure of the proof keeps what the last
+probe decided. Before 1.18.1 such a server failed every statement and sign-in window.
+
+The oldest server the agent reads is ClickHouse 23.10 (from 1.18.1; before it, the probe asked for
+the `hostname` column, which ClickHouse added to every system log in 23.11). A server whose logs
+have no `hostname` column is read with `FQDN() AS hostname` in its place, the value the column holds
+where it exists.
 
 The statement column list is the fixed list below, intersected with the columns the probe found
 on `system.query_log`.
@@ -219,9 +231,10 @@ SELECT toInt64(toUnixTimestamp(maxIf(metadata_modification_time, name = 'query_l
 FROM system.tables WHERE database = 'system' AND match(name, '^(query|session)_log(_[0-9]+)?$')   -- 1.16.0
 SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM system.query_log
 SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM system.session_log
+-- 1.18.1, only when the probe saw a copy: the events and the sessions SELECT below, over merge(), with LIMIT 0
 
 -- events
-SELECT hostname, query_id, toString(type) AS type, event_time_microseconds, user,
+SELECT hostname, query_id, toString(type) AS type, event_time_microseconds, user,   -- FQDN() AS hostname before 23.11
        authenticated_user, os_user, initial_user, query_kind,
        normalizeQuery(query) AS normalized_query, sipHash64(query) AS raw_text_hash,
        normalized_query_hash, databases, tables, views, columns, used_table_functions,
@@ -243,7 +256,7 @@ WHERE event_time_microseconds > fromUnixTimestamp64Micro(<start>)
 FORMAT JSONEachRow
 
 -- sessions (when collectSessionLog and system.session_log exists)
-SELECT hostname, toString(type) AS type, toString(auth_id) AS auth_id, session_id,
+SELECT hostname, toString(type) AS type, toString(auth_id) AS auth_id, session_id,   -- FQDN() AS hostname before 23.11
        event_time_microseconds, user, toString(auth_type) AS auth_type,
        toString(client_address) AS client_address, toString(interface) AS interface,
        client_name, client_version_major, client_version_minor, client_version_patch,
