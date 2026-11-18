@@ -34,6 +34,11 @@ public class MongoShapeTests
     ///    each sorted object made a new comparison delegate and a closure, 96% of the engine's allocation (252 bytes a
     ///    line, measured on the bench).
     /// </summary>
+    /// <remarks>
+    /// The bound holds for the quietest of five rounds. The runtime can allocate on this thread once while it recompiles the
+    /// warm method (1,264 bytes in one round on a CI runner), which says nothing about the shape; a shape that allocates at
+    /// all does so in every round, at least one object a line - 24,000 bytes a round.
+    /// </remarks>
     [Fact]
     public void A_warm_shape_allocates_nothing()
     {
@@ -45,19 +50,23 @@ public class MongoShapeTests
             reader.Read();
             shape.Normalize(ref reader);
         }
-        for (var i = 0; i < 100; i++)
+        for (var i = 0; i < 2000; i++)
         {
             Once();
         }
 
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (var i = 0; i < 1000; i++)
+        var rounds = new long[5];
+        for (var round = 0; round < rounds.Length; round++)
         {
-            Once();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 1000; i++)
+            {
+                Once();
+            }
+            rounds[round] = GC.GetAllocatedBytesForCurrentThread() - before;
         }
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        Assert.True(allocated < 1000, $"1,000 shapes allocated {allocated:N0} bytes");
+        Assert.True(rounds.Min() < 1000, $"1,000 shapes allocated {string.Join(", ", rounds.Select(r => r.ToString("N0")))} bytes in five rounds");
     }
 
     [Fact]

@@ -67,25 +67,77 @@ public class MovedLogsTests
         public long Attached { get; init; }
         public long SessionCopies { get; init; }
         public bool LogTablesFail { get; set; }
+
+        /// <summary>Refuse the read across the copies, as ClickHouse 23.10 does for a user without CREATE TEMPORARY TABLE.</summary>
+        public bool MovedReadRefused { get; set; }
+
+        /// <summary>Refuse it inside a 200, as 23.10 answers a JSON request that started before the refusal.</summary>
+        public bool RefusalInsideOk { get; set; }
+
+        /// <summary>Answer the proof with a server error that is not a refusal (a busy server, a replica that does not answer).</summary>
+        public bool ProofServerError { get; set; }
+
+        /// <summary>Let the proof time out, as the HTTP client reports it.</summary>
+        public bool ProofTimesOut { get; set; }
+
+        /// <summary>A copy written by an older server lacks a column the window reads (a server upgraded from 23.10).</summary>
+        public bool CopyLacksAColumn { get; set; }
+
         public List<string> Sent { get; } = new();
+
+        private static bool IsProof(string sql) => sql.EndsWith("\nLIMIT 0\nFORMAT JSONEachRow", StringComparison.Ordinal);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var sql = await request.Content!.ReadAsStringAsync(ct);
             Sent.Add(sql);
+            if (IsProof(sql))
+            {
+                if (CopyLacksAColumn)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.NotFound)
+                    {
+                        Content = new StringContent("Code: 16. DB::Exception: There is no column hostname in table.: Child table: system.query_log_0. (NO_SUCH_COLUMN_IN_TABLE)", Encoding.UTF8),
+                    };
+                }
+                // The proof of the read across the copies waits for the end of the statement, and asks for no rows.
+                Assert.Contains("wait_end_of_query=1", request.RequestUri!.Query);
+                if (ProofTimesOut)
+                {
+                    throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout");
+                }
+                if (ProofServerError)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    {
+                        Content = new StringContent("Code: 202. DB::Exception: Too many simultaneous queries. (TOO_MANY_SIMULTANEOUS_QUERIES)", Encoding.UTF8),
+                    };
+                }
+                if (RefusalInsideOk)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("{\"meta\": [], \"data\": [], \"rows\": 0, \"exception\": \"Code: 497. DB::Exception: Not enough privileges\"}", Encoding.UTF8),
+                    };
+                }
+            }
             string? json = sql switch
             {
                 _ when sql == RawSelects.ProbeVersion => "[[\"26.6.1.2455\"]]",
                 _ when sql == RawSelects.ProbeColumns => "[[" + "[" + string.Join(", ", RawSelects.QueryLogColumns.Select(c => "\"" + c + "\"")) + "]" + "]]",
                 _ when sql == RawSelects.ProbeSessionLog => "[[1]]",
-                _ when sql.Contains("FROM system.tables WHERE database = 'system' AND match(name") =>
+                _ when sql.Contains("system.tables") && sql.Contains("WHERE database = 'system' AND match(name") =>
                     LogTablesFail ? null : $"[[\"{Created}\", \"{Attached}\", \"{SessionCopies}\"]]",
                 _ when sql.Contains("min(event_time_microseconds)") => "[[\"1761955200000000\"]]",
+                _ when IsProof(sql) => MovedReadRefused ? null : "[]",
                 _ => "",
             };
             if (json == null)
             {
-                return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("Code: 497. Not enough privileges", Encoding.UTF8) };
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                {
+                    Content = new StringContent("Code: 497. DB::Exception: trailox_monitor: Not enough privileges. To execute this query, it's necessary to have the grant CREATE TEMPORARY TABLE ON *.*. (ACCESS_DENIED)", Encoding.UTF8),
+                };
             }
             var body = json.Length == 0 ? "" : "{\"data\": " + json + "}";
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -124,6 +176,134 @@ public class MovedLogsTests
 
         Assert.Equal(0, caps.MovedLogAttachedMicros);     // no times to report
         Assert.Contains("\nFROM merge('system', '^query_log(_[0-9]+)?$')\n", server.Sent[^1]);
+    }
+
+    [Fact]
+    public async Task The_read_across_the_copies_is_proved_before_any_window_uses_it()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1 };
+        await new ChSource(new HttpClient(server), Endpoint("default")).ProbeAsync(CancellationToken.None);
+
+        // The proof is each window's own SELECT, columns and all, reading no row.
+        var proofs = server.Sent.Where(s => s.EndsWith("\nLIMIT 0\nFORMAT JSONEachRow", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, proofs.Count);
+        Assert.StartsWith("SELECT hostname, query_id,", proofs[0]);
+        Assert.Contains("\nFROM clusterAllReplicas('default', merge('system', '^query_log(_[0-9]+)?$'))\n", proofs[0]);
+        Assert.StartsWith("SELECT hostname, toString(type) AS type,", proofs[1]);
+        Assert.Contains("\nFROM clusterAllReplicas('default', merge('system', '^session_log(_[0-9]+)?$'))\n", proofs[1]);
+    }
+
+    /// <summary>
+    /// A server upgraded across a new column keeps copies without it (a 23.10 copy on a 25.7 server has no hostname, and
+    /// a read naming it fails with Code 16). Reading through them would fail every window, so the live log is read.
+    /// </summary>
+    [Fact]
+    public async Task A_copy_that_lacks_a_column_the_window_reads_is_not_read()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1, CopyLacksAColumn = true };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "s", Stream = ProtocolInfo.Streams.Sessions, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);
+        Assert.Contains("\nFROM system.query_log\n", server.Sent[^2]);
+        Assert.Contains("\nFROM system.session_log\n", server.Sent[^1]);
+    }
+
+    [Fact]
+    public void The_proof_of_a_window_is_the_window_without_rows()
+    {
+        var events = RawSelects.Events(Endpoint(), AllColumns, 0, 0, moved: true);
+
+        Assert.Equal(events[..^"\nFORMAT JSONEachRow".Length] + "\nLIMIT 0\nFORMAT JSONEachRow", RawSelects.ProbeRead(events));
+        Assert.Throws<ArgumentException>(() => RawSelects.ProbeRead(RawSelects.CatalogTables + " LIMIT 1"));
+    }
+
+    /// <summary>
+    /// ClickHouse 23.10 lists the copies (the setup script's SHOW TABLES) but refuses merge() to a user without CREATE
+    /// TEMPORARY TABLE: reading through it would fail every window, so the live log is read and no copy is reported.
+    /// </summary>
+    [Fact]
+    public async Task A_server_that_refuses_the_read_across_the_copies_keeps_reading_the_live_log()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1, MovedReadRefused = true };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "s", Stream = ProtocolInfo.Streams.Sessions, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);
+        Assert.Equal(1760000000000000, caps.QueryLogCreatedMicros);
+        Assert.Contains("\nFROM system.query_log\n", server.Sent[^2]);
+        Assert.Contains("\nFROM system.session_log\n", server.Sent[^1]);
+    }
+
+    /// <summary>A copy the user can see but not read (SHOW TABLES without the wildcard grant) is refused the same way.</summary>
+    [Fact]
+    public async Task A_refusal_inside_a_200_is_still_a_refusal()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, SessionCopies = 1, RefusalInsideOk = true };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);
+        Assert.Contains("\nFROM system.query_log\n", server.Sent[^1]);
+    }
+
+    /// <summary>
+    /// Only a refusal turns the copies off. A busy server or a timeout on a later probe is not an answer: the copies stay on
+    /// and are reported, and the probe itself does not fail.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_failure_that_is_not_a_refusal_keeps_the_earlier_decision(bool serverError, bool timeout)
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000 };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+        await source.ProbeAsync(CancellationToken.None);
+
+        server.ProofServerError = serverError;
+        server.ProofTimesOut = timeout;
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(1760000600000000, caps.MovedLogAttachedMicros);
+        Assert.Contains("\nFROM merge('system', '^query_log(_[0-9]+)?$')\n", server.Sent[^1]);
+    }
+
+    /// <summary>On the first probe there is no earlier decision: a copy not yet proved is not read.</summary>
+    [Fact]
+    public async Task A_first_probe_that_cannot_prove_the_read_reads_the_live_log()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000, ProofServerError = true };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);
+        Assert.Contains("\nFROM system.query_log\n", server.Sent[^1]);
+    }
+
+    [Fact]
+    public async Task A_refusal_on_a_later_probe_turns_the_copies_off()
+    {
+        var server = new Server { Created = 1760000000000000, Attached = 1760000600000000 };
+        var source = new ChSource(new HttpClient(server), Endpoint());
+        await source.ProbeAsync(CancellationToken.None);
+
+        server.MovedReadRefused = true;
+        var caps = await source.ProbeAsync(CancellationToken.None);
+        await using (await source.OpenAsync(new AgentTask { ChunkId = "e", Stream = ProtocolInfo.Streams.Events, StartMicros = 1, EndMicros = 2 }, CancellationToken.None)) { }
+
+        Assert.Equal(0, caps.MovedLogAttachedMicros);
+        Assert.Contains("\nFROM system.query_log\n", server.Sent[^1]);
     }
 
     [Fact]

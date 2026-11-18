@@ -28,8 +28,31 @@ public static class RawSelects
         "log_comment", "is_initial_query", "distributed_depth", "is_internal",
     };
 
-    /// <summary>The columns that must exist for collection to make sense at all (ClickHouse >= 23.8).</summary>
-    public static readonly string[] RequiredColumns = { "hostname", "query_id", "event_time_microseconds", "normalized_query_hash", "query_kind" };
+    /// <summary>The columns that must exist for collection to make sense at all. hostname is not one: see <see cref="HostnameFallback"/>.</summary>
+    public static readonly string[] RequiredColumns = { "query_id", "event_time_microseconds", "normalized_query_hash", "query_kind" };
+
+    /// <summary>The oldest ClickHouse release the agent reads (major, minor).</summary>
+    public static readonly (int Major, int Minor) MinimumVersion = (23, 10);
+
+    /// <summary>
+    /// The server's name, for a server whose logs have no hostname column (ClickHouse added it to every system log in 23.11).
+    /// </summary>
+    /// <remarks>
+    /// FQDN() is the value the column holds where it exists; hostName() is the short name and is not. On a cluster read each
+    /// replica computes it, like the column it stands for.
+    /// </remarks>
+    public const string HostnameFallback = "FQDN() AS hostname";
+
+    /// <summary>True when <paramref name="version"/> (as version() prints it) is older than <see cref="MinimumVersion"/>.</summary>
+    /// <remarks>A version that does not start with two numbers is not refused here; the column probe still decides.</remarks>
+    public static bool IsOlderThanMinimum(string version)
+    {
+        var parts = version.Split('.');
+        return parts.Length >= 2
+               && int.TryParse(parts[0], out var major)
+               && int.TryParse(parts[1], out var minor)
+               && (major, minor).CompareTo(MinimumVersion) < 0;
+    }
 
     /// <summary>Columns whose presence is probed and reported (they vary by server version).</summary>
     public static readonly string[] ProbedColumns =
@@ -85,12 +108,14 @@ public static class RawSelects
     /// <param name="moved">Read the moved copies of the log too (<see cref="MovedQueryLogs"/>).</param>
     public static string Events(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, long startMicros, long endMicros, bool moved = false)
     {
-        var columns = QueryLogColumns.Where(presentColumns.Contains).Select(c => c switch
+        var columns = QueryLogColumns.Select(c => c switch
         {
+            "hostname" when !presentColumns.Contains(c) => HostnameFallback,
+            _ when !presentColumns.Contains(c) => null,
             "type" => "toString(type) AS type",
             "address" => "toString(address) AS address",
             _ => c,
-        }).ToList();
+        }).OfType<string>().ToList();
 
         // Two values the SERVER computes so the text itself can stay behind when storeRawQueryText is off.
         columns.Add("normalizeQuery(query) AS normalized_query");
@@ -119,8 +144,13 @@ public static class RawSelects
     }
 
     /// <param name="moved">Read the moved copies of the log too (<see cref="MovedSessionLogs"/>).</param>
-    public static string Sessions(EndpointConfig endpoint, long startMicros, long endMicros, bool moved = false) =>
-        "SELECT hostname, toString(type) AS type, toString(auth_id) AS auth_id, session_id, event_time_microseconds, user, " +
+    /// <param name="hasHostname">
+    /// The log has a hostname column. Every system log gained it in the same release (23.11), so the query log's probe
+    /// answers for this one too.
+    /// </param>
+    public static string Sessions(EndpointConfig endpoint, long startMicros, long endMicros, bool moved = false, bool hasHostname = true) =>
+        "SELECT " + (hasHostname ? "hostname" : HostnameFallback) +
+        ", toString(type) AS type, toString(auth_id) AS auth_id, session_id, event_time_microseconds, user, " +
         "toString(auth_type) AS auth_type, toString(client_address) AS client_address, toString(interface) AS interface, " +
         "client_name, client_version_major, client_version_minor, client_version_patch, failure_reason\n" +
         $"FROM {SessionLogSource(endpoint, moved)}\nWHERE {Window(startMicros, endMicros)}{MovedDays(moved, startMicros, endMicros)}\nFORMAT JSONEachRow";
@@ -220,15 +250,32 @@ public static class RawSelects
     /// moved copy of it was attached (epoch micros, 0 = none), and how many moved copies of system.session_log there are.
     /// </summary>
     /// <remarks>
-    /// system.tables lists only the tables the user may read, so a copy shows here exactly when the agent can read it.
-    /// A newer creation time means the server replaced its log; the attach time says when the old one could be read
-    /// again. Both go to Trailox in the probe's caps.
+    /// A copy listed here is not proved readable: with SHOW TABLES a user sees tables it may not read (25.7 and 23.10), so
+    /// the agent proves the read (<see cref="ProbeRead"/>) before any window uses it. A newer creation time means the server
+    /// replaced its log; the attach time says when the old one could be read again. Both go to Trailox in the probe's caps.
     /// </remarks>
     public static string ProbeLogTables(EndpointConfig endpoint) =>
         "SELECT toInt64(toUnixTimestamp(maxIf(metadata_modification_time, name = 'query_log'))) * 1000000, " +
         "toInt64(toUnixTimestamp(maxIf(metadata_modification_time, match(name, '^query_log_[0-9]+$')))) * 1000000, " +
         "countIf(match(name, '^session_log_[0-9]+$'))" +
         $" FROM {OnEveryReplica(endpoint, "system.tables")} WHERE database = 'system' AND match(name, '^(query|session)_log(_[0-9]+)?$')";
+
+    /// <summary>
+    /// A window's own SELECT that reads no row, to prove the server runs it. A user who sees the copies may not read them:
+    /// without the setup script's last two lines the SELECT is refused (25.7), and ClickHouse 23.10 runs merge() only for a
+    /// user holding CREATE TEMPORARY TABLE. A copy written by an older server can also lack a column the window reads (a
+    /// server upgraded from 23.10 has copies without hostname): only a read that names the window's columns finds that out,
+    /// so the proof is the window's SELECT itself.
+    /// </summary>
+    public static string ProbeRead(string windowSelect)
+    {
+        const string format = "\nFORMAT JSONEachRow";
+        if (!windowSelect.EndsWith(format, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("a window's SELECT ends with its FORMAT", nameof(windowSelect));
+        }
+        return windowSelect[..^format.Length] + "\nLIMIT 0" + format;
+    }
 
     /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
     /// <param name="queryLogMoved">The probe saw a moved copy of system.query_log: the statement windows read it too.</param>
@@ -238,7 +285,7 @@ public static class RawSelects
         task.Stream switch
         {
             ProtocolInfo.Streams.Events => Events(endpoint, presentColumns, task.StartMicros, task.EndMicros, queryLogMoved),
-            ProtocolInfo.Streams.Sessions => Sessions(endpoint, task.StartMicros, task.EndMicros, sessionLogMoved),
+            ProtocolInfo.Streams.Sessions => Sessions(endpoint, task.StartMicros, task.EndMicros, sessionLogMoved, presentColumns.Contains("hostname")),
             ProtocolInfo.Streams.CatalogTables => CatalogTables,
             ProtocolInfo.Streams.CatalogUsers => usersAuthTypeIsArray ? CatalogUsersArray : CatalogUsersScalar,
             ProtocolInfo.Streams.CatalogGrants => CatalogGrants,

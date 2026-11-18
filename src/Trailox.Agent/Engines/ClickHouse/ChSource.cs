@@ -31,6 +31,11 @@ public sealed class ChSource : IEngineSource
     public async Task<EndpointCaps> ProbeAsync(CancellationToken ct)
     {
         var version = await ScalarStringAsync(RawSelects.ProbeVersion, ct);
+        var minimum = $"ClickHouse {RawSelects.MinimumVersion.Major}.{RawSelects.MinimumVersion.Minor} or newer is required";
+        if (RawSelects.IsOlderThanMinimum(version))
+        {
+            throw new SourceException($"server {version} is too old; {minimum}");
+        }
         var columnRows = await QueryRowsAsync(RawSelects.ProbeColumns, ct);
         var columns = columnRows.Count > 0
             ? columnRows[0][0].EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase)
@@ -39,20 +44,12 @@ public sealed class ChSource : IEngineSource
         var missing = RawSelects.RequiredColumns.Where(c => !columns.Contains(c)).ToList();
         if (missing.Count > 0)
         {
-            throw new SourceException($"server {version} lacks system.query_log columns {string.Join(", ", missing)}; ClickHouse 23.8 or newer is required");
+            throw new SourceException($"server {version} lacks system.query_log columns {string.Join(", ", missing)}; {minimum}");
         }
 
         var hasSessionLog = await ScalarLongAsync(RawSelects.ProbeSessionLog, ct) > 0;
         _presentColumns = columns;
-        // A probe of the log tables that fails keeps what the last one saw: turning the copies off in the middle of a
-        // re-read would read its remaining windows from the live log alone. The caps then carry no times.
-        var tables = await LogTablesAsync(ct);
-        var (created, attached, sessionCopies) = tables ?? (0, 0, 0);
-        if (tables != null)
-        {
-            _queryLogMoved = attached > 0;
-            _sessionLogMoved = hasSessionLog && sessionCopies > 0;
-        }
+        var (created, attached) = await ProbeMovedLogsAsync(columns, hasSessionLog, ct);
         return new EndpointCaps
         {
             Version = version,
@@ -200,6 +197,80 @@ public sealed class ChSource : IEngineSource
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// When system.query_log was created and when the newest moved copy the windows read was attached (epoch micros, 0 =
+    /// none), deciding on the way which copies the windows read.
+    /// </summary>
+    /// <remarks>
+    /// A probe of the log tables that fails keeps what the last one saw: turning the copies off in the middle of a re-read
+    /// would read its remaining windows from the live log alone. The caps then carry no times. A copy the user can see is
+    /// read only once the server runs the window's own read across the copies (<see cref="RawSelects.ProbeRead"/>); one the
+    /// agent does not read is not reported either.
+    /// </remarks>
+    private async Task<(long Created, long Attached)> ProbeMovedLogsAsync(IReadOnlySet<string> columns, bool hasSessionLog, CancellationToken ct)
+    {
+        if (await LogTablesAsync(ct) is not { } tables)
+        {
+            return (0, 0);
+        }
+        var (created, attached, sessionCopies) = tables;
+        _queryLogMoved = attached > 0
+            && await MovedReadableAsync(RawSelects.Events(_endpoint, columns, 0, 0, moved: true), _queryLogMoved, ct);
+        _sessionLogMoved = hasSessionLog && sessionCopies > 0
+            && await MovedReadableAsync(RawSelects.Sessions(_endpoint, 0, 0, moved: true, hasHostname: columns.Contains("hostname")),
+                _sessionLogMoved, ct);
+        return (created, _queryLogMoved ? attached : 0);
+    }
+
+    /// <summary>The server's answer that a table of the read lacks one of its columns.</summary>
+    private static readonly System.Text.RegularExpressions.Regex MissingColumn =
+        new(@"Code: (16|47)\.|\((NO_SUCH_COLUMN_IN_TABLE|UNKNOWN_IDENTIFIER)\)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Runs a statement that returns no rows, and throws <see cref="ChException"/> when the server refuses it.</summary>
+    /// <remarks>
+    /// 🔴 wait_end_of_query, AND THE BODY TOO. Asked for JSON, a server can start its answer before the statement fails and
+    ///    put the refusal inside a 200: seen on ClickHouse 23.10 for a refused merge() read ("data": [] then "exception": ...),
+    ///    which a status check alone takes for an empty success. With wait_end_of_query=1 the server answers only once the
+    ///    statement has finished, so a refusal is an HTTP error; a body that still names an exception is one too.
+    /// </remarks>
+    private async Task ProveAsync(string sql, CancellationToken outer)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(outer);
+        timeout.CancelAfter(ProbeTimeout);
+        using var request = Request(sql, new Dictionary<string, string> { ["wait_end_of_query"] = "1" });
+        using var response = await _http.SendAsync(request, timeout.Token);
+        await ThrowOnError(response, timeout.Token);
+        var body = await response.Content.ReadAsStringAsync(timeout.Token);
+        if (body.Contains("DB::Exception", StringComparison.Ordinal))
+        {
+            throw new ChException((int)response.StatusCode, body.Length > 600 ? body[..600] : body);
+        }
+    }
+
+    /// <summary>Whether the server runs a window's read across the moved copies (RawSelects.ProbeRead).</summary>
+    /// <remarks>
+    /// Only the server's answer turns the copies off: a refusal (Code 497, ACCESS_DENIED), or a column a copy lacks (Code 16,
+    /// NO_SUCH_COLUMN_IN_TABLE; the analyzer's UNKNOWN_IDENTIFIER, Code 47). Any other failure - a 5xx while the server is
+    /// busy, a replica that does not answer, the proof's own timeout - keeps what the last probe decided, like a failed probe
+    /// of the log tables: it is not the server's answer to the question. Only the agent stopping is passed on.
+    /// </remarks>
+    private async Task<bool> MovedReadableAsync(string windowSelect, bool readableBefore, CancellationToken ct)
+    {
+        try
+        {
+            await ProveAsync(RawSelects.ProbeRead(windowSelect), ct);
+            return true;
+        }
+        catch (ChException ex) when (ex.IsAccessDenied || MissingColumn.IsMatch(ex.Message))
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return readableBefore;
         }
     }
 
