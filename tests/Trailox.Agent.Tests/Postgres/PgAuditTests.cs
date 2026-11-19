@@ -95,6 +95,26 @@ public class PgAuditTests
     [InlineData("SELECT * FROM t WHERE p = 'never ends", "SELECT * FROM t WHERE p = ?")]
     public void A_shape_has_no_value(string sql, string shape) => Assert.Equal(shape, PgStatementShape.Of(sql));
 
+    /// <summary>
+    /// Only a setting's value is masked whole: any other SET keeps its words (a column in UPDATE, a role, a schema), and
+    /// SET without = or TO names no value.
+    /// </summary>
+    [Theory]
+    [InlineData("UPDATE t SET a = b, c = d WHERE id = 1", "UPDATE t SET a = b, c = d WHERE id = ?")]
+    [InlineData("WITH u AS (UPDATE t SET a = b RETURNING a) SELECT a FROM u", "WITH u AS (UPDATE t SET a = b RETURNING a) SELECT a FROM u")]
+    [InlineData("SET ROLE analyst", "SET ROLE analyst")]
+    [InlineData("SET SESSION AUTHORIZATION analyst", "SET SESSION AUTHORIZATION analyst")]
+    [InlineData("SET TIME ZONE 'UTC'", "SET TIME ZONE ?")]
+    [InlineData("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")]
+    [InlineData("ALTER TABLE t SET SCHEMA archive", "ALTER TABLE t SET SCHEMA archive")]
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT 5", "ALTER TABLE t ALTER COLUMN c SET DEFAULT ?")]
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT now()", "ALTER TABLE t ALTER COLUMN c SET DEFAULT now()")]
+    [InlineData("ALTER TABLE t SET (fillfactor = 70, autovacuum_enabled = false)", "ALTER TABLE t SET (fillfactor = ?, autovacuum_enabled = false)")]
+    [InlineData("ALTER TABLE t OWNER TO alice", "ALTER TABLE t OWNER TO alice")]
+    [InlineData("ALTER TABLE \"set\" RENAME TO t2", "ALTER TABLE \"set\" RENAME TO t2")]
+    [InlineData("SELECT 1; UPDATE t SET a = b", "SELECT ?; UPDATE t SET a = b")]
+    public void Only_a_settings_value_is_masked_whole(string sql, string shape) => Assert.Equal(shape, PgStatementShape.Of(sql));
+
     [Fact]
     public void Statements_of_one_shape_in_one_minute_are_one_row_with_their_count()
     {
@@ -414,6 +434,18 @@ public class PgAuditTests
     [InlineData("""INSERT INTO t VALUES ('C:\', 'john secret')""", "INSERT INTO t VALUES (?")]
     [InlineData("""SELECT * FROM t WHERE p = 'C:\temp' AND q = 'secret'""", "SELECT * FROM t WHERE p = ? AND q = ?")]
     [InlineData("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')", "INSERT INTO t VALUES (?)")]
+    // A setting's value is one ?, words too, in a statement that starts with SET or ALTER.
+    [InlineData("SET app.tenant = secret", "SET app.tenant = ?")]
+    [InlineData("set local app.tenant to secret", "set local app.tenant to ?")]
+    [InlineData("SET search_path TO secret, \"Secret 2\", public;", "SET search_path TO ?;")]
+    [InlineData("SET x=secret", "SET x=?")]
+    [InlineData("ALTER ROLE r SET search_path = secret", "ALTER ROLE r SET search_path = ?")]
+    [InlineData("ALTER ROLE r IN DATABASE d SET pgaudit.log TO 'read, secret'", "ALTER ROLE r IN DATABASE d SET pgaudit.log TO ?")]
+    [InlineData("ALTER SYSTEM SET log_statement = secret", "ALTER SYSTEM SET log_statement = ?")]
+    [InlineData("ALTER FUNCTION f(a int) SET search_path = secret", "ALTER FUNCTION f(a int) SET search_path = ?")]
+    [InlineData("BEGIN; SET LOCAL app.key = secret; SELECT 1", "BEGIN; SET LOCAL app.key = ?; SELECT ?")]
+    [InlineData("SET app.key = /* note */ secret -- end", "SET app.key = ?")]
+    [InlineData("SET app.key = 'never ends secret", "SET app.key = ?")]
     public void A_shape_keeps_no_value_in_any_form(string sql, string shape)
     {
         Assert.Equal(shape, PgStatementShape.Of(sql));

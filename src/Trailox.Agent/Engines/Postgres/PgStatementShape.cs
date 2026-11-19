@@ -17,19 +17,67 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item>Comments go, and each run of white space becomes one space. Words, quoted identifiers, operators and
 ///   <c>$1</c> placeholders stay.</item>
 /// <item>🔴 It fails closed: a string that never ends (a cut text) ends the shape with <c>?</c>.</item>
+/// <item>🔴 A SETTING'S VALUE IS A VALUE, WORDS TOO. In a statement that starts with <c>SET</c> or <c>ALTER</c>, what
+///   follows <c>SET name =</c> or <c>SET name TO</c> up to the statement's end is one <c>?</c>: <c>SET app.tenant =
+///   acme</c> and <c>ALTER ROLE r SET search_path TO s1, s2</c> name no value as words. Any other <c>SET</c> keeps its
+///   words: <c>UPDATE t SET a = b</c> (a column), <c>SET ROLE r</c>, <c>ALTER TABLE t SET SCHEMA s</c>.</item>
 /// </list>
 /// The lexer is the password redactor's, so both read a statement the same way.
 /// </remarks>
 public static class PgStatementShape
 {
-    public static string Of(string sql)
+    public static string Of(string sql) => new Shaper(sql).Run();
+
+    /// <summary>Where a statement is in a <c>SET name = value</c> clause.</summary>
+    private enum Setting
     {
-        var output = new StringBuilder(Math.Min(sql.Length, 4096));
-        var i = 0;
-        var space = false;
-        while (i < sql.Length)
+        None,
+        Name,
+        Value,
+    }
+
+    /// <summary>One statement text, lexed once into its shape.</summary>
+    private sealed class Shaper
+    {
+        private readonly string _sql;
+        private readonly StringBuilder _output;
+        private bool _space;
+        private string? _first;          // the statement's first word, upper-cased; "" when quoted
+        private int _depth;              // parentheses
+        private Setting _setting;
+        private bool _named;             // a word of the setting's name was read
+        private bool _pending;           // the setting's value is not written yet
+
+        public Shaper(string sql)
         {
+            _sql = sql;
+            _output = new StringBuilder(Math.Min(sql.Length, 4096));
+        }
+
+        public string Run()
+        {
+            var i = 0;
+            while (i < _sql.Length)
+            {
+                int? next = _setting == Setting.Value ? SettingValue(i) : Step(i);
+                if (next is not { } end)
+                {
+                    break;
+                }
+                i = end;
+            }
+            return Rows(_output);
+        }
+
+        /// <summary>One token outside a setting's value; null when the shape stops here.</summary>
+        private int? Step(int i)
+        {
+            var sql = _sql;
             var c = sql[i];
+            if (_setting == Setting.Name && !NamePart(i))
+            {
+                _setting = Setting.None;
+            }
             if (c == '$' && i + 1 < sql.Length && char.IsAsciiDigit(sql[i + 1]))
             {
                 // A placeholder, not a value.
@@ -38,9 +86,8 @@ public static class PgStatementShape
                 {
                     j++;
                 }
-                Append(output, sql.AsSpan(i, j - i), ref space);
-                i = j;
-                continue;
+                Append(_output, sql.AsSpan(i, j - i), ref _space);
+                return j;
             }
             if (c == '0' && i + 2 < sql.Length && sql[i + 1] is 'x' or 'X' or 'o' or 'O' or 'b' or 'B' && char.IsAsciiHexDigit(sql[i + 2]))
             {
@@ -50,47 +97,157 @@ public static class PgStatementShape
                 {
                     j++;
                 }
-                i = j;
-                Value(output, ref space);
-                continue;
+                Value(_output, ref _space);
+                return j;
             }
             if (char.IsAsciiDigit(c) || (c == '.' && i + 1 < sql.Length && char.IsAsciiDigit(sql[i + 1])))
             {
-                i = NumberEnd(sql, i);
-                Value(output, ref space);
-                continue;
+                Value(_output, ref _space);
+                return NumberEnd(sql, i);
             }
             var token = PgPasswordRedactor.Lexer.Next(sql, i);
             switch (token.Kind)
             {
                 case PgPasswordRedactor.TokenKind.Space:
                 case PgPasswordRedactor.TokenKind.Comment:
-                    space = output.Length > 0;
+                    _space = _output.Length > 0;
                     break;
                 case PgPasswordRedactor.TokenKind.Literal:
-                    Value(output, ref space);
-                    if (!token.Terminated)
+                    Value(_output, ref _space);
+                    if (Ambiguous(sql, i, token))
                     {
-                        return Rows(output);
-                    }
-                    if (token.Plain && sql.AsSpan(i, token.End - i).Contains('\\'))
-                    {
-                        // Where the two readings end the string at different quotes, the text after either end can be a
-                        // value under the other, as in ('C:\', 'x'): the shape stops here.
-                        var escaped = PgPasswordRedactor.Lexer.Quoted(sql, i + 1, backslashEscapes: true);
-                        if (!escaped.Terminated || escaped.End != token.End)
-                        {
-                            return Rows(output);
-                        }
+                        return null;
                     }
                     break;
                 default:
-                    Append(output, sql.AsSpan(i, token.End - i), ref space);
+                    Append(_output, sql.AsSpan(i, token.End - i), ref _space);
+                    Track(i, token);
                     break;
             }
-            i = token.End;
+            return token.End;
         }
-        return Rows(output);
+
+        /// <summary>
+        /// A word or a character kept as it is: the statement's first word, parentheses, the end of a statement, and the
+        /// start of a setting's value (<c>SET name =</c>, <c>SET name TO</c>).
+        /// </summary>
+        private void Track(int i, PgPasswordRedactor.Token token)
+        {
+            var c = _sql[i];
+            if (token.Kind == PgPasswordRedactor.TokenKind.Word)
+            {
+                // A quoted name ("set", "to") is never a keyword.
+                var word = c == '"' ? "" : token.Word!.ToUpperInvariant();
+                if (_first == null)
+                {
+                    _first = word;
+                    StartSetting(word == "SET");
+                }
+                else if (_setting == Setting.Name)
+                {
+                    if (word == "TO" && _named)
+                    {
+                        (_setting, _pending) = (Setting.Value, true);
+                    }
+                    _named = true;
+                }
+                else
+                {
+                    StartSetting(word == "SET" && _depth == 0 && _first == "ALTER");
+                }
+                return;
+            }
+            if (c == '(')
+            {
+                _depth++;
+            }
+            else if (c == ')')
+            {
+                _depth--;
+            }
+            else if (c == ';' && _depth <= 0)
+            {
+                EndStatement();
+            }
+            else if (c == '=' && _setting == Setting.Name && _named)
+            {
+                (_setting, _pending) = (Setting.Value, true);
+            }
+        }
+
+        private void StartSetting(bool start)
+        {
+            if (start)
+            {
+                (_setting, _named) = (Setting.Name, false);
+            }
+        }
+
+        private void EndStatement() => (_setting, _first, _depth) = (Setting.None, null, 0);
+
+        /// <summary>A setting's name goes on: white space, a comment, a word, a dot, or the = after it.</summary>
+        private bool NamePart(int i)
+        {
+            var token = PgPasswordRedactor.Lexer.Next(_sql, i);
+            return token.Kind is PgPasswordRedactor.TokenKind.Space or PgPasswordRedactor.TokenKind.Comment or PgPasswordRedactor.TokenKind.Word
+                || (token.Kind == PgPasswordRedactor.TokenKind.Other && _sql[i] is '.' or '=');
+        }
+
+        /// <summary>
+        /// One token of a setting's value: the value is one <c>?</c>, written at its first token, and it runs to the
+        /// statement's end. A string in it still fails closed. Null when the shape stops here.
+        /// </summary>
+        private int? SettingValue(int i)
+        {
+            var c = _sql[i];
+            var token = PgPasswordRedactor.Lexer.Next(_sql, i);
+            switch (token.Kind)
+            {
+                case PgPasswordRedactor.TokenKind.Space:
+                case PgPasswordRedactor.TokenKind.Comment:
+                    _space = _output.Length > 0;
+                    break;
+                case PgPasswordRedactor.TokenKind.Other when c == ';' && _depth <= 0:
+                    Append(_output, ";", ref _space);
+                    EndStatement();
+                    break;
+                default:
+                    if (_pending)
+                    {
+                        Value(_output, ref _space);
+                        _pending = false;
+                    }
+                    _space = false;
+                    if (token.Kind == PgPasswordRedactor.TokenKind.Literal && Ambiguous(_sql, i, token))
+                    {
+                        return null;
+                    }
+                    if (token.Kind == PgPasswordRedactor.TokenKind.Other)
+                    {
+                        _depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+                    }
+                    break;
+            }
+            return token.End;
+        }
+    }
+
+    /// <summary>
+    /// A string that never ends (a cut text), or a plain string holding a backslash whose two readings end it at different
+    /// quotes: the text after either end can be a value under the other, as in <c>('C:\', 'x')</c>.
+    /// </summary>
+    private static bool Ambiguous(string sql, int i, PgPasswordRedactor.Token token)
+    {
+        if (!token.Terminated)
+        {
+            return true;
+        }
+        if (token.Plain && sql.AsSpan(i, token.End - i).Contains('\\'))
+        {
+            var escaped = PgPasswordRedactor.Lexer.Quoted(sql, i + 1, backslashEscapes: true);
+            return !escaped.Terminated || escaped.End != token.End;
+        }
+        return false;
     }
 
     /// <summary>A list of rows of values, as in <c>VALUES (?), (?)</c>, as one: the row count is no part of the shape.</summary>
