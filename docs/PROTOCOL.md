@@ -797,10 +797,10 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
   list of them is one `?`, and so is a list of rows (`VALUES (?), (?)`). Comments are removed and white space
   collapsed; `$1` placeholders stay. A string that is cut ends the shape, and so does a plain string that holds a
   backslash when its two possible ends (with `standard_conforming_strings` on and off) differ. From 1.19.0, in a
-  statement that starts with `SET` or `ALTER`, after a `SET` outside parentheses, everything after the first `=` or
-  `TO` outside parentheses, up to the statement's end, is one `?`, words too: `ALTER ROLE r SET search_path TO ?`.
-  The shape is the row's
-  `message`, cut at 16,384 characters, so no value is shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's
+  statement that starts with `SET`, `ALTER` or `CREATE`, after a `SET` outside parentheses, everything after the
+  first `=` or `TO` outside parentheses, up to the statement's end, is one `?`, words too:
+  `ALTER ROLE r SET search_path TO ?`. The shape is the row's `message`, cut at 16,384 characters, so no value is
+  shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's
   `detail`. From 1.19.0 both are shipped with or without `storeRawQueryText` (before, the shape only with it).
 - Lines of other classes (`DDL`, `ROLE`, `FUNCTION`, `MISC`) are counted, not shipped: DDL and role changes come
   from `log_statement`.

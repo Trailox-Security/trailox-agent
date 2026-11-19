@@ -17,10 +17,10 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item>Comments go, and each run of white space becomes one space. Words, quoted identifiers, operators and
 ///   <c>$1</c> placeholders stay.</item>
 /// <item>🔴 It fails closed: a string that never ends (a cut text) ends the shape with <c>?</c>.</item>
-/// <item>🔴 A SETTING'S VALUE IS A VALUE, WORDS TOO. In a statement that starts with <c>SET</c> or <c>ALTER</c>, after
-///   a <c>SET</c> outside parentheses, what follows the first <c>=</c> or <c>TO</c> outside parentheses, up to the
-///   statement's end, is one <c>?</c>: <c>SET app.tenant = acme</c> and <c>ALTER ROLE r SET search_path TO s1, s2</c>
-///   keep no value as words. Whatever spells the name in between (<c>U&amp;"..." UESCAPE '!'</c>) is shaped as usual,
+/// <item>🔴 A SETTING'S VALUE IS A VALUE, WORDS TOO. In a statement that starts with <c>SET</c>, <c>ALTER</c> or
+///   <c>CREATE</c> (a function's or procedure's own settings), after a <c>SET</c> outside parentheses, what follows
+///   the first <c>=</c> or <c>TO</c> outside parentheses, up to the statement's end, is one <c>?</c>: <c>SET
+///   app.tenant = acme</c> and <c>ALTER ROLE r SET search_path TO s1, s2</c> keep no value as words. Whatever spells the name in between (<c>U&amp;"..." UESCAPE '!'</c>) is shaped as usual,
 ///   so no way of writing a name ends the rule early. A <c>SET</c> with no <c>=</c> or <c>TO</c> after it keeps its
 ///   words (<c>SET ROLE r</c>, <c>ALTER TABLE t SET SCHEMA s</c>), and so does a statement that starts otherwise
 ///   (<c>UPDATE t SET a = b</c>, a column). It fails closed on <c>ALTER TABLE</c>: in <c>SET DEFAULT ?, OWNER TO
@@ -149,7 +149,7 @@ public static class PgStatementShape
                 {
                     (_setting, _pending) = (Setting.Value, true);
                 }
-                else if (_depth == 0 && _setting == Setting.None && word == "SET" && _first == "ALTER")
+                else if (_depth == 0 && _setting == Setting.None && word == "SET" && _first is "ALTER" or "CREATE")
                 {
                     _setting = Setting.Name;
                 }

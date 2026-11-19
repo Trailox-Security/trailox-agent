@@ -115,6 +115,27 @@ public class PgAuditTests
     [InlineData("SELECT 1; UPDATE t SET a = b", "SELECT ?; UPDATE t SET a = b")]
     public void Only_a_settings_value_is_masked_whole(string sql, string shape) => Assert.Equal(shape, PgStatementShape.Of(sql));
 
+    /// <summary>
+    /// Where PostgreSQL's own lexer reads a value, the shape keeps none: nested and unclosed comments, dollar tags (case
+    /// and non-ASCII letters count), a word ending in e before a string, a string whose escape reading never ends, an
+    /// = glued to the value, a SET in a CREATE FUNCTION or after a comment.
+    /// </summary>
+    [Theory]
+    [InlineData("SELECT 1 /* a /* b */ hunter2 */ FROM t")]
+    [InlineData("SELECT 1 /* /* */ hunter2")]
+    [InlineData("SELECT $Q$x$q$ hunter2 $Q$")]
+    [InlineData("SELECT $é$hunter2$é$")]
+    [InlineData("SELECT date'\\'' hunter2 '")]
+    [InlineData("SELECT 1e'\\' , ' , 'hunter2'")]
+    [InlineData("SELECT 'a\\' , hunter2")]
+    [InlineData("SET app.key =hunter2")]
+    [InlineData("SET app.key=-hunter2")]
+    [InlineData("/* job */ SET app.key = hunter2")]
+    [InlineData("CREATE FUNCTION f() RETURNS int LANGUAGE sql SET app.key = hunter2 AS $$select 1$$")]
+    [InlineData("CREATE OR REPLACE PROCEDURE p() LANGUAGE sql SET app.key TO hunter2 AS $$select 1$$")]
+    public void A_shape_keeps_no_value_where_postgres_reads_one(string sql) =>
+        Assert.DoesNotContain("hunter2", PgStatementShape.Of(sql), StringComparison.Ordinal);
+
     [Fact]
     public void Statements_of_one_shape_in_one_minute_are_one_row_with_their_count()
     {
