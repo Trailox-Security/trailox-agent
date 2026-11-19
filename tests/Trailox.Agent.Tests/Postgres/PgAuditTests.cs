@@ -446,6 +446,13 @@ public class PgAuditTests
     [InlineData("BEGIN; SET LOCAL app.key = secret; SELECT 1", "BEGIN; SET LOCAL app.key = ?; SELECT ?")]
     [InlineData("SET app.key = /* note */ secret -- end", "SET app.key = ?")]
     [InlineData("SET app.key = 'never ends secret", "SET app.key = ?")]
+    // However the name is spelled, the first = or TO starts the value.
+    [InlineData("SET U&\"app.key\" = secret", "SET U&\"app.key\" = ?")]
+    [InlineData("SET U&\"app!002ekey\" UESCAPE '!' = secret", "SET U&\"app!002ekey\" UESCAPE ? = ?")]
+    [InlineData("SET app . /* x */ key TO secret", "SET app . key TO ?")]
+    [InlineData("ALTER ROLE r SET U&\"x\" TO secret", "ALTER ROLE r SET U&\"x\" TO ?")]
+    // It fails closed on ALTER TABLE: an owner after a SET action is masked too.
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT 5, OWNER TO secret", "ALTER TABLE t ALTER COLUMN c SET DEFAULT ?, OWNER TO ?")]
     public void A_shape_keeps_no_value_in_any_form(string sql, string shape)
     {
         Assert.Equal(shape, PgStatementShape.Of(sql));

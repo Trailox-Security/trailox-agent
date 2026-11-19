@@ -17,10 +17,14 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item>Comments go, and each run of white space becomes one space. Words, quoted identifiers, operators and
 ///   <c>$1</c> placeholders stay.</item>
 /// <item>🔴 It fails closed: a string that never ends (a cut text) ends the shape with <c>?</c>.</item>
-/// <item>🔴 A SETTING'S VALUE IS A VALUE, WORDS TOO. In a statement that starts with <c>SET</c> or <c>ALTER</c>, what
-///   follows <c>SET name =</c> or <c>SET name TO</c> up to the statement's end is one <c>?</c>: <c>SET app.tenant =
-///   acme</c> and <c>ALTER ROLE r SET search_path TO s1, s2</c> name no value as words. Any other <c>SET</c> keeps its
-///   words: <c>UPDATE t SET a = b</c> (a column), <c>SET ROLE r</c>, <c>ALTER TABLE t SET SCHEMA s</c>.</item>
+/// <item>🔴 A SETTING'S VALUE IS A VALUE, WORDS TOO. In a statement that starts with <c>SET</c> or <c>ALTER</c>, after
+///   a <c>SET</c> outside parentheses, what follows the first <c>=</c> or <c>TO</c> outside parentheses, up to the
+///   statement's end, is one <c>?</c>: <c>SET app.tenant = acme</c> and <c>ALTER ROLE r SET search_path TO s1, s2</c>
+///   keep no value as words. Whatever spells the name in between (<c>U&amp;"..." UESCAPE '!'</c>) is shaped as usual,
+///   so no way of writing a name ends the rule early. A <c>SET</c> with no <c>=</c> or <c>TO</c> after it keeps its
+///   words (<c>SET ROLE r</c>, <c>ALTER TABLE t SET SCHEMA s</c>), and so does a statement that starts otherwise
+///   (<c>UPDATE t SET a = b</c>, a column). It fails closed on <c>ALTER TABLE</c>: in <c>SET DEFAULT ?, OWNER TO
+///   bob</c> the owner is masked.</item>
 /// </list>
 /// The lexer is the password redactor's, so both read a statement the same way.
 /// </remarks>
@@ -28,7 +32,7 @@ public static class PgStatementShape
 {
     public static string Of(string sql) => new Shaper(sql).Run();
 
-    /// <summary>Where a statement is in a <c>SET name = value</c> clause.</summary>
+    /// <summary>Where a statement is in a <c>SET name = value</c> clause: after its SET (<see cref="Name"/>), or in its value.</summary>
     private enum Setting
     {
         None,
@@ -45,7 +49,6 @@ public static class PgStatementShape
         private string? _first;          // the statement's first word, upper-cased; "" when quoted
         private int _depth;              // parentheses
         private Setting _setting;
-        private bool _named;             // a word of the setting's name was read
         private bool _pending;           // the setting's value is not written yet
 
         public Shaper(string sql)
@@ -74,10 +77,6 @@ public static class PgStatementShape
         {
             var sql = _sql;
             var c = sql[i];
-            if (_setting == Setting.Name && !NamePart(i))
-            {
-                _setting = Setting.None;
-            }
             if (c == '$' && i + 1 < sql.Length && char.IsAsciiDigit(sql[i + 1]))
             {
                 // A placeholder, not a value.
@@ -141,19 +140,18 @@ public static class PgStatementShape
                 if (_first == null)
                 {
                     _first = word;
-                    StartSetting(word == "SET");
-                }
-                else if (_setting == Setting.Name)
-                {
-                    if (word == "TO" && _named)
+                    if (word == "SET")
                     {
-                        (_setting, _pending) = (Setting.Value, true);
+                        _setting = Setting.Name;
                     }
-                    _named = true;
                 }
-                else
+                else if (_depth == 0 && _setting == Setting.Name && word == "TO")
                 {
-                    StartSetting(word == "SET" && _depth == 0 && _first == "ALTER");
+                    (_setting, _pending) = (Setting.Value, true);
+                }
+                else if (_depth == 0 && _setting == Setting.None && word == "SET" && _first == "ALTER")
+                {
+                    _setting = Setting.Name;
                 }
                 return;
             }
@@ -169,29 +167,13 @@ public static class PgStatementShape
             {
                 EndStatement();
             }
-            else if (c == '=' && _setting == Setting.Name && _named)
+            else if (c == '=' && _depth == 0 && _setting == Setting.Name)
             {
                 (_setting, _pending) = (Setting.Value, true);
             }
         }
 
-        private void StartSetting(bool start)
-        {
-            if (start)
-            {
-                (_setting, _named) = (Setting.Name, false);
-            }
-        }
-
         private void EndStatement() => (_setting, _first, _depth) = (Setting.None, null, 0);
-
-        /// <summary>A setting's name goes on: white space, a comment, a word, a dot, or the = after it.</summary>
-        private bool NamePart(int i)
-        {
-            var token = PgPasswordRedactor.Lexer.Next(_sql, i);
-            return token.Kind is PgPasswordRedactor.TokenKind.Space or PgPasswordRedactor.TokenKind.Comment or PgPasswordRedactor.TokenKind.Word
-                || (token.Kind == PgPasswordRedactor.TokenKind.Other && _sql[i] is '.' or '=');
-        }
 
         /// <summary>
         /// One token of a setting's value: the value is one <c>?</c>, written at its first token, and it runs to the
