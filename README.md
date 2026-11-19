@@ -48,7 +48,8 @@ Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snow
   settings and the statement texts of `pg_stat_statements`, with passwords replaced. On Oracle (from 1.16.0) it
   also includes the audit settings and the agent's own limits.
 - **Statement text is optional.** With `storeRawQueryText: false` the text is never selected,
-  so it never leaves the database.
+  so it never leaves the database. Snowflake and PostgreSQL still send each statement's shape, its text with
+  every value replaced by `?`.
 - `excludedDatabases` is applied in the `SELECT` itself, and what it leaves out depends on the
   engine:
   - **ClickHouse:** statements that touch those databases. The catalog snapshot still lists them.
@@ -379,8 +380,10 @@ or a self-managed server, whose log directory is mounted read-only into the agen
   failed sign-ins with the server's detail (the `pg_hba.conf` line that matched, or that the role does not
   exist), DDL statements, and per window one row that counts the other lines it read. Passwords in any text
   (`PASSWORD '...'`, password verifiers, connection strings) are replaced by `<redacted>` before anything is
-  sent. Never application error text or a statement's parameters. With `storeRawQueryText: false` a DDL
-  statement ships its command (`CREATE TABLE`) only, and no statement text is read.
+  sent. Never application error text or a statement's parameters. Each statement also ships its shape (from
+  1.19.0): its text with every string and number replaced by `?` and comments removed. With
+  `storeRawQueryText: false` a DDL statement ships its command (`CREATE TABLE`) and its shape only, and the
+  statement texts of `pg_stat_statements` are not read.
 - **Account:** a role with `LOGIN`, `CONNECTION LIMIT 2`, and membership in `pg_read_all_stats` and
   `pg_read_all_settings`, and nothing else. The agent's sessions run with `statement_timeout` 30 s,
   `lock_timeout` 1 s and read-only transactions, and use one connection at a time.

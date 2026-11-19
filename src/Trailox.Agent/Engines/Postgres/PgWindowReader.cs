@@ -10,7 +10,8 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <summary>
 /// The <c>pg_log</c> rows of one instance for one window [start, end). Each record belongs to the window by its own
 /// time. A record of a shipped kind (<see cref="PgRecordKinds.Shipped"/>) becomes a row, its text redacted and cut at
-/// <see cref="MaxTextChars"/>. pgaudit's READ and WRITE lines become statements, one row per minute and shape
+/// <see cref="MaxTextChars"/>; a statement record also carries its shape (<see cref="PgStatementShape"/>) as its
+/// detail. pgaudit's READ and WRITE lines become statements, one row per minute and shape
 /// (<see cref="PgAuditGroups"/>). Every other record is only counted. One count row per instance and window closes the
 /// read: what was counted, what could not be read, and whether the log before the window's start was found.
 /// </summary>
@@ -59,7 +60,9 @@ public sealed class PgWindowReader
     private int _filesGone;
     private string? _missing;
 
-    /// <param name="shipText">The source's <c>storeRawQueryText</c>: when false, a statement record ships its command only.</param>
+    /// <param name="shipText">
+    /// The source's <c>storeRawQueryText</c>: when false, a statement record ships its command and shape, never its text.
+    /// </param>
     /// <param name="rows">The upload's pipe, flushed as rows build up; null when the rows go to memory.</param>
     /// <param name="english">
     /// The server writes its log in English (<c>lc_messages</c>, from the probe). When it does not, a LOG record of no kind
@@ -428,10 +431,12 @@ public sealed class PgWindowReader
         string message, detail, command = "";
         if (kind is PgRecordKind.Statement or PgRecordKind.Execute)
         {
-            command = PgCommand.Of(PgRecordKinds.StatementText(r.Message));
+            var statement = PgRecordKinds.StatementText(r.Message);
+            command = PgCommand.Of(statement);
             message = _shipText ? Cut(PgPasswordRedactor.Redact(r.Message), ref truncated) : "";
-            // The DETAIL of a statement record is its bound values ("Parameters: $1 = ..."): never shipped.
-            detail = "";
+            // The DETAIL of a statement record is its bound values ("Parameters: $1 = ..."): never shipped. The column
+            // carries the statement's shape instead, with or without the text, as a pgaudit row's message does.
+            detail = Shape(statement, ref truncated);
         }
         else
         {
@@ -470,7 +475,7 @@ public sealed class PgWindowReader
     }
 
     /// <summary>
-    /// One row per minute group: the first statement's session, the shape as its text (or nothing without statement
+    /// One row per minute group: the first statement's session, the shape as its text (with or without statement
     /// text), pgaudit's class and command, the objects, and how many statements. The row of a minute's overflow keeps
     /// only its count: its class is <see cref="MinuteAggregator.Other"/>.
     /// </summary>
@@ -478,7 +483,8 @@ public sealed class PgWindowReader
     {
         var l = g.Labels;
         var truncated = !g.IsOther && l[PgAuditGroups.Truncated].Length > 0;
-        var message = _shipText && !g.IsOther ? Cut(l[PgAuditGroups.Shape], ref truncated) : "";
+        // The shape masks every value, so it ships with or without the statement text.
+        var message = g.IsOther ? "" : Cut(l[PgAuditGroups.Shape], ref truncated);
         var w = _sink.Writer;
         w.WriteStartObject();
         w.WriteString("instance"u8, _instance);
@@ -524,6 +530,26 @@ public sealed class PgWindowReader
         }
         w.WriteEndArray();
         w.WriteNumber("event_count"u8, count);
+    }
+
+    /// <summary>
+    /// A statement record's shape (<see cref="PgStatementShape"/>), cut where a pgaudit row's is, so that a statement
+    /// logged both ways has one shape.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 THE SHAPE OF THE STATEMENT AS LOGGED, NEVER OF THE REDACTED TEXT. The shape masks every string, a password's
+    ///    too. The redactor reads on past a string whose end is in doubt (a backslash in a plain string), so the text
+    ///    after it can hold a value as words; the shape stops there instead.
+    /// </remarks>
+    private static string Shape(string statement, ref bool truncated)
+    {
+        var shape = PgStatementShape.Of(statement);
+        if (shape.Length <= PgAuditGroups.MaxShapeChars)
+        {
+            return shape;
+        }
+        truncated = true;
+        return shape[..PgAuditGroups.MaxShapeChars];
     }
 
     private static string Cut(string text, ref bool truncated)

@@ -190,14 +190,18 @@ public class PgAuditTests
         }
     }
 
-    [Fact]
-    public void Without_statement_text_a_group_ships_no_text()
+    /// <summary>The shape masks every value, so a group ships it with or without the statement text.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_group_ships_its_shape_with_or_without_the_text(bool shipText)
     {
-        var rows = Run(false, A(Start, "SESSION,1,1,READ,SELECT,TABLE,public.t,SELECT * FROM t,<not logged>"));
+        var rows = Run(shipText, A(Start, "SESSION,1,1,READ,SELECT,TABLE,public.t,SELECT * FROM t WHERE id = 4111,<not logged>"));
 
         var audit = Assert.Single(AuditRows(rows));
-        Assert.Equal("", audit.GetProperty("message").GetString());
+        Assert.Equal("SELECT * FROM t WHERE id = ?", audit.GetProperty("message").GetString());
         Assert.Equal("SELECT", audit.GetProperty("command").GetString());
+        Assert.DoesNotContain("4111", audit.GetRawText(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -366,7 +370,7 @@ public class PgAuditTests
             other.GetProperty("user").GetString()));
     }
 
-    /// <summary>Two groups that differ in their shape alone stay two rows with two hashes, with or without the text.</summary>
+    /// <summary>Two groups that differ in their shape alone stay two rows with two hashes and two shapes, with or without the text.</summary>
     [Fact]
     public void The_shape_hash_ships_with_or_without_the_text()
     {
@@ -377,7 +381,7 @@ public class PgAuditTests
         var hashes = AuditRows(rows).Select(r => r.GetProperty("detail").GetString()!).ToList();
         Assert.Equal(2, hashes.Distinct().Count());
         Assert.All(hashes, h => Assert.Matches("^[0-9a-f]{16}$", h));
-        Assert.All(AuditRows(rows), r => Assert.Equal("", r.GetProperty("message").GetString()));
+        Assert.Equal(new[] { "SELECT a FROM t", "SELECT b FROM t" }, AuditRows(rows).Select(r => r.GetProperty("message").GetString()).Order());
     }
 
     /// <summary>A window read again ships the same rows: grouping depends on the lines, never on the order of a dictionary.</summary>
