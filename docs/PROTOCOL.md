@@ -796,9 +796,12 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
 - A statement's shape is its text with every string and number (hex, octal and binary ones too) replaced by `?`; a
   list of them is one `?`, and so is a list of rows (`VALUES (?), (?)`). Comments are removed and white space
   collapsed; `$1` placeholders stay. A string that is cut ends the shape, and so does a plain string that holds a
-  backslash when its two possible ends (with `standard_conforming_strings` on and off) differ. The shape is the row's
-  `message`, cut at 16,384 characters, so no value is shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's
-  `detail`, with or without the text.
+  backslash when its two possible ends (with `standard_conforming_strings` on and off) differ. From 1.19.0, in a
+  statement that starts with `SET`, `ALTER` or `CREATE`, after a `SET` outside parentheses, everything after the
+  first `=` or `TO` outside parentheses, up to the statement's end, is one `?`, words too:
+  `ALTER ROLE r SET search_path TO ?`. The shape is the row's `message`, cut at 16,384 characters, so no value is
+  shipped. Its 64-bit hash, 16 hexadecimal digits, is the row's
+  `detail`. From 1.19.0 both are shipped with or without `storeRawQueryText` (before, the shape only with it).
 - Lines of other classes (`DDL`, `ROLE`, `FUNCTION`, `MISC`) are counted, not shipped: DDL and role changes come
   from `log_statement`.
 - Past 500 shapes of one user in one minute, that user's further statements are grouped without their shape: the
@@ -820,7 +823,10 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
 - `pg_log`: `application_name` is null for stderr, which carries it only on the connection line; `command` is the
   first keyword of a DDL statement and, for `CREATE`, `ALTER` and `DROP`, the kind of object; `message` and `detail`
   are cut at 262,144 characters, with `truncated` true; with `storeRawQueryText: false` a DDL record's `message` is
-  empty. The count row's `message` is JSON: `records`, `shipped`, `out_of_window`, `unreadable`, `counted` (per
+  empty. From 1.19.0 a DDL record's `detail` is its statement's shape, as a pgaudit row's (below), with or without
+  `storeRawQueryText`: the statement without its `statement:` or `execute <name>:` prefix, every string and number
+  replaced by `?`, comments removed, cut at 16,384 characters (`truncated` true). The shape is of the statement as
+  logged, so a password's string is masked with every other. The count row's `message` is JSON: `records`, `shipped`, `out_of_window`, `unreadable`, `counted` (per
   kind), `files`, `bytes`, `first_log` (the start of the oldest log found, when it starts after the window's start)
   and `missing` (why the instance could not be read). From 1.13.0:
   - `preamble`: lines before a file's first record (a new RDS replica's restore output), counted once, in the window

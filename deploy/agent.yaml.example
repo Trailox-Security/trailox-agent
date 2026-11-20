@@ -121,7 +121,7 @@ endpoints:
   #     rds_region: eu-west-1
   #     database: postgres                               # where pg_stat_statements is created
   #   collectSessionLog: true
-  #   storeRawQueryText: true                            # false = DDL ships its command only, and no statement text
+  #   storeRawQueryText: true                            # false = a statement ships its command and shape (values as ?) only
   #   pollMinutes: 10
   #   backfillDays: 7                                    # RDS keeps log files 3 days by default, 7 at most
   #

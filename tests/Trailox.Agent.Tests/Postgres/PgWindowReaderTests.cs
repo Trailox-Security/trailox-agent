@@ -164,16 +164,54 @@ public class PgWindowReaderTests
         Assert.Equal("statement: CREATE ROLE etl LOGIN PASSWORD '<redacted>'", rows[0].GetProperty("message").GetString());
         Assert.Equal("CREATE ROLE", rows[0].GetProperty("command").GetString());
         Assert.Equal("ALTER ROLE", rows[1].GetProperty("command").GetString());
-        Assert.Equal("", rows[1].GetProperty("detail").GetString());
-        Assert.DoesNotContain(rows, r => r.GetRawText().Contains("S3cret", StringComparison.Ordinal) || r.GetRawText().Contains("An0ther", StringComparison.Ordinal));
+        Assert.Equal("ALTER ROLE etl PASSWORD ?", rows[1].GetProperty("detail").GetString());
+        Assert.DoesNotContain(rows, r => r.GetRawText().Contains("S3cret", StringComparison.Ordinal) || r.GetRawText().Contains("An0ther", StringComparison.Ordinal)
+            || r.GetRawText().Contains("value", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A statement record's shape is its detail, with or without the text: every value masked, comments gone, names kept,
+    /// and the prefix (statement: or execute name:) left out.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_statement_ships_its_shape_with_or_without_the_text(bool shipText)
+    {
+        var (rows, _) = Run(shipText,
+            R(Start, "LOG", "statement: /* job 7 */ UPDATE accounts SET note = 'O''Brien', limit_eur = 4111.5\n  WHERE id IN (1, 2, 3)"),
+            R(Start, "LOG", "execute fetch from S_1/C_2: SELECT * FROM t WHERE a = $1 AND b = 'x'"));
+
+        Assert.Equal("UPDATE accounts SET note = ?, limit_eur = ? WHERE id IN (?)", rows[0].GetProperty("detail").GetString());
+        Assert.Equal("SELECT * FROM t WHERE a = $1 AND b = ?", rows[1].GetProperty("detail").GetString());
+        Assert.Equal(shipText, rows[0].GetProperty("message").GetString() != "");
+        if (!shipText)
+        {
+            Assert.DoesNotContain(rows, r => r.GetRawText().Contains("Brien", StringComparison.Ordinal)
+                || r.GetRawText().Contains("4111", StringComparison.Ordinal) || r.GetRawText().Contains("job 7", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// 🔴 The shape is the logged statement's, not the redacted text's. The redactor ends a password's string at the
+    ///    farther of its two possible ends and reads on; read that way, ('a\', 'b') holds b as a word. The shape stops at
+    ///    the string instead.
+    /// </summary>
+    [Fact]
+    public void A_password_string_with_a_backslash_ends_the_shape()
+    {
+        var (rows, _) = Run(false, R(Start, "LOG", @"statement: ALTER ROLE r PASSWORD 'a\', 'Hunter2'"));
+
+        Assert.Equal("ALTER ROLE r PASSWORD ?", rows[0].GetProperty("detail").GetString());
     }
 
     [Fact]
-    public void Without_statement_text_a_statement_ships_its_command_only()
+    public void Without_statement_text_a_statement_ships_its_command_and_shape_only()
     {
         var (rows, _) = Run(false, R(Start, "LOG", "statement: GRANT SELECT ON salaries TO analyst"));
 
         Assert.Equal("", rows[0].GetProperty("message").GetString());
+        Assert.Equal("GRANT SELECT ON salaries TO analyst", rows[0].GetProperty("detail").GetString());
         Assert.Equal("GRANT", rows[0].GetProperty("command").GetString());
     }
 
@@ -183,6 +221,20 @@ public class PgWindowReaderTests
         var (rows, _) = Run(true, R(Start, "LOG", "statement: CREATE VIEW v AS SELECT '" + new string('x', PgWindowReader.MaxTextChars) + "'"));
 
         Assert.Equal(PgWindowReader.MaxTextChars, rows[0].GetProperty("message").GetString()!.Length);
+        Assert.Equal("CREATE VIEW v AS SELECT ?", rows[0].GetProperty("detail").GetString());
+        Assert.True(rows[0].GetProperty("truncated").GetBoolean());
+    }
+
+    /// <summary>A long shape is cut where a pgaudit row's is, so a statement logged both ways has one shape.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_long_shape_is_cut_where_a_pgaudit_shape_is_and_marked(bool shipText)
+    {
+        var columns = string.Join(", ", Enumerable.Range(0, 3000).Select(i => $"column_{i}"));
+        var (rows, _) = Run(shipText, R(Start, "LOG", $"statement: SELECT {columns} FROM t"));
+
+        Assert.Equal(PgAuditGroups.MaxShapeChars, rows[0].GetProperty("detail").GetString()!.Length);
         Assert.True(rows[0].GetProperty("truncated").GetBoolean());
     }
 

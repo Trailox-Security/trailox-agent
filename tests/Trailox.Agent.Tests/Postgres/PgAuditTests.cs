@@ -95,6 +95,47 @@ public class PgAuditTests
     [InlineData("SELECT * FROM t WHERE p = 'never ends", "SELECT * FROM t WHERE p = ?")]
     public void A_shape_has_no_value(string sql, string shape) => Assert.Equal(shape, PgStatementShape.Of(sql));
 
+    /// <summary>
+    /// Only a setting's value is masked whole: any other SET keeps its words (a column in UPDATE, a role, a schema), and
+    /// SET without = or TO names no value.
+    /// </summary>
+    [Theory]
+    [InlineData("UPDATE t SET a = b, c = d WHERE id = 1", "UPDATE t SET a = b, c = d WHERE id = ?")]
+    [InlineData("WITH u AS (UPDATE t SET a = b RETURNING a) SELECT a FROM u", "WITH u AS (UPDATE t SET a = b RETURNING a) SELECT a FROM u")]
+    [InlineData("SET ROLE analyst", "SET ROLE analyst")]
+    [InlineData("SET SESSION AUTHORIZATION analyst", "SET SESSION AUTHORIZATION analyst")]
+    [InlineData("SET TIME ZONE 'UTC'", "SET TIME ZONE ?")]
+    [InlineData("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "SET TRANSACTION ISOLATION LEVEL READ COMMITTED")]
+    [InlineData("ALTER TABLE t SET SCHEMA archive", "ALTER TABLE t SET SCHEMA archive")]
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT 5", "ALTER TABLE t ALTER COLUMN c SET DEFAULT ?")]
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT now()", "ALTER TABLE t ALTER COLUMN c SET DEFAULT now()")]
+    [InlineData("ALTER TABLE t SET (fillfactor = 70, autovacuum_enabled = false)", "ALTER TABLE t SET (fillfactor = ?, autovacuum_enabled = false)")]
+    [InlineData("ALTER TABLE t OWNER TO alice", "ALTER TABLE t OWNER TO alice")]
+    [InlineData("ALTER TABLE \"set\" RENAME TO t2", "ALTER TABLE \"set\" RENAME TO t2")]
+    [InlineData("SELECT 1; UPDATE t SET a = b", "SELECT ?; UPDATE t SET a = b")]
+    public void Only_a_settings_value_is_masked_whole(string sql, string shape) => Assert.Equal(shape, PgStatementShape.Of(sql));
+
+    /// <summary>
+    /// Where PostgreSQL's own lexer reads a value, the shape keeps none: nested and unclosed comments, dollar tags (case
+    /// and non-ASCII letters count), a word ending in e before a string, a string whose escape reading never ends, an
+    /// = glued to the value, a SET in a CREATE FUNCTION or after a comment.
+    /// </summary>
+    [Theory]
+    [InlineData("SELECT 1 /* a /* b */ hunter2 */ FROM t")]
+    [InlineData("SELECT 1 /* /* */ hunter2")]
+    [InlineData("SELECT $Q$x$q$ hunter2 $Q$")]
+    [InlineData("SELECT $é$hunter2$é$")]
+    [InlineData("SELECT date'\\'' hunter2 '")]
+    [InlineData("SELECT 1e'\\' , ' , 'hunter2'")]
+    [InlineData("SELECT 'a\\' , hunter2")]
+    [InlineData("SET app.key =hunter2")]
+    [InlineData("SET app.key=-hunter2")]
+    [InlineData("/* job */ SET app.key = hunter2")]
+    [InlineData("CREATE FUNCTION f() RETURNS int LANGUAGE sql SET app.key = hunter2 AS $$select 1$$")]
+    [InlineData("CREATE OR REPLACE PROCEDURE p() LANGUAGE sql SET app.key TO hunter2 AS $$select 1$$")]
+    public void A_shape_keeps_no_value_where_postgres_reads_one(string sql) =>
+        Assert.DoesNotContain("hunter2", PgStatementShape.Of(sql), StringComparison.Ordinal);
+
     [Fact]
     public void Statements_of_one_shape_in_one_minute_are_one_row_with_their_count()
     {
@@ -190,14 +231,18 @@ public class PgAuditTests
         }
     }
 
-    [Fact]
-    public void Without_statement_text_a_group_ships_no_text()
+    /// <summary>The shape masks every value, so a group ships it with or without the statement text.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_group_ships_its_shape_with_or_without_the_text(bool shipText)
     {
-        var rows = Run(false, A(Start, "SESSION,1,1,READ,SELECT,TABLE,public.t,SELECT * FROM t,<not logged>"));
+        var rows = Run(shipText, A(Start, "SESSION,1,1,READ,SELECT,TABLE,public.t,SELECT * FROM t WHERE id = 4111,<not logged>"));
 
         var audit = Assert.Single(AuditRows(rows));
-        Assert.Equal("", audit.GetProperty("message").GetString());
+        Assert.Equal("SELECT * FROM t WHERE id = ?", audit.GetProperty("message").GetString());
         Assert.Equal("SELECT", audit.GetProperty("command").GetString());
+        Assert.DoesNotContain("4111", audit.GetRawText(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -366,7 +411,7 @@ public class PgAuditTests
             other.GetProperty("user").GetString()));
     }
 
-    /// <summary>Two groups that differ in their shape alone stay two rows with two hashes, with or without the text.</summary>
+    /// <summary>Two groups that differ in their shape alone stay two rows with two hashes and two shapes, with or without the text.</summary>
     [Fact]
     public void The_shape_hash_ships_with_or_without_the_text()
     {
@@ -377,7 +422,7 @@ public class PgAuditTests
         var hashes = AuditRows(rows).Select(r => r.GetProperty("detail").GetString()!).ToList();
         Assert.Equal(2, hashes.Distinct().Count());
         Assert.All(hashes, h => Assert.Matches("^[0-9a-f]{16}$", h));
-        Assert.All(AuditRows(rows), r => Assert.Equal("", r.GetProperty("message").GetString()));
+        Assert.Equal(new[] { "SELECT a FROM t", "SELECT b FROM t" }, AuditRows(rows).Select(r => r.GetProperty("message").GetString()).Order());
     }
 
     /// <summary>A window read again ships the same rows: grouping depends on the lines, never on the order of a dictionary.</summary>
@@ -410,6 +455,25 @@ public class PgAuditTests
     [InlineData("""INSERT INTO t VALUES ('C:\', 'john secret')""", "INSERT INTO t VALUES (?")]
     [InlineData("""SELECT * FROM t WHERE p = 'C:\temp' AND q = 'secret'""", "SELECT * FROM t WHERE p = ? AND q = ?")]
     [InlineData("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')", "INSERT INTO t VALUES (?)")]
+    // A setting's value is one ?, words too, in a statement that starts with SET or ALTER.
+    [InlineData("SET app.tenant = secret", "SET app.tenant = ?")]
+    [InlineData("set local app.tenant to secret", "set local app.tenant to ?")]
+    [InlineData("SET search_path TO secret, \"Secret 2\", public;", "SET search_path TO ?;")]
+    [InlineData("SET x=secret", "SET x=?")]
+    [InlineData("ALTER ROLE r SET search_path = secret", "ALTER ROLE r SET search_path = ?")]
+    [InlineData("ALTER ROLE r IN DATABASE d SET pgaudit.log TO 'read, secret'", "ALTER ROLE r IN DATABASE d SET pgaudit.log TO ?")]
+    [InlineData("ALTER SYSTEM SET log_statement = secret", "ALTER SYSTEM SET log_statement = ?")]
+    [InlineData("ALTER FUNCTION f(a int) SET search_path = secret", "ALTER FUNCTION f(a int) SET search_path = ?")]
+    [InlineData("BEGIN; SET LOCAL app.key = secret; SELECT 1", "BEGIN; SET LOCAL app.key = ?; SELECT ?")]
+    [InlineData("SET app.key = /* note */ secret -- end", "SET app.key = ?")]
+    [InlineData("SET app.key = 'never ends secret", "SET app.key = ?")]
+    // However the name is spelled, the first = or TO starts the value.
+    [InlineData("SET U&\"app.key\" = secret", "SET U&\"app.key\" = ?")]
+    [InlineData("SET U&\"app!002ekey\" UESCAPE '!' = secret", "SET U&\"app!002ekey\" UESCAPE ? = ?")]
+    [InlineData("SET app . /* x */ key TO secret", "SET app . key TO ?")]
+    [InlineData("ALTER ROLE r SET U&\"x\" TO secret", "ALTER ROLE r SET U&\"x\" TO ?")]
+    // It fails closed on ALTER TABLE: an owner after a SET action is masked too.
+    [InlineData("ALTER TABLE t ALTER COLUMN c SET DEFAULT 5, OWNER TO secret", "ALTER TABLE t ALTER COLUMN c SET DEFAULT ?, OWNER TO ?")]
     public void A_shape_keeps_no_value_in_any_form(string sql, string shape)
     {
         Assert.Equal(shape, PgStatementShape.Of(sql));
