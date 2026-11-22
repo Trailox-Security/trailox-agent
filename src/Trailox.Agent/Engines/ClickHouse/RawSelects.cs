@@ -1,0 +1,296 @@
+using Trailox.Agent.Config;
+using Trailox.Agent.Protocol;
+
+namespace Trailox.Agent.Engines.ClickHouse;
+
+/// <summary>
+/// The whole of the SQL this agent runs on a ClickHouse server. Every statement here reads a
+/// system table as-is; nothing is transformed, classified or joined - that happens on the
+/// Trailox side. docs/PROTOCOL.md §6 is the human-readable copy of this file.
+/// </summary>
+public static class RawSelects
+{
+    /// <summary>Tag on every request, so Trailox can exclude the agent's own reads from what it collects.</summary>
+    public const string LogComment = "trailox-agent";
+
+    /// <summary>The query kinds of a read or a listing: the only statements the agent runs.</summary>
+    private const string ReadKinds = "('Select', 'Explain', 'Show', 'Describe', 'Exists', 'Check')";
+
+    /// <summary>The system.query_log columns Trailox reads. Absent ones (older servers) are simply not selected.</summary>
+    public static readonly string[] QueryLogColumns =
+    {
+        "hostname", "query_id", "type", "event_time_microseconds", "user", "authenticated_user", "os_user",
+        "initial_user", "query_kind", "normalized_query_hash", "databases", "tables", "views", "columns",
+        "used_table_functions", "used_privileges", "missing_privileges", "exception_code",
+        "query_duration_ms", "result_rows", "result_bytes", "read_rows", "read_bytes", "written_rows",
+        "written_bytes", "memory_usage", "address", "forwarded_for", "interface", "is_secure", "client_name",
+        "http_user_agent", "client_version_major", "client_version_minor", "client_version_patch",
+        "log_comment", "is_initial_query", "distributed_depth", "is_internal",
+    };
+
+    /// <summary>The columns that must exist for collection to make sense at all. hostname is not one: see <see cref="HostnameFallback"/>.</summary>
+    public static readonly string[] RequiredColumns = { "query_id", "event_time_microseconds", "normalized_query_hash", "query_kind" };
+
+    /// <summary>The oldest ClickHouse release the agent reads (major, minor).</summary>
+    public static readonly (int Major, int Minor) MinimumVersion = (23, 10);
+
+    /// <summary>
+    /// The server's name, for a server whose logs have no hostname column (ClickHouse added it to every system log in 23.11).
+    /// </summary>
+    /// <remarks>
+    /// FQDN() is the value the column holds where it exists; hostName() is the short name and is not. On a cluster read each
+    /// replica computes it, like the column it stands for.
+    /// </remarks>
+    public const string HostnameFallback = "FQDN() AS hostname";
+
+    /// <summary>True when <paramref name="version"/> (as version() prints it) is older than <see cref="MinimumVersion"/>.</summary>
+    /// <remarks>A version that does not start with two numbers is not refused here; the column probe still decides.</remarks>
+    public static bool IsOlderThanMinimum(string version)
+    {
+        var parts = version.Split('.');
+        return parts.Length >= 2
+               && int.TryParse(parts[0], out var major)
+               && int.TryParse(parts[1], out var minor)
+               && (major, minor).CompareTo(MinimumVersion) < 0;
+    }
+
+    /// <summary>Columns whose presence is probed and reported (they vary by server version).</summary>
+    public static readonly string[] ProbedColumns =
+    {
+        "is_internal", "authenticated_user", "hostname", "normalized_query_hash", "used_table_functions", "used_privileges", "missing_privileges",
+    };
+
+    /// <param name="moved">Also every copy of the log the server moved aside (<see cref="MovedQueryLogs"/>).</param>
+    public static string QueryLogSource(EndpointConfig endpoint, bool moved = false) =>
+        OnEveryReplica(endpoint, moved ? MovedQueryLogs : "system.query_log");
+
+    /// <param name="moved">Also every copy of the log the server moved aside (<see cref="MovedSessionLogs"/>).</param>
+    public static string SessionLogSource(EndpointConfig endpoint, bool moved = false) =>
+        OnEveryReplica(endpoint, moved ? MovedSessionLogs : "system.session_log");
+
+    private static string OnEveryReplica(EndpointConfig endpoint, string source) =>
+        string.IsNullOrEmpty(endpoint.ClusterName) ? source : $"clusterAllReplicas('{endpoint.ClusterName}', {source})";
+
+    /// <summary>
+    /// system.query_log and every copy of it the server moved aside: query_log_1, query_log_2 and so on.
+    /// </summary>
+    /// <remarks>
+    /// When ClickHouse Cloud replaces a service's servers, the new servers start with an empty system.query_log and,
+    /// minutes later, attach the old servers' tables as query_log_N; a self-hosted server renames its log the same way
+    /// when an upgrade changes the log's columns. A window read from system.query_log alone then misses the old
+    /// servers' statements. The copies need their own grant (`GRANT SELECT ON system.query_log*`, ClickHouse 24.10 or
+    /// later), and the agent reads them only when the probe could see one (<see cref="ProbeLogTables"/>): otherwise
+    /// every statement is exactly what it was.
+    /// </remarks>
+    public const string MovedQueryLogs = "merge('system', '^query_log(_[0-9]+)?$')";
+
+    /// <summary>system.session_log and every copy of it the server moved aside, at the same replacements.</summary>
+    public const string MovedSessionLogs = "merge('system', '^session_log(_[0-9]+)?$')";
+
+    private static string Window(long startMicros, long endMicros) =>
+        $"event_time_microseconds > fromUnixTimestamp64Micro({startMicros}) AND event_time_microseconds <= fromUnixTimestamp64Micro({endMicros})";
+
+    /// <summary>
+    /// A read of the moved copies is bounded by the window's days too, so each copy is pruned by its partitions: a
+    /// self-hosted server's copies keep no TTL by default and can be large. Empty for the live log, whose read is as it was.
+    /// </summary>
+    private static string MovedDays(bool moved, long startMicros, long endMicros) =>
+        moved
+            ? $" AND event_date BETWEEN toDate(fromUnixTimestamp64Micro({startMicros})) AND toDate(fromUnixTimestamp64Micro({endMicros}))"
+            : "";
+
+    private static string Lit(string value) => "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'";
+
+    /// <summary>
+    /// The events SELECT for one window. <paramref name="presentColumns"/> is what the probe found
+    /// in system.columns; columns not present are omitted.
+    /// </summary>
+    /// <param name="moved">Read the moved copies of the log too (<see cref="MovedQueryLogs"/>).</param>
+    public static string Events(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, long startMicros, long endMicros, bool moved = false)
+    {
+        var columns = QueryLogColumns.Select(c => c switch
+        {
+            "hostname" when !presentColumns.Contains(c) => HostnameFallback,
+            _ when !presentColumns.Contains(c) => null,
+            "type" => "toString(type) AS type",
+            "address" => "toString(address) AS address",
+            _ => c,
+        }).OfType<string>().ToList();
+
+        // Two values the SERVER computes so the text itself can stay behind when storeRawQueryText is off.
+        columns.Add("normalizeQuery(query) AS normalized_query");
+        columns.Add("sipHash64(query) AS raw_text_hash");
+        if (endpoint.StoreRawQueryText)
+        {
+            columns.Add("query");
+        }
+
+        // The agent's own reads are tagged (see LogComment) and excluded here: a read by the user the agent signs in
+        // as. The tag is a setting any user may send, so a tagged statement that is not one of those reads - a GRANT
+        // sent with the tag, or anything another user tags - is reported like any other.
+        var where = Window(startMicros, endMicros) + MovedDays(moved, startMicros, endMicros)
+                    + " AND type != 'QueryStart' AND is_initial_query = 1"
+                    + $" AND NOT (log_comment = '{LogComment}' AND query_kind IN {ReadKinds} AND user = {Lit(endpoint.Username)})";
+        if (presentColumns.Contains("is_internal"))
+        {
+            where += " AND is_internal = 0";
+        }
+        if (endpoint.ExcludedDatabases.Count > 0)
+        {
+            where += " AND NOT hasAny(databases, [" + string.Join(", ", endpoint.ExcludedDatabases.Select(Lit)) + "])";
+        }
+
+        return $"SELECT {string.Join(", ", columns)}\nFROM {QueryLogSource(endpoint, moved)}\nWHERE {where}\nFORMAT JSONEachRow";
+    }
+
+    /// <param name="moved">Read the moved copies of the log too (<see cref="MovedSessionLogs"/>).</param>
+    /// <param name="hasHostname">
+    /// The log has a hostname column. Every system log gained it in the same release (23.11), so the query log's probe
+    /// answers for this one too.
+    /// </param>
+    public static string Sessions(EndpointConfig endpoint, long startMicros, long endMicros, bool moved = false, bool hasHostname = true) =>
+        "SELECT " + (hasHostname ? "hostname" : HostnameFallback) +
+        ", toString(type) AS type, toString(auth_id) AS auth_id, session_id, event_time_microseconds, user, " +
+        "toString(auth_type) AS auth_type, toString(client_address) AS client_address, toString(interface) AS interface, " +
+        "client_name, client_version_major, client_version_minor, client_version_patch, failure_reason\n" +
+        $"FROM {SessionLogSource(endpoint, moved)}\nWHERE {Window(startMicros, endMicros)}{MovedDays(moved, startMicros, endMicros)}\nFORMAT JSONEachRow";
+
+    /// <summary>The customer's tables plus the two system rows Trailox reads retention settings from.</summary>
+    public const string CatalogTables =
+        "SELECT today() AS snapshot_date, database, name, engine, engine_full, total_rows, total_bytes, " +
+        "metadata_modification_time, comment, create_table_query\n" +
+        "FROM system.tables\n" +
+        "WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA', '_table_function', '_temporary_and_external_tables')\n" +
+        "   OR (database = 'system' AND name IN ('query_log', 'session_log'))\n" +
+        "FORMAT JSONEachRow";
+
+    /// <summary>system.users where auth_type is an array (24.x and newer).</summary>
+    public const string CatalogUsersArray =
+        "SELECT today() AS snapshot_date, name, arrayMap(t -> toString(t), auth_type) AS auth_types, default_roles_list AS default_roles\n" +
+        "FROM system.users\nFORMAT JSONEachRow";
+
+    /// <summary>The fallback for servers where auth_type is a scalar.</summary>
+    public const string CatalogUsersScalar =
+        "SELECT today() AS snapshot_date, name, [toString(auth_type)] AS auth_types, CAST([] AS Array(String)) AS default_roles\n" +
+        "FROM system.users\nFORMAT JSONEachRow";
+
+    public const string CatalogGrants =
+        "SELECT today() AS snapshot_date, user_name, role_name, toString(access_type) AS access_type, database, table, column, " +
+        "is_partial_revoke, grant_option\nFROM system.grants\nFORMAT JSONEachRow";
+
+    /// <summary>
+    /// The settings that decide whether a user is read-only (agent 1.7): readonly, allow_ddl, and every element that
+    /// names a profile, so Trailox can follow a user's chain of profiles. Also the six settings that can keep a
+    /// statement out of system.query_log or cut what it records, and, on each profile's element, whom the profile
+    /// applies to (system.settings_profiles). Only these rows - a profile can hold any value a customer put in it, and
+    /// nothing else is used. `index` is returned as element_index.
+    /// </summary>
+    /// <remarks>
+    /// Needs its own grant, which older setup scripts did not ask for: SELECT ON system.settings_profile_elements (or
+    /// SHOW SETTINGS PROFILES on a server with select_from_system_db_requires_grant = false). SHOW SETTINGS PROFILES
+    /// also reads system.settings_profiles, with that setting true or false. A refusal is reported as the task's
+    /// failure but kept off the agent's own error list (TaskExecutor, MissingOptionalGrant).
+    /// A user's or a role's element finds no profile in the join: it is sent with apply_to_all 0 and two empty lists, also
+    /// on a server whose join_use_nulls = 1 (which would give NULL without the ifNull).
+    /// Every column that crosses the join is named with AS, so each keeps its own name in the output.
+    /// </remarks>
+    public const string CatalogSettings =
+        "SELECT today() AS snapshot_date, e.profile_name AS profile_name, e.user_name AS user_name, e.role_name AS role_name, " +
+        "e.index AS element_index, e.setting_name AS setting_name, e.value AS value, toString(e.writability) AS writability, " +
+        "e.inherit_profile AS inherit_profile, ifNull(p.apply_to_all, 0) AS apply_to_all, p.apply_to_list AS apply_to_list, " +
+        "p.apply_to_except AS apply_to_except\n" +
+        "FROM system.settings_profile_elements AS e\nLEFT JOIN system.settings_profiles AS p ON p.name = e.profile_name\n" +
+        "WHERE setting_name IN ('readonly', 'allow_ddl', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', " +
+        "'log_queries_probability', 'log_query_settings', 'log_queries_cut_to_length') OR inherit_profile IS NOT NULL\n" +
+        "FORMAT JSONEachRow";
+
+    /// <summary>
+    /// The roles each user and each role holds (agent 1.17), as system.role_grants has them, and one more row: both names
+    /// null and an empty role, dated like the others. That row says the read ran, also on a server where no one holds a
+    /// role, so an empty answer is not taken for a read that did not happen.
+    /// </summary>
+    /// <remarks>
+    /// Needs SELECT ON system.role_grants and SHOW USERS, SHOW ROLES, which every setup script grants. On a server with
+    /// select_from_system_db_requires_grant = true the SELECT alone is enough. The server returns every row or refuses
+    /// the read: it does not return part of them.
+    /// </remarks>
+    public const string CatalogRoleGrants =
+        "SELECT today() AS snapshot_date, user_name, role_name, granted_role_name, granted_role_is_default, with_admin_option" +
+        " FROM system.role_grants" +
+        " UNION ALL SELECT today(), NULL, NULL, '', 0, 0" +
+        "\nFORMAT JSONEachRow";
+
+    /// <summary>catalog_show_grants (agent 1.17): the server's date, read first, because a SHOW statement cannot carry it.</summary>
+    public const string ServerToday = "SELECT toString(today())";
+
+    /// <summary>
+    /// catalog_show_grants (agent 1.17): every user's and every role's grants, one statement per row. Needs SHOW USERS and
+    /// SHOW ROLES, which every setup script grants.
+    /// </summary>
+    public const string ShowGrants = "SHOW GRANTS FOR ALL";
+
+    // ---- probe (once per endpoint per probe interval) ----
+
+    public const string ProbeVersion = "SELECT version()";
+
+    public static readonly string ProbeColumns =
+        "SELECT groupArray(name) FROM system.columns WHERE database = 'system' AND table = 'query_log' AND name IN (" +
+        string.Join(", ", QueryLogColumns.Select(c => "'" + c + "'")) + ")";
+
+    public const string ProbeSessionLog = "SELECT count() FROM system.tables WHERE database = 'system' AND name = 'session_log'";
+
+    public static string ProbeEarliestEvent(EndpointConfig endpoint) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {QueryLogSource(endpoint)}";
+
+    public static string ProbeEarliestSession(EndpointConfig endpoint) =>
+        $"SELECT toInt64(ifNull(toUnixTimestamp64Micro(min(event_time_microseconds)), 0)) FROM {SessionLogSource(endpoint)}";
+
+    /// <summary>
+    /// The log tables the monitoring user can see, in one row: when system.query_log was created and when the newest
+    /// moved copy of it was attached (epoch micros, 0 = none), and how many moved copies of system.session_log there are.
+    /// </summary>
+    /// <remarks>
+    /// A copy listed here is not proved readable: with SHOW TABLES a user sees tables it may not read (25.7 and 23.10), so
+    /// the agent proves the read (<see cref="ProbeRead"/>) before any window uses it. A newer creation time means the server
+    /// replaced its log; the attach time says when the old one could be read again. Both go to Trailox in the probe's caps.
+    /// </remarks>
+    public static string ProbeLogTables(EndpointConfig endpoint) =>
+        "SELECT toInt64(toUnixTimestamp(maxIf(metadata_modification_time, name = 'query_log'))) * 1000000, " +
+        "toInt64(toUnixTimestamp(maxIf(metadata_modification_time, match(name, '^query_log_[0-9]+$')))) * 1000000, " +
+        "countIf(match(name, '^session_log_[0-9]+$'))" +
+        $" FROM {OnEveryReplica(endpoint, "system.tables")} WHERE database = 'system' AND match(name, '^(query|session)_log(_[0-9]+)?$')";
+
+    /// <summary>
+    /// A window's own SELECT that reads no row, to prove the server runs it. A user who sees the copies may not read them:
+    /// without the setup script's last two lines the SELECT is refused (25.7), and ClickHouse 23.10 runs merge() only for a
+    /// user holding CREATE TEMPORARY TABLE. A copy written by an older server can also lack a column the window reads (a
+    /// server upgraded from 23.10 has copies without hostname): only a read that names the window's columns finds that out,
+    /// so the proof is the window's SELECT itself.
+    /// </summary>
+    public static string ProbeRead(string windowSelect)
+    {
+        const string format = "\nFORMAT JSONEachRow";
+        if (!windowSelect.EndsWith(format, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("a window's SELECT ends with its FORMAT", nameof(windowSelect));
+        }
+        return windowSelect[..^format.Length] + "\nLIMIT 0" + format;
+    }
+
+    /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
+    /// <param name="queryLogMoved">The probe saw a moved copy of system.query_log: the statement windows read it too.</param>
+    /// <param name="sessionLogMoved">The same for system.session_log and the sign-in windows.</param>
+    public static string? ForTask(EndpointConfig endpoint, IReadOnlySet<string> presentColumns, AgentTask task, bool usersAuthTypeIsArray = true,
+        bool queryLogMoved = false, bool sessionLogMoved = false) =>
+        task.Stream switch
+        {
+            ProtocolInfo.Streams.Events => Events(endpoint, presentColumns, task.StartMicros, task.EndMicros, queryLogMoved),
+            ProtocolInfo.Streams.Sessions => Sessions(endpoint, task.StartMicros, task.EndMicros, sessionLogMoved, presentColumns.Contains("hostname")),
+            ProtocolInfo.Streams.CatalogTables => CatalogTables,
+            ProtocolInfo.Streams.CatalogUsers => usersAuthTypeIsArray ? CatalogUsersArray : CatalogUsersScalar,
+            ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
+            ProtocolInfo.Streams.CatalogSettings => CatalogSettings,
+            ProtocolInfo.Streams.CatalogRoleGrants => CatalogRoleGrants,
+            _ => null,
+        };
+}

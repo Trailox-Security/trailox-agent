@@ -1,0 +1,234 @@
+using Trailox.Agent.Config;
+using Trailox.Agent.Protocol;
+
+namespace Trailox.Agent.Engines.Snowflake;
+
+/// <summary>
+/// The whole of the SQL this agent runs on a Snowflake account. Each statement reads SNOWFLAKE.ACCOUNT_USAGE
+/// views and sends their rows as they are: nothing is flattened or classified. Two reads (access history and
+/// sessions) also name the window's statements in QUERY_HISTORY, to keep to their rows. docs/PROTOCOL.md 6d is
+/// the human-readable copy.
+/// </summary>
+public static class SfRawSelects
+{
+    public const string AccountUsage = "SNOWFLAKE.ACCOUNT_USAGE";
+
+    /// <summary>A Snowflake string literal: single quotes doubled, backslashes escaped.</summary>
+    public static string Lit(string value) => "'" + value.Replace("\\", "\\\\").Replace("'", "''") + "'";
+
+    private static string Ts(long micros) => $"TO_TIMESTAMP_LTZ({micros}, 6)";
+
+    private static string Window(string column, long startMicros, long endMicros) =>
+        $"{column} > {Ts(startMicros)} AND {column} <= {Ts(endMicros)}";
+
+    // The SQL API returns DATE as a day count; the calendar date is sent as text.
+    private const string SnapshotDate = "TO_VARCHAR(CURRENT_DATE(), 'YYYY-MM-DD') AS SNAPSHOT_DATE";
+
+    private static string ExcludedDatabases(EndpointConfig endpoint, string column)
+    {
+        var all = new[] { "SNOWFLAKE" }.Concat(endpoint.ExcludedDatabases.Select(d => d.Trim()))
+            .Where(d => d.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Select(Lit);
+        return $"{column} NOT IN ({string.Join(", ", all)})";
+    }
+
+    // ---- probe ----
+
+    public const string ProbeVersion = "SELECT CURRENT_VERSION()";
+
+    public const string ProbeLogins =
+        "SELECT COUNT(*) FROM " + AccountUsage + ".LOGIN_HISTORY WHERE EVENT_TIMESTAMP > DATEADD(hour, -24, CURRENT_TIMESTAMP())";
+
+    public const string ProbeEarliestEvent =
+        "SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(END_TIME)), 0) FROM " + AccountUsage + ".QUERY_HISTORY";
+
+    public const string ProbeEarliestSession =
+        "SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(EVENT_TIMESTAMP)), 0) FROM " + AccountUsage + ".LOGIN_HISTORY";
+
+    // ---- streams ----
+
+    /// <summary>
+    /// One window of statements on END_TIME (a statement is complete only once finished). BIND_VALUES -
+    /// the values a statement was run with - is never selected. When the customer keeps statement text
+    /// at home, the text is not selected either.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Not even with storeRawQueryText on, as it was before 1.15.0: bound values are the customer's data,
+    ///   not the statement's text.
+    /// ⚠ From 1.16.0 each row also carries the statement's SHAPE: QUERY_SHAPE_TEXT, its text with every literal masked
+    ///   and every name kept, and QUERY_SHAPE_HASH, that text's hash (Snowflake's own hash, hashed, for a statement it shows
+    ///   no text for). Snowflake computes both, so they are sent whether or not the text is: with storeRawQueryText off,
+    ///   statements that differ only in their values still share one shape, and the values never leave.
+    /// </remarks>
+    public static string Events(EndpointConfig endpoint, long startMicros, long endMicros)
+    {
+        var excluded = endpoint.StoreRawQueryText ? "BIND_VALUES" : "QUERY_TEXT, BIND_VALUES";
+        return $"SELECT * EXCLUDE ({excluded}), {ShapeText} AS QUERY_SHAPE_TEXT, {ShapeHash} AS QUERY_SHAPE_HASH " +
+               $"FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
+    }
+
+    /// <summary>
+    /// A statement's text with its literals masked and its names kept: one pass keeps a quoted name, turns a string into ''
+    /// and drops a comment (--, //, /* */) or a $$ block (the leftmost match wins, so none can hide another); then '' and
+    /// every number not inside a name become ?, a list of ? becomes (?), a run of (?) rows becomes one, and whitespace
+    /// collapses.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NO VALUE MAY ESCAPE IT: this text is sent even with storeRawQueryText off. A string may hold '' or a backslash
+    ///   escape (O\'Brien, or a backslash-newline), and a string, a comment or a $$ block cut open by QUERY_TEXT's length
+    ///   limit runs to the end, even when the cut falls right after a backslash. A number is `.5`, `1e10`, `1.5E-3`, `7.`
+    ///   or `0x1F` too, never a name that holds digits.
+    /// ⚠ Nine capturing groups at most: Snowflake refuses a tenth, and the first pattern has nine.
+    /// ⚠ PART OF THE PROTOCOL: any change, even to whitespace, gives statements a new QUERY_SHAPE_HASH, so it comes only
+    ///   with a new version. The test pins its SHA-256.
+    /// ⚠ The patterns are single-quoted with backslash escapes (\' and \\), not $$-quoted: the first one contains $$.
+    /// </remarks>
+    public static readonly string ShapeText =
+        "REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(QUERY_TEXT, ''), "
+        + """'("([^"]|"")*")|(\')([^\'\\\\]|\'\'|\\\\.|\\\\\\n|\\\\$)*(\'|$)|--[^\\n]*|//[^\\n]*|/\\*([^*]|\\*+[^*/])*(\\*+/|$)|\\$\\$([^$]|\\$[^$])*(\\$\\$|$)', '\\1\\3\\3'), """
+        + """'\'\'', '?'), """
+        + """'(^|[^A-Za-z0-9_$".])(0[xX][0-9A-Fa-f]+|\\.[0-9]+|[0-9]+(\\.[0-9]*)?)([eE][-+]?[0-9]+)?', '\\1?'), """
+        + """'\\(\\s*-?\\?(\\s*,\\s*-?\\?)*\\s*\\)', '(?)'), """
+        + """'\\(\\?\\)(\\s*,\\s*\\(\\?\\))+', '(?)'), """
+        + """'\\s+', ' ')""";
+
+    /// <summary>
+    /// The shape's hash, as unsigned 64-bit text; for a statement Snowflake shows no text for, the hash of its
+    /// QUERY_PARAMETERIZED_HASH.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NO TEXT IS NOT ONE SHAPE: Snowflake shows no text for its own SYSTEM user's statements, and the masked text alone
+    ///   would give every one of them, a GRANT and a SELECT alike, the hash of an empty text. QUERY_PARAMETERIZED_HASH still
+    ///   tells them apart. The test is on the raw text, so a statement that masks to nothing (a comment alone) keeps the
+    ///   masked text's hash.
+    /// ⚠ PART OF THE PROTOCOL, like the masking text: the test pins its SHA-256.
+    /// </remarks>
+    public static readonly string ShapeHash =
+        "TO_VARCHAR(IFF(COALESCE(QUERY_TEXT, '') = '', HASH(COALESCE(QUERY_PARAMETERIZED_HASH, '')), HASH(" + ShapeText + ")) + 9223372036854775808)";
+
+    /// <summary>How far before a window a statement that ended in it may have started, and still be attributed.</summary>
+    internal const long StatementLookbackMicros = 24L * 3600 * 1_000_000;
+
+    /// <summary>How long before the window's first statement started its access history read starts.</summary>
+    internal const long StatementStartSlackMicros = 60L * 1_000_000;
+
+    /// <summary>The statements that ended in a window: the rows that the access history and session reads keep to.</summary>
+    private static string WindowStatements(string columns, long startMicros, long endMicros) =>
+        $"WITH wq AS (SELECT {columns} FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}) ";
+
+    /// <summary>The oldest START_TIME of the statements that ended in a window, in epoch microseconds; 0 when it has none.</summary>
+    public static string StatementsEarliestStart(long startMicros, long endMicros) =>
+        $"SELECT COALESCE(DATE_PART(epoch_microsecond, MIN(START_TIME)), 0) FROM {AccountUsage}.QUERY_HISTORY WHERE {Window("END_TIME", startMicros, endMicros)}";
+
+    /// <summary>
+    /// Where a window's access history read starts: a minute before its first statement started, and a day before the
+    /// window at most. A window with no statement (0) reads from its end, which finds nothing. A first start that is
+    /// not known (null) reads the whole day before the window, never nothing.
+    /// </summary>
+    public static long AccessFrom(long startMicros, long endMicros, long? earliestStartMicros) => earliestStartMicros switch
+    {
+        null => startMicros - StatementLookbackMicros,
+        <= 0 => endMicros,
+        long earliest => Math.Max(startMicros - StatementLookbackMicros, earliest - StatementStartSlackMicros),
+    };
+
+    /// <summary>
+    /// The ACCESS_HISTORY rows of the statements that ENDED in the window (from 1.15.0), as the events stream reads them,
+    /// from <paramref name="fromMicros"/> on (<see cref="AccessFrom"/>).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ BY THE STATEMENT'S END, NOT ITS START. ACCESS_HISTORY has only QUERY_START_TIME, and Snowflake writes a row
+    ///   once its statement is complete. Read by start time, a window was read before its long statements ended, and
+    ///   those statements never had their tables. A statement may have started up to a day before the window.
+    /// ⚠ THE START IS A LITERAL, read first with <see cref="StatementsEarliestStart"/>, as every other read's bounds are.
+    ///   A bound that a subquery computes is known only while the read runs, so Snowflake may not use it to skip older
+    ///   rows. A window of short statements reads a range about as long as itself; only a long statement makes it longer.
+    /// ⚠ THE TWO STATEMENTS SEE THE SAME STATEMENTS: the windows Trailox asks for end hours before they are read, past
+    ///   QUERY_HISTORY's latency, so no statement of the window lands between the two.
+    /// </remarks>
+    public static string AccessHistory(long startMicros, long endMicros, long fromMicros) =>
+        WindowStatements("QUERY_ID", startMicros, endMicros) +
+        $"SELECT a.* FROM {AccountUsage}.ACCESS_HISTORY a WHERE a.QUERY_START_TIME >= {Ts(fromMicros)} AND a.QUERY_START_TIME <= {Ts(endMicros)} " +
+        "AND a.QUERY_ID IN (SELECT wq.QUERY_ID FROM wq)";
+
+    public static string Logins(long startMicros, long endMicros) =>
+        $"SELECT * FROM {AccountUsage}.LOGIN_HISTORY WHERE {Window("EVENT_TIMESTAMP", startMicros, endMicros)}";
+
+    /// <summary>
+    /// The sessions created in the window, and (from 1.15.0) the older sessions of the statements that ended in it.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A STATEMENT'S SESSION IS SENT, HOWEVER OLD. A pooled connection can keep one session for weeks, and a session
+    ///   opened before the first window was never sent, though its statements were. The second half reads each such
+    ///   session by its id, every time a window has its statements. That half has no time bound, so it may read the
+    ///   whole SESSIONS view (a year of sessions) each window; and a session comes again with each window that has
+    ///   its statements.
+    /// </remarks>
+    public static string Sessions(long startMicros, long endMicros) =>
+        WindowStatements("DISTINCT SESSION_ID", startMicros, endMicros) +
+        $"SELECT * FROM {AccountUsage}.SESSIONS WHERE {Window("CREATED_ON", startMicros, endMicros)} " +
+        $"UNION ALL SELECT s.* FROM {AccountUsage}.SESSIONS s WHERE s.CREATED_ON <= {Ts(startMicros)} " +
+        "AND s.SESSION_ID IN (SELECT wq.SESSION_ID FROM wq)";
+
+    // ---- catalog (daily): the columns sent, live objects only ----
+
+    public static string CatalogTables(EndpointConfig endpoint) =>
+        $"SELECT {SnapshotDate}, TABLE_ID, TABLE_NAME, TABLE_SCHEMA, TABLE_CATALOG, TABLE_OWNER, TABLE_TYPE, IS_TRANSIENT, ROW_COUNT, BYTES, " +
+        $"RETENTION_TIME, CREATED, LAST_ALTERED, LAST_DDL, LAST_DDL_BY, DELETED, COMMENT FROM {AccountUsage}.TABLES " +
+        $"WHERE DELETED IS NULL AND {ExcludedDatabases(endpoint, "TABLE_CATALOG")}";
+
+    public static string CatalogColumns(EndpointConfig endpoint) =>
+        $"SELECT {SnapshotDate}, COLUMN_ID, COLUMN_NAME, TABLE_ID, TABLE_NAME, TABLE_SCHEMA, TABLE_CATALOG, ORDINAL_POSITION, IS_NULLABLE, " +
+        $"DATA_TYPE, COMMENT, DELETED FROM {AccountUsage}.COLUMNS " +
+        $"WHERE DELETED IS NULL AND {ExcludedDatabases(endpoint, "TABLE_CATALOG")}";
+
+    /// <remarks>
+    /// From 1.11: HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME and EMAIL, so Trailox can say which users
+    /// are people and which are services, how each signs in, and whose each one is. Still no password, key or
+    /// first and last name: the view holds no secret, and the two name columns are not read.
+    /// </remarks>
+    public const string CatalogUsers =
+        "SELECT " + SnapshotDate + ", USER_ID, NAME, CREATED_ON, DELETED_ON, LOGIN_NAME, HAS_PASSWORD, HAS_MFA, HAS_RSA_PUBLIC_KEY, HAS_PAT, " +
+        "DISABLED, DEFAULT_ROLE, DEFAULT_WAREHOUSE, LAST_SUCCESS_LOGIN, TYPE, OWNER, " +
+        "HAS_WORKLOAD_IDENTITY, PASSWORD_LAST_SET_TIME, DISPLAY_NAME, EMAIL FROM " + AccountUsage + ".USERS WHERE DELETED_ON IS NULL";
+
+    /// <summary>
+    /// From 1.11: every credential of the account - programmatic access tokens, key pairs, MFA methods and workload
+    /// identities - with its owner, status, role restriction and dates. The view holds no secret, and expired
+    /// tokens drop out of it 7 days after they expire.
+    /// </summary>
+    public const string CatalogCredentials =
+        "SELECT " + SnapshotDate + ", CREDENTIAL_ID, NAME, USER_NAME, TYPE, DOMAIN, COMMENT, STATUS, ADDITIONAL_DETAILS, " +
+        "CREATED_BY, LAST_ALTERED_BY, CREATED_ON, LAST_USED_ON, LAST_ALTERED, EXPIRATION_DATE FROM " + AccountUsage + ".CREDENTIALS";
+
+    public const string CatalogGrants =
+        "SELECT " + SnapshotDate + ", CREATED_ON, MODIFIED_ON, PRIVILEGE, GRANTED_ON, NAME, TABLE_CATALOG, TABLE_SCHEMA, GRANTED_TO, " +
+        "GRANTEE_NAME, GRANT_OPTION, GRANTED_BY, DELETED_ON, GRANTED_BY_ROLE_TYPE, OBJECT_INSTANCE FROM " + AccountUsage + ".GRANTS_TO_ROLES " +
+        "WHERE DELETED_ON IS NULL AND GRANTED_ON IN ('TABLE', 'VIEW', 'DATABASE', 'SCHEMA', 'ROLE', 'DATABASE_ROLE')";
+
+    /// <summary>
+    /// From 1.18: every role each user holds. With the ROLE and DATABASE_ROLE rows that catalog_grants reads from 1.18
+    /// (the roles each role holds), Trailox can follow a user's privileges through its roles. SNOWFLAKE.SECURITY_VIEWER
+    /// covers the view, like GRANTS_TO_ROLES.
+    /// </summary>
+    public const string CatalogRoleGrants =
+        "SELECT " + SnapshotDate + ", CREATED_ON, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY FROM " + AccountUsage +
+        ".GRANTS_TO_USERS WHERE DELETED_ON IS NULL";
+
+    /// <summary>The SELECT for a task, or null when the stream is not one this engine knows.</summary>
+    /// <param name="accessFromMicros">For an access history task, where the read starts (<see cref="AccessFrom"/>); without it, the whole day before the window.</param>
+    public static string? ForTask(EndpointConfig endpoint, AgentTask task, long? accessFromMicros = null) => task.Stream switch
+    {
+        ProtocolInfo.Streams.Events => Events(endpoint, task.StartMicros, task.EndMicros),
+        ProtocolInfo.Streams.AccessHistory => AccessHistory(task.StartMicros, task.EndMicros,
+            accessFromMicros ?? task.StartMicros - StatementLookbackMicros),
+        ProtocolInfo.Streams.Logins => Logins(task.StartMicros, task.EndMicros),
+        ProtocolInfo.Streams.Sessions => Sessions(task.StartMicros, task.EndMicros),
+        ProtocolInfo.Streams.CatalogTables => CatalogTables(endpoint),
+        ProtocolInfo.Streams.CatalogColumns => CatalogColumns(endpoint),
+        ProtocolInfo.Streams.CatalogUsers => CatalogUsers,
+        ProtocolInfo.Streams.CatalogGrants => CatalogGrants,
+        ProtocolInfo.Streams.CatalogCredentials => CatalogCredentials,
+        ProtocolInfo.Streams.CatalogRoleGrants => CatalogRoleGrants,
+        _ => null,
+    };
+}

@@ -1,0 +1,332 @@
+using System.Text;
+using System.Text.Json;
+using Trailox.Agent.Config;
+using Trailox.Agent.Protocol;
+
+namespace Trailox.Agent.Engines.ClickHouse;
+
+/// <summary>
+/// The ClickHouse HTTP(S) interface, with the monitoring user's credentials in headers (never
+/// in the URL) and <c>log_comment=trailox-agent</c> on every request. Streams results; never
+/// holds a chunk in memory. Owns the two version-dependent facts (which columns exist, whether
+/// system.users.auth_type is an array) so the runner does not have to.
+/// </summary>
+public sealed class ChSource : IEngineSource
+{
+    private readonly HttpClient _http;
+    private readonly EndpointConfig _endpoint;
+    private IReadOnlySet<string> _presentColumns = new HashSet<string>();
+    private bool _usersAuthTypeIsArray = true;
+
+    /// <summary>Whether the last probe saw a moved copy of each log (RawSelects.MovedQueryLogs): then the windows read it too.</summary>
+    private bool _queryLogMoved;
+    private bool _sessionLogMoved;
+
+    public ChSource(HttpClient http, EndpointConfig endpoint)
+    {
+        _http = http;
+        _endpoint = endpoint;
+    }
+
+    public async Task<EndpointCaps> ProbeAsync(CancellationToken ct)
+    {
+        var version = await ScalarStringAsync(RawSelects.ProbeVersion, ct);
+        var minimum = $"ClickHouse {RawSelects.MinimumVersion.Major}.{RawSelects.MinimumVersion.Minor} or newer is required";
+        if (RawSelects.IsOlderThanMinimum(version))
+        {
+            throw new SourceException($"server {version} is too old; {minimum}");
+        }
+        var columnRows = await QueryRowsAsync(RawSelects.ProbeColumns, ct);
+        var columns = columnRows.Count > 0
+            ? columnRows[0][0].EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var missing = RawSelects.RequiredColumns.Where(c => !columns.Contains(c)).ToList();
+        if (missing.Count > 0)
+        {
+            throw new SourceException($"server {version} lacks system.query_log columns {string.Join(", ", missing)}; {minimum}");
+        }
+
+        var hasSessionLog = await ScalarLongAsync(RawSelects.ProbeSessionLog, ct) > 0;
+        _presentColumns = columns;
+        var (created, attached) = await ProbeMovedLogsAsync(columns, hasSessionLog, ct);
+        return new EndpointCaps
+        {
+            Version = version,
+            Columns = RawSelects.ProbedColumns.Where(columns.Contains).ToList(),
+            HasSessionLog = hasSessionLog,
+            // The oldest row of the live log only: it bounds a new source's first backfill, and over every copy the hourly
+            // probe would read every row of every copy.
+            EarliestEventMicros = await SoftScalarAsync(RawSelects.ProbeEarliestEvent(_endpoint), ct),
+            EarliestSessionMicros = hasSessionLog ? await SoftScalarAsync(RawSelects.ProbeEarliestSession(_endpoint), ct) : 0,
+            QueryLogCreatedMicros = created,
+            MovedLogAttachedMicros = attached,
+        };
+    }
+
+    public async Task<RowStream?> OpenAsync(AgentTask task, CancellationToken ct)
+    {
+        if (task.Stream == ProtocolInfo.Streams.CatalogShowGrants)
+        {
+            return await ShowGrantsAsync(ct);
+        }
+        var sql = RawSelects.ForTask(_endpoint, _presentColumns, task, _usersAuthTypeIsArray, _queryLogMoved, _sessionLogMoved);
+        if (sql == null)
+        {
+            return null;
+        }
+        try
+        {
+            return await StreamAsync(sql, ct);
+        }
+        catch (ChException) when (task.Stream == ProtocolInfo.Streams.CatalogUsers && _usersAuthTypeIsArray)
+        {
+            // Older servers expose system.users.auth_type as a scalar; remember and retry once.
+            _usersAuthTypeIsArray = false;
+            return await StreamAsync(RawSelects.ForTask(_endpoint, _presentColumns, task, usersAuthTypeIsArray: false)!, ct);
+        }
+        catch (ChException ex) when (task.Stream == ProtocolInfo.Streams.CatalogSettings && ex.IsAccessDenied)
+        {
+            // The settings grant arrived with agent 1.7, and a customer who ran an older setup script has not given it.
+            // The same message is reported; only the agent's own error list leaves it out.
+            throw new SourceException(ex.Message) { MissingOptionalGrant = true };
+        }
+    }
+
+    // ---- transport ----
+
+    private Uri BuildUri(IReadOnlyDictionary<string, string>? parameters = null)
+    {
+        var query = new List<string> { "log_comment=" + Uri.EscapeDataString(RawSelects.LogComment) };
+        if (parameters != null)
+        {
+            query.AddRange(parameters.Select(p => Uri.EscapeDataString(p.Key) + "=" + Uri.EscapeDataString(p.Value)));
+        }
+        return new Uri($"{(_endpoint.Tls ? "https" : "http")}://{_endpoint.Host}:{_endpoint.Port}/?{string.Join("&", query)}");
+    }
+
+    private HttpRequestMessage Request(string sql, IReadOnlyDictionary<string, string>? parameters = null)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(parameters)) { Content = new StringContent(sql, Encoding.UTF8) };
+        request.Headers.Add("X-ClickHouse-User", _endpoint.Username);
+        request.Headers.Add("X-ClickHouse-Key", _endpoint.Password);
+        return request;
+    }
+
+    private static async Task ThrowOnError(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return;
+        }
+        var body = await response.Content.ReadAsStringAsync(ct);
+        throw new ChException((int)response.StatusCode, body.Length > 600 ? body[..600] : body);
+    }
+
+    /// <summary>
+    /// catalog_show_grants (agent 1.17): every user's and every role's grants as SHOW GRANTS prints them, one statement
+    /// per row, each with the server's date. Only the statement text shows that a grant is a wildcard (ON db*.*).
+    /// </summary>
+    /// <remarks>
+    /// SHOW GRANTS names its one column after itself ("GRANTS FOR ALL") and cannot carry a date, so the agent reads the
+    /// server's date first and sends each statement under the name <c>statement</c>. The statements are sent as the
+    /// server printed them. The list is small (one row per grant), so it is read whole, like a probe.
+    /// </remarks>
+    private async Task<RowStream> ShowGrantsAsync(CancellationToken ct)
+    {
+        var date = await ScalarStringAsync(RawSelects.ServerToday, ct);
+        var rows = await QueryRowsAsync(RawSelects.ShowGrants, ct);
+        var body = new MemoryStream();
+        foreach (var row in rows)
+        {
+            var statement = row.Length > 0 ? row[0].GetString() ?? "" : "";
+            body.Write(JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string> { ["snapshot_date"] = date, ["statement"] = statement }));
+            body.WriteByte((byte)'\n');
+        }
+        body.Position = 0;
+        return new RowStream(body, body);
+    }
+
+    /// <summary>Probe queries are small and must fail fast; only the row streams get the long client timeout.</summary>
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(60);
+
+    internal async Task<List<JsonElement[]>> QueryRowsAsync(string sql, CancellationToken outer)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(outer);
+        timeout.CancelAfter(ProbeTimeout);
+        var ct = timeout.Token;
+        using var request = Request(sql, new Dictionary<string, string> { ["default_format"] = "JSONCompact" });
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        await ThrowOnError(response, ct);
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        return doc.RootElement.GetProperty("data").EnumerateArray()
+            .Select(row => row.EnumerateArray().Select(e => e.Clone()).ToArray())
+            .ToList();
+    }
+
+    private async Task<string> ScalarStringAsync(string sql, CancellationToken ct)
+    {
+        var rows = await QueryRowsAsync(sql, ct);
+        return rows.Count > 0 && rows[0].Length > 0 ? rows[0][0].ToString() : "";
+    }
+
+    private async Task<long> ScalarLongAsync(string sql, CancellationToken ct)
+    {
+        var rows = await QueryRowsAsync(sql, ct);
+        if (rows.Count == 0 || rows[0].Length == 0)
+        {
+            return 0;
+        }
+        var e = rows[0][0];
+        return e.ValueKind == JsonValueKind.Number ? e.GetInt64() : long.TryParse(e.GetString(), out var n) ? n : 0;
+    }
+
+    /// <summary>The log tables the probe sees (RawSelects.ProbeLogTables); null when the probe failed.</summary>
+    private async Task<(long Created, long Attached, long SessionCopies)?> LogTablesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var rows = await QueryRowsAsync(RawSelects.ProbeLogTables(_endpoint), ct);
+            if (rows.Count == 0 || rows[0].Length < 3)
+            {
+                return (0, 0, 0);
+            }
+            return (AsLong(rows[0][0]), AsLong(rows[0][1]), AsLong(rows[0][2]));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// When system.query_log was created and when the newest moved copy the windows read was attached (epoch micros, 0 =
+    /// none), deciding on the way which copies the windows read.
+    /// </summary>
+    /// <remarks>
+    /// A probe of the log tables that fails keeps what the last one saw: turning the copies off in the middle of a re-read
+    /// would read its remaining windows from the live log alone. The caps then carry no times. A copy the user can see is
+    /// read only once the server runs the window's own read across the copies (<see cref="RawSelects.ProbeRead"/>); one the
+    /// agent does not read is not reported either.
+    /// </remarks>
+    private async Task<(long Created, long Attached)> ProbeMovedLogsAsync(IReadOnlySet<string> columns, bool hasSessionLog, CancellationToken ct)
+    {
+        if (await LogTablesAsync(ct) is not { } tables)
+        {
+            return (0, 0);
+        }
+        var (created, attached, sessionCopies) = tables;
+        _queryLogMoved = attached > 0
+            && await MovedReadableAsync(RawSelects.Events(_endpoint, columns, 0, 0, moved: true), _queryLogMoved, ct);
+        _sessionLogMoved = hasSessionLog && sessionCopies > 0
+            && await MovedReadableAsync(RawSelects.Sessions(_endpoint, 0, 0, moved: true, hasHostname: columns.Contains("hostname")),
+                _sessionLogMoved, ct);
+        return (created, _queryLogMoved ? attached : 0);
+    }
+
+    /// <summary>The server's answer that a table of the read lacks one of its columns.</summary>
+    private static readonly System.Text.RegularExpressions.Regex MissingColumn =
+        new(@"Code: (16|47)\.|\((NO_SUCH_COLUMN_IN_TABLE|UNKNOWN_IDENTIFIER)\)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Runs a statement that returns no rows, and throws <see cref="ChException"/> when the server refuses it.</summary>
+    /// <remarks>
+    /// 🔴 wait_end_of_query, AND THE BODY TOO. Asked for JSON, a server can start its answer before the statement fails and
+    ///    put the refusal inside a 200: seen on ClickHouse 23.10 for a refused merge() read ("data": [] then "exception": ...),
+    ///    which a status check alone takes for an empty success. With wait_end_of_query=1 the server answers only once the
+    ///    statement has finished, so a refusal is an HTTP error; a body that still names an exception is one too.
+    /// </remarks>
+    private async Task ProveAsync(string sql, CancellationToken outer)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(outer);
+        timeout.CancelAfter(ProbeTimeout);
+        using var request = Request(sql, new Dictionary<string, string> { ["wait_end_of_query"] = "1" });
+        using var response = await _http.SendAsync(request, timeout.Token);
+        await ThrowOnError(response, timeout.Token);
+        var body = await response.Content.ReadAsStringAsync(timeout.Token);
+        if (body.Contains("DB::Exception", StringComparison.Ordinal))
+        {
+            throw new ChException((int)response.StatusCode, body.Length > 600 ? body[..600] : body);
+        }
+    }
+
+    /// <summary>Whether the server runs a window's read across the moved copies (RawSelects.ProbeRead).</summary>
+    /// <remarks>
+    /// Only the server's answer turns the copies off: a refusal (Code 497, ACCESS_DENIED), or a column a copy lacks (Code 16,
+    /// NO_SUCH_COLUMN_IN_TABLE; the analyzer's UNKNOWN_IDENTIFIER, Code 47). Any other failure - a 5xx while the server is
+    /// busy, a replica that does not answer, the proof's own timeout - keeps what the last probe decided, like a failed probe
+    /// of the log tables: it is not the server's answer to the question. Only the agent stopping is passed on.
+    /// </remarks>
+    private async Task<bool> MovedReadableAsync(string windowSelect, bool readableBefore, CancellationToken ct)
+    {
+        try
+        {
+            await ProveAsync(RawSelects.ProbeRead(windowSelect), ct);
+            return true;
+        }
+        catch (ChException ex) when (ex.IsAccessDenied || MissingColumn.IsMatch(ex.Message))
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return readableBefore;
+        }
+    }
+
+    private static long AsLong(JsonElement e) =>
+        e.ValueKind == JsonValueKind.Number ? e.GetInt64() : long.TryParse(e.GetString(), out var n) ? n : 0;
+
+    /// <summary>Fails soft to 0: the caller treats it as "unknown" and keeps the full backfill window.</summary>
+    private async Task<long> SoftScalarAsync(string sql, CancellationToken ct)
+    {
+        try
+        {
+            return await ScalarLongAsync(sql, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return 0;
+        }
+    }
+
+    private async Task<RowStream> StreamAsync(string sql, CancellationToken ct)
+    {
+        var request = Request(sql);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // A server that did not start answering in time: the task's failure, named as such. Only
+            // the caller's own cancellation, the agent stopping, is left as it is.
+            throw new SourceException("ClickHouse did not answer in time (" + ex.Message + ")");
+        }
+        try
+        {
+            await ThrowOnError(response, ct);
+            return new RowStream(await response.Content.ReadAsStreamAsync(ct), response);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+    }
+}
+
+public sealed class ChException : SourceException
+{
+    public int StatusCode { get; }
+
+    public ChException(int statusCode, string body) : base($"ClickHouse answered HTTP {statusCode}: {body}")
+    {
+        StatusCode = statusCode;
+    }
+
+    /// <summary>ClickHouse's answer to a missing privilege: "Code: 497 ... (ACCESS_DENIED)".</summary>
+    public bool IsAccessDenied =>
+        Message.Contains("Code: 497.", StringComparison.Ordinal) || Message.Contains("(ACCESS_DENIED)", StringComparison.Ordinal);
+}
