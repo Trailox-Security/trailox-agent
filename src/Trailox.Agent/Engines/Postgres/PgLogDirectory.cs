@@ -15,11 +15,15 @@ public static class PgLogFileNames
     private static readonly Regex Time = new(@"(\d{4})-(\d{2})-(\d{2})(?:[_-](\d{2})(\d{2})?(\d{2})?)?(?=\.(?:log|csv|json)$|$)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    // Azure Database for PostgreSQL's server log download: postgresql_2026_01_15_10_00_00.log.
+    private static readonly Regex AzureTime = new(@"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})(?=\.log$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>The time in the name, UTC, in microseconds; null for a name with no date (Red Hat's <c>postgresql-Mon.log</c>).</summary>
     public static long? StartMicros(string name)
     {
         var m = Time.Match(name);
-        if (!m.Success)
+        if (!m.Success && !(m = AzureTime.Match(name)).Success)
         {
             return null;
         }

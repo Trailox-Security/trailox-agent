@@ -177,9 +177,16 @@ public static class PgProbeChecks
 
     /// <summary>log_files when no file was found in the log directory.</summary>
     public static PostgresCheck NoLogFiles(string directory, string platform) => platform == PgPlatform.Azure
-        ? Fail("log_files", "Azure Database for PostgreSQL flexible server has no log directory to mount, so the agent reads no server "
-            + "log: sign-ins, failed sign-ins and DDL are not collected")
+        ? Fail("log_files", "Azure Database for PostgreSQL flexible server has no log directory to mount: read its server log with "
+            + "log_source: azure_files")
         : Fail("log_files", $"no log file in {directory}: check logging_collector, log_directory and the mount");
+
+    /// <summary>log_files of Azure's server log download: one file an hour, kept for logfiles.retention_days.</summary>
+    public static PostgresCheck AzureLogFiles(string server, int files, long oldestMicros) => files == 0
+        ? Fail("log_files", $"{server}: no server log file to download: set the server parameter logfiles.download_enable = on")
+        : Ok("log_files", $"{server}: {files} log files, the oldest from "
+            + DateTime.UnixEpoch.AddTicks(oldestMicros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+            + " UTC. Azure keeps them for logfiles.retention_days (at most 7): a longer outage loses the gap");
 
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0

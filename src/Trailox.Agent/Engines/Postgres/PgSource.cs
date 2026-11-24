@@ -7,7 +7,8 @@ namespace Trailox.Agent.Engines.Postgres;
 
 /// <summary>
 /// One PostgreSQL source: its servers (the primary and, on RDS, the replicas listed in agent.yaml), the server log of
-/// each, read through the RDS API or from a mounted directory, and the SQL reads of <see cref="PgCatalog"/>.
+/// each, read through the RDS API, Azure's server log download or from a mounted directory, and the SQL reads of
+/// <see cref="PgCatalog"/>.
 /// </summary>
 public sealed class PgSource : IEngineSource
 {
@@ -23,6 +24,9 @@ public sealed class PgSource : IEngineSource
     private readonly EndpointConfig _endpoint;
     private readonly PgCatalog _catalog;
     private readonly IRdsLogs? _rds;
+
+    /// <summary>The server's log files on Azure (<c>log_source: azure_files</c>); null for any other source.</summary>
+    private readonly IAzureLogFiles? _azure;
 
     /// <summary>The Region's RDS API calls, shared with this agent's other sources there; null without the RDS API.</summary>
     private readonly RdsCallBudget? _budget;
@@ -57,16 +61,28 @@ public sealed class PgSource : IEngineSource
     /// </summary>
     private PgSessionMap? _sessions;
 
-    public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null)
+    /// <summary>Azure's default <c>log_line_prefix</c>, read until a probe reads the server's own.</summary>
+    public const string AzureDefaultPrefix = "%t-%c-";
+
+    public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null, IAzureLogFiles? azure = null,
+        HttpClient? http = null)
     {
         _endpoint = endpoint;
         _catalog = new PgCatalog(endpoint);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
-        if (endpoint.Options.GetValueOrDefault("log_source") == PostgresEngine.LogSourceRdsApi)
+        var source = endpoint.Options.GetValueOrDefault("log_source");
+        if (source == PostgresEngine.LogSourceRdsApi)
         {
             _instances = PostgresEngine.Instances(endpoint, out _);
             _rds = rds ?? new AwsRdsLogs(endpoint.Options["rds_region"]);
             _budget = RdsCallBudget.For(endpoint.Options["rds_region"]);
+        }
+        else if (source == PostgresEngine.LogSourceAzureFiles)
+        {
+            var server = endpoint.Options["azure_server"];
+            _instances = new[] { new PgInstance(server, endpoint.Host, "primary") };
+            _azure = azure ?? new ArmAzureLogFiles(http ?? new HttpClient(), endpoint.Options["azure_subscription"],
+                endpoint.Options["azure_resource_group"], server);
         }
         else
         {
@@ -78,7 +94,10 @@ public sealed class PgSource : IEngineSource
     public async Task<EndpointCaps> ProbeAsync(CancellationToken ct)
     {
         var checks = new List<PostgresCheck>();
-        var caps = new PostgresCaps { LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : PostgresEngine.LogSourceFile };
+        var caps = new PostgresCaps
+        {
+            LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : _azure != null ? PostgresEngine.LogSourceAzureFiles : PostgresEngine.LogSourceFile,
+        };
         string version;
         Dictionary<string, string> settings;
         await using (var conn = await _catalog.OpenAsync(_endpoint.Host, _catalog.Database, ct))
@@ -115,7 +134,9 @@ public sealed class PgSource : IEngineSource
         {
             checks.Add(await ReplicasAnswerAsync(ct));
         }
-        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct) : DirectoryLogs(caps.Platform);
+        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct)
+            : _azure != null ? await AzureLogsAsync(ct)
+            : DirectoryLogs(caps.Platform);
         caps.Instances = instances;
         caps.LogFormat = format;
         checks.AddRange(logChecks);
@@ -188,6 +209,10 @@ public sealed class PgSource : IEngineSource
                 await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond, budget: _budget), ct);
                 window.WriteCounts();
             }
+            else if (_azure != null)
+            {
+                await AzureWindowAsync(task, instance, rows, callsPerSecond, ct);
+            }
             else
             {
                 var directory = new PgLogDirectory(_logDirectory!);
@@ -198,6 +223,48 @@ public sealed class PgSource : IEngineSource
             }
             await rows.FlushAsync(ct);
         }
+    }
+
+    /// <summary>
+    /// One window of Azure's server log download. Azure adds to the newest file every few minutes, so a recent window
+    /// waits until a line past its end is there (or an hour has gone by: an idle server writes nothing to wait for).
+    /// </summary>
+    private async Task AzureWindowAsync(AgentTask task, PgInstance instance, RowWriter rows, double callsPerSecond, CancellationToken ct)
+    {
+        if (_prefix == null)
+        {
+            Prefix(AzureDefaultPrefix);
+        }
+        var reader = new AzureLogReader(_azure!, callsPerSecond);
+        var recent = _utcNow() - FromMicros(task.EndMicros) < CatchUp;
+        if (recent && !await reader.WrittenPastAsync(task.EndMicros + PgWindowReader.StopMarginMicros, _prefix!.TimeOf, ct))
+        {
+            throw new SourceException("Azure has not written the whole window to the server's log files yet") { NotYetPublished = true };
+        }
+        var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+            _english, _rotationMinutes, _prefix, _sessions, reader, azureFile: true);
+        await window.ReadAsync(reader, ct);
+        window.WriteCounts();
+    }
+
+    /// <summary>The server's log files on Azure: how many, and the oldest; Azure keeps them for <c>logfiles.retention_days</c>.</summary>
+    private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> AzureLogsAsync(CancellationToken ct)
+    {
+        var report = new PostgresInstance { Id = _instances[0].Id, Role = "primary" };
+        var checks = new List<PostgresCheck>();
+        try
+        {
+            var files = await new AzureLogReader(_azure!, LiveCallsPerSecond).FilesAsync(ct);
+            var starts = files.Select(f => f.StartMicros).OfType<long>().OrderBy(t => t).ToList();
+            report.OldestLogMicros = starts.FirstOrDefault();
+            report.LogFileMinutes = PgProbeChecks.FileMinutes(starts);
+            checks.Add(PgProbeChecks.AzureLogFiles(report.Id, files.Count, report.OldestLogMicros));
+        }
+        catch (SourceException ex)
+        {
+            checks.Add(new PostgresCheck { Name = "log_files", Status = "fail", Message = Runner.EndpointSession.Trim(ex.Message) });
+        }
+        return (new List<PostgresInstance> { report }, checks, "stderr");
     }
 
     /// <summary>The prefix the newest probe read: a new one gets a parser, and sessions, of its own.</summary>

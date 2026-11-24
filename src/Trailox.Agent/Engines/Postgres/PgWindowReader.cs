@@ -351,6 +351,71 @@ public sealed class PgWindowReader
         }
     }
 
+    /// <summary>
+    /// Reads the window from Azure's server log download: the part of each hourly file that holds it, its lines parsed by
+    /// the server's prefix, each record's user from its session (<see cref="PgSessionMap"/>).
+    /// </summary>
+    public async Task ReadAsync(AzureLogReader azure, CancellationToken ct)
+    {
+        var prefix = _prefix ?? PgLineFormat.Of(PgSource.AzureDefaultPrefix);
+        var oldest = (await azure.FilesAsync(ct)).Select(f => f.StartMicros).OfType<long>().DefaultIfEmpty(long.MaxValue).Min();
+        if (oldest != long.MaxValue && oldest > _start)
+        {
+            // Azure keeps the files for logfiles.retention_days: the log before the oldest is gone.
+            _firstLogMicros = oldest;
+        }
+        var done = new List<PgLogRecord>();
+        PgLogParser? parser = null;
+        string? file = null;
+        var lines = 0L;
+        var inWindow = false;
+        _sessions?.BeginRead();
+        try
+        {
+            await foreach (var line in azure.LinesAsync(_start, _end, prefix.TimeOf, ct))
+            {
+                // A continuation line belongs where the line it continues does.
+                if (prefix.TimeOf(line.Text) is { } at)
+                {
+                    inWindow = at >= _start && at < _end;
+                }
+                if (inWindow)
+                {
+                    _logBytes += Encoding.UTF8.GetByteCount(line.Text) + 1;
+                }
+                if (line.File != file)
+                {
+                    if (parser != null)
+                    {
+                        await CloseAsync(parser, done, ct);
+                    }
+                    parser = PgLogParser.For(PgLogFormat.Stderr, PgLogFileNames.StartMicros(line.File), prefix, azureFile: true);
+                    file = line.File;
+                }
+                parser!.Feed(line.Text, done);
+                await DrainAsync(done, ct);
+                if (Past)
+                {
+                    break;
+                }
+                if (++lines % FlushLines == 0)
+                {
+                    await FlushAsync(ct);
+                }
+            }
+            if (parser != null)
+            {
+                await CloseAsync(parser, done, ct);
+            }
+        }
+        finally
+        {
+            _sessions?.EndRead();
+        }
+        _files += azure.Stats.Files;
+        _bytes += azure.Stats.Bytes;
+    }
+
     /// <summary>Reads the window from an RDS instance through the RDS API (stderr only).</summary>
     public async Task ReadAsync(RdsLogReader rds, CancellationToken ct)
     {

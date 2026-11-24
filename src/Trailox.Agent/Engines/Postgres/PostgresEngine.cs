@@ -4,17 +4,20 @@ using Trailox.Agent.Config;
 namespace Trailox.Agent.Engines.Postgres;
 
 /// <summary>
-/// PostgreSQL 13 and later (agent 1.12): Amazon RDS and Aurora, read through the RDS API, and self-managed servers, read
-/// from their log directory. The agent reads the server log for sign-ins, failed sign-ins and DDL, and signs in to the
-/// server for <c>pg_stat_statements</c> counters and the catalog.
+/// PostgreSQL 13 and later (agent 1.12): Amazon RDS and Aurora, read through the RDS API, Azure Database for PostgreSQL
+/// flexible server, read through Azure's server log download, and self-managed servers, read from their log directory.
+/// The agent reads the server log for sign-ins, failed sign-ins and DDL, and signs in to the server for
+/// <c>pg_stat_statements</c> counters and the catalog.
 /// </summary>
 /// <remarks>
 /// agent.yaml for this engine: <c>host</c>/<c>port</c> = the primary's address, <c>username</c> = the monitoring role,
 /// and its password reference. <c>options</c>:
 /// <list type="bullet">
-/// <item><c>log_source</c>: <c>rds_api</c> or <c>file</c>;</item>
+/// <item><c>log_source</c>: <c>rds_api</c>, <c>azure_files</c> or <c>file</c>;</item>
 /// <item><c>rds_api</c>: <c>instances</c> (the instance identifiers, primary first, each <c>id</c> or <c>id=host</c>)
 ///   and <c>rds_region</c>; the agent's own AWS identity reads the log files;</item>
+/// <item><c>azure_files</c>: <c>azure_subscription</c>, <c>azure_resource_group</c> and <c>azure_server</c>; the
+///   agent's own Azure identity lists the log files (<see cref="ArmAzureLogFiles"/>);</item>
 /// <item><c>file</c>: <c>log_directory</c>, the server's log directory mounted read-only in the agent's container;</item>
 /// <item><c>database</c>: where the agent signs in for the counters (default <c>postgres</c>).</item>
 /// </list>
@@ -23,9 +26,22 @@ public sealed class PostgresEngine : IEngine
 {
     public const string LogSourceRdsApi = "rds_api";
     public const string LogSourceFile = "file";
+    public const string LogSourceAzureFiles = "azure_files";
     public const string DefaultDatabase = "postgres";
 
-    private static readonly HashSet<string> KnownOptions = new(StringComparer.Ordinal) { "log_source", "instances", "rds_region", "log_directory", "database" };
+    private static readonly HashSet<string> KnownOptions = new(StringComparer.Ordinal)
+    {
+        "log_source", "instances", "rds_region", "log_directory", "database", "azure_subscription", "azure_resource_group", "azure_server",
+    };
+
+    private static readonly string[] RdsOptions = { "instances", "rds_region" };
+    private static readonly string[] AzureOptions = { "azure_subscription", "azure_resource_group", "azure_server" };
+
+    // Azure: a subscription is a GUID; a resource group is 1-90 letters, digits, '-', '_', '.', '(' and ')', not ending in
+    // '.'; a flexible server's name is 3-63 lower-case letters, digits and '-', neither first nor last.
+    private static readonly Regex SubscriptionPattern = new(@"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z", RegexOptions.Compiled);
+    private static readonly Regex ResourceGroupPattern = new(@"^[-\w.()]{0,89}[-\w()]\z", RegexOptions.Compiled);
+    private static readonly Regex AzureServerPattern = new(@"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\z", RegexOptions.Compiled);
 
     // RDS instance identifiers: a letter, then letters, digits and '-', at most 63.
     private static readonly Regex InstancePattern = new(@"^[A-Za-z][A-Za-z0-9-]{0,62}\z", RegexOptions.Compiled);
@@ -82,23 +98,35 @@ public sealed class PostgresEngine : IEngine
             e.Kind = "cloud";
             ValidateRds(e, problems);
         }
+        else if (source == LogSourceAzureFiles)
+        {
+            e.Kind = "cloud";
+            ValidateAzure(e, problems);
+        }
         else if (source == LogSourceFile)
         {
             ValidateFile(e, problems);
         }
         else
         {
-            problems.Add($"options.log_source: {LogSourceRdsApi} (Amazon RDS and Aurora) or {LogSourceFile} (a self-managed server's log directory)");
+            problems.Add($"options.log_source: {LogSourceRdsApi} (Amazon RDS and Aurora), {LogSourceAzureFiles} (Azure Database for "
+                + $"PostgreSQL flexible server) or {LogSourceFile} (a self-managed server's log directory)");
         }
         return problems;
     }
 
+    private static void OnlyWith(EndpointConfig e, IEnumerable<string> keys, string source, List<string> problems)
+    {
+        foreach (var key in keys.Where(e.Options.ContainsKey))
+        {
+            problems.Add($"options.{key}: only with log_source: {source}");
+        }
+    }
+
     private static void ValidateRds(EndpointConfig e, List<string> problems)
     {
-        if (e.Options.ContainsKey("log_directory"))
-        {
-            problems.Add($"options.log_directory: only with log_source: {LogSourceFile}");
-        }
+        OnlyWith(e, new[] { "log_directory" }, LogSourceFile, problems);
+        OnlyWith(e, AzureOptions, LogSourceAzureFiles, problems);
         if (!RegionPattern.IsMatch(e.Options.GetValueOrDefault("rds_region", "")))
         {
             problems.Add("options.rds_region: the instances' AWS region, e.g. eu-west-1");
@@ -111,12 +139,28 @@ public sealed class PostgresEngine : IEngine
         }
     }
 
+    private static void ValidateAzure(EndpointConfig e, List<string> problems)
+    {
+        OnlyWith(e, RdsOptions, LogSourceRdsApi, problems);
+        OnlyWith(e, new[] { "log_directory" }, LogSourceFile, problems);
+        if (!SubscriptionPattern.IsMatch(e.Options.GetValueOrDefault("azure_subscription", "")))
+        {
+            problems.Add("options.azure_subscription: the server's subscription id, e.g. 00000000-0000-0000-0000-000000000000");
+        }
+        if (!ResourceGroupPattern.IsMatch(e.Options.GetValueOrDefault("azure_resource_group", "")))
+        {
+            problems.Add("options.azure_resource_group: the server's resource group, e.g. rg-databases");
+        }
+        if (!AzureServerPattern.IsMatch(e.Options.GetValueOrDefault("azure_server", "")))
+        {
+            problems.Add("options.azure_server: the flexible server's name, the first label of its host (orders for orders.postgres.database.azure.com)");
+        }
+    }
+
     private static void ValidateFile(EndpointConfig e, List<string> problems)
     {
-        foreach (var key in new[] { "instances", "rds_region" }.Where(e.Options.ContainsKey))
-        {
-            problems.Add($"options.{key}: only with log_source: {LogSourceRdsApi}");
-        }
+        OnlyWith(e, RdsOptions, LogSourceRdsApi, problems);
+        OnlyWith(e, AzureOptions, LogSourceAzureFiles, problems);
         var dir = e.Options.GetValueOrDefault("log_directory", "");
         if (!dir.StartsWith('/'))
         {
@@ -179,7 +223,8 @@ public sealed class PostgresEngine : IEngine
             : null;
     }
 
-    public IEngineSource CreateSource(EndpointConfig endpoint, IHttpClientFactory httpClientFactory) => new PgSource(endpoint);
+    public IEngineSource CreateSource(EndpointConfig endpoint, IHttpClientFactory httpClientFactory) =>
+        new PgSource(endpoint, http: httpClientFactory.CreateClient(Name));
 }
 
 /// <summary>One server of a source: its RDS instance identifier (or, for a log directory, the source's host), the address the agent signs in to, and its role.</summary>

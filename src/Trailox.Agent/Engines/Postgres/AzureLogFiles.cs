@@ -110,7 +110,7 @@ public sealed class ArmAzureLogFiles : IAzureLogFiles
             ExcludeVisualStudioCredential = true,
             ExcludeVisualStudioCodeCredential = true,
             ExcludeInteractiveBrowserCredential = true,
-            ExcludeSharedTokenCacheCredential = true,
+            ExcludeBrokerCredential = true,
         }),
         new EnvironmentCredential());
 
@@ -244,7 +244,14 @@ public sealed class ArmAzureLogFiles : IAzureLogFiles
 /// <summary>What one read of the Azure files did.</summary>
 public sealed class AzureReadStats
 {
-    public int Files { get; internal set; }
+    private readonly HashSet<string> _files = new(StringComparer.Ordinal);
+
+    /// <summary>The files read, each once however often a look-back went back to it.</summary>
+    public int Files => _files.Count;
+
+    internal void Read(string file) => _files.Add(file);
+
+    /// <summary>Everything downloaded, the look-backs' and the binary searches' reads included.</summary>
     public long Bytes { get; internal set; }
     public int Reads { get; internal set; }
 }
@@ -316,7 +323,7 @@ public sealed class AzureLogReader : IPgLogLines
         var files = await FilesAsync(ct);
         foreach (var file in files.Where(f => (f.StartMicros ?? long.MinValue) <= toMicros + margin && f.LastModifiedMicros >= fromMicros - margin))
         {
-            Stats.Files++;
+            Stats.Read(file.Name);
             var offset = (file.StartMicros ?? long.MinValue) < fromMicros ? await OffsetOfAsync(file, fromMicros - margin, timeOf, ct) : 0;
             await foreach (var line in LinesFromAsync(file, offset, ct))
             {
@@ -394,6 +401,8 @@ public sealed class AzureLogReader : IPgLogLines
         }
         _nextRead = (_nextRead > now ? _nextRead : now) + _interval;
         Stats.Reads++;
+        // The newest link for the file: a list made since its caller had it may have given a new one.
+        file = _files?.FirstOrDefault(f => f.Name == file.Name) ?? file;
         byte[] bytes;
         try
         {

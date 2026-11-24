@@ -67,16 +67,19 @@ public sealed class PgLineFormat
     private static readonly Regex LevelMarker = new($"(?:{Levels}):  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// 🔴 A FORGED CONNECTION LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a
-    ///    whole prefix, a level and the start of a sign-in into its application or user name; read from the left, its
-    ///    line then reads as that sign-in. The real rest of the prefix and the real level follow inside the text, so a
-    ///    connection line whose text holds a level marker was forged, where the prefix writes a client's name before its
-    ///    end. A real one holds none: its text is the server's, with the names the client chose.
+    /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put the rest of a
+    ///    prefix, a level and any message into its application or user name; read from the left, its line then reads as
+    ///    that message, of that user. The real rest of the prefix and the real level follow inside the text, so where the
+    ///    prefix writes a client's name before its end, a record whose first line holds a level marker is taken as
+    ///    forged: counted, never read. A statement that holds such text itself is counted with them, which shows in the
+    ///    counts; a forged one read would not.
     /// </summary>
-    public bool Forged(PgLogRecord r) =>
-        ClientTextBeforeEnd && r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated
-            or PgRecordKind.ConnectionAuthorized or PgRecordKind.Disconnection
-        && LevelMarker.IsMatch(r.Message);
+    /// <remarks>
+    /// ⚠ A NEWLINE IN A NAME IS NOT CAUGHT. A refused client's user name can hold one, and a real stderr file then has a
+    ///   line of the client's that starts with any prefix at all: nothing in it tells it apart. csvlog and jsonlog quote
+    ///   the names, and Azure's download writes a newline as <c>\n</c>.
+    /// </remarks>
+    public bool Forged(PgLogRecord r) => ClientTextBeforeEnd && LevelMarker.IsMatch(r.Message);
 
     public static PgLineFormat Of(string prefix)
     {
