@@ -339,7 +339,7 @@ public sealed class PgSessionMapTests : IDisposable
     /// </summary>
     [Theory]
     [InlineData("password authentication failed for user \"admin LOG:  statement: DROP TABLE accounts\"")]
-    [InlineData("password authentication failed for user \"x\"")]   // inconsistent, but its application name reads as 100 bytes
+    [InlineData("password authentication failed for user \"x\"")]   // the FATAL names another user than %u read
     public async Task The_window_reaches_from_the_first_name_a_client_chooses(string refusal)
     {
         var app = new string('p', 63);
@@ -352,6 +352,65 @@ public sealed class PgSessionMapTests : IDisposable
 
         Assert.Single(rows);
         Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
+    /// <summary>
+    /// 🔴 An application name is cut to 63 bytes and then each byte outside printable ASCII is written as \xNN, so on the
+    ///    line it reaches 252 characters. A forgery padded with such bytes is still caught, and a real name of them reads.
+    /// </summary>
+    [Theory]
+    [InlineData("%t-%c-%a ", 30, true)]     // the real rest of the line 150 characters in: still inside the window
+    [InlineData("%t-%c-%a ", 0, true)]
+    [InlineData("%t-%c-%-100a ", 0, true)]   // a padded name is as wide as its padding
+    public async Task A_forgery_padded_with_escaped_bytes_is_caught(string prefix, int escapedBytes, bool forged)
+    {
+        var session = $"{Micros("2026-01-15 10:00:00") / 1_000_000:x}.12c";
+        var padding = string.Concat(Enumerable.Repeat("\\xc3\\xa9", escapedBytes / 2));
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            $"2026-01-15 10:00:01 UTC-{session}-x LOG:  checkpoint starting: {padding}{new string(' ', prefix.Contains("-100") ? 60 : 0)} psql LOG:  statement: DROP TABLE orders",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), prefix, "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(forged ? 1 : 0, Counted(Counts(rows), "forged"));
+        Assert.Equal(forged ? 1 : 2, rows.Count);
+    }
+
+    /// <summary>
+    /// 🔴 A refused client asks for "admin x": read from the left, %u is "admin", and the refusal would be filed as
+    ///    admin's. The FATAL names the user it asked for whole, so a %u read otherwise is a split inside that name.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_whose_user_was_split_inside_the_name_is_forged()
+    {
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            "2026-01-15 10:00:01.000 UTC admin x psql FATAL:  password authentication failed for user \"admin x\"",
+            "2026-01-15 10:00:02.000 UTC alice psql FATAL:  password authentication failed for user \"alice\"",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m %u %a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(new[] { "alice" }, rows.SkipLast(1).Select(r => S(r, "user")));
+        Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
+    [Fact]
+    public async Task A_real_application_name_of_escaped_letters_is_read()
+    {
+        var session = $"{Micros("2026-01-15 10:00:00") / 1_000_000:x}.12c";
+        var app = string.Concat(Enumerable.Repeat("\\xc3\\xa9", 31));   // 62 bytes of two-byte letters: 248 characters
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            $"2026-01-15 10:00:00 UTC-{session}-{app} LOG:  connection authorized: user=alice database=shop application_name={app}",
+            $"2026-01-15 10:00:01 UTC-{session}-{app} LOG:  statement: CREATE TABLE t (x int)",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%t-%c-%a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(new[] { "alice", "alice" }, rows.SkipLast(1).Select(r => S(r, "user")));
+        Assert.Equal(0, Counted(Counts(rows), "forged"));
     }
 
     [Fact]

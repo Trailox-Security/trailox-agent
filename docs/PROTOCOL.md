@@ -839,11 +839,13 @@ looked for once: with a session id, the minute after the start the id says; with
 before the read; at most 200 look-backs per window. With none of `%u`, `%c` and `%p` a statement, pgaudit or FATAL
 record names no one and counts as `unreadable`. Where the prefix writes a name a client chose (`%a`, `%u`, `%d`), a
 record taken as written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped. The
-server cuts each such name to 63 bytes, so a record whose prefix reads a longer one is forged, and its text is looked
-at only as far as a name and the rest of the prefix reach from the first such escape. With `%a`, which any signed-in
-client sets: any record with a level marker (`LOG:  `, `ERROR:  `...) there. With `%u` or `%d` only, which only a
-refused client chooses: a connection line with a level marker there, and any record with the rest of the prefix and
-`FATAL:  ` there, as every refused client's line ends. RDS's two prefixes keep their own reader;
+server cuts each such name to 63 bytes (an application name is then written with `\xNN` for each byte outside
+printable ASCII, so up to 252 characters), so a record whose prefix reads a longer one is forged, as is a refused
+sign-in whose FATAL names another user than `%u` read; and its text is looked at only as far as such names and the
+rest of the prefix reach from the first such escape. With `%a`, which any signed-in client sets: any record with a
+level marker (`LOG:  `, `ERROR:  `...) there. With `%u` or `%d` only, which only a refused client chooses: a
+connection line with a level marker there, and any record with the rest of the prefix and `FATAL:  ` there, as every
+refused client's line ends. RDS's two prefixes keep their own reader;
 csvlog (24 columns on 13, 26 on 14-18); jsonlog. In stderr a message's `DETAIL`, `HINT` and `STATEMENT` are lines of
 their own with the same pid, and a line without the prefix continues the one before. A record is shipped when it is
 one of these, by its level and the start of its message (English messages only):

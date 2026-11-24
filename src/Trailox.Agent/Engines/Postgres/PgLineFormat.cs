@@ -67,6 +67,10 @@ public sealed class PgLineFormat
 
     private static readonly Regex LevelMarker = new($"(?:{Levels}):  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
+    // A failed sign-in names the user the client asked for, to the end of the line.
+    private static readonly Regex RefusedFor = new(@"^(?:password|Ident|Peer|PAM|LDAP|RADIUS|GSSAPI|SSPI|BSD|certificate) authentication failed for user ""(?<u>.*)""\z",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
     /// <summary>
     /// What follows a refused client's own name on its line: the rest of the prefix, then the server's FATAL. Null when
     /// the prefix writes no user or database name.
@@ -77,17 +81,24 @@ public sealed class PgLineFormat
     private int _forgeWindow;
 
     /// <summary>
-    /// The longest name PostgreSQL writes: it cuts a user, database or application name a client gives to NAMEDATALEN - 1
+    /// The longest name PostgreSQL keeps: it cuts a user, database or application name a client gives to NAMEDATALEN - 1
     /// bytes (an application name both at sign-in and on SET, measured on 17.11).
     /// </summary>
     private const int MaxName = 63;
+
+    /// <summary>
+    /// The longest application name it writes: cut to 63 bytes, then each byte outside printable ASCII written as
+    /// <c>\xNN</c> (measured on 17.11: 40 two-byte letters read back as 248 characters).
+    /// </summary>
+    private const int MaxApplication = 4 * MaxName;
 
     /// <summary>
     /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a level and
     ///    a message, and the rest of a prefix, into its application name, or a refused client into the user or database
     ///    name it asked for; read from the left, the line then reads as that message: another user's, a sign-in, or a
     ///    checkpoint that hides the client's own statement. The real rest of the prefix and the real level follow inside
-    ///    the text, at most a name (63 bytes) and the rest of the prefix from its start: only that far is anything
+    ///    the text, at most a name (63 bytes, an application name 252 characters once escaped) and the rest of the
+    ///    prefix from its start: only that far is anything
     ///    looked for, so a level a statement quotes further in is the statement's own. A record is taken as forged,
     ///    counted and never read:
     ///    <list type="bullet">
@@ -110,7 +121,12 @@ public sealed class PgLineFormat
             return false;
         }
         // A name longer than the server writes one: the line was split at a level a client wrote, not the server's.
-        if (TooLong(r.User) || TooLong(r.Database) || TooLong(r.ApplicationName))
+        if (TooLong(r.User) || TooLong(r.Database) || r.ApplicationName is { Length: > MaxApplication })
+        {
+            return true;
+        }
+        // A refused sign-in's FATAL names the user it asked for, whole: a %u read otherwise was split inside that name.
+        if (HasUser && r.Level == "FATAL" && RefusedFor.Match(r.Message) is { Success: true } refused && refused.Groups["u"].Value != r.User)
         {
             return true;
         }
@@ -142,7 +158,8 @@ public sealed class PgLineFormat
             ClientEscape = client,
             _refusedTail = client == 'a' ? null : new Regex(Pattern(after, capture: false) + "FATAL:  ",
                 RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline),
-            _forgeWindow = MaxName + tokens.Skip(first + 1).Sum(MaxLength) + 16,
+            // The first name's own width too, padded or not.
+            _forgeWindow = tokens.Skip(first).Sum(MaxLength) + 16,
         };
     }
 
@@ -152,7 +169,8 @@ public sealed class PgLineFormat
     private static int MaxLength(PgLinePrefix.Token t) => Math.Max(Math.Abs(t.Padding), t.Escape switch
     {
         '\0' => t.Text.Length,
-        'u' or 'd' or 'a' or 'i' or 'b' => MaxName,
+        'a' => MaxApplication,
+        'u' or 'd' or 'i' or 'b' => MaxName,
         'r' or 'h' => 262,
         't' or 's' or 'm' => 40,
         _ => 24,
