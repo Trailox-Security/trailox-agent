@@ -795,8 +795,28 @@ cannot be passed on by a machine in between; a server or pooler that does not of
   half the lines. A single line over 1 MB ships cut, with `truncated` true. A file deleted while it is read
   (`DBLogFileNotFoundFault`) is skipped; an instance that does not exist (`DBInstanceNotFound`) is skipped and
   named in the count row.
+- `azure_files` (from 1.22.0), Azure Database for PostgreSQL flexible server: Azure's server log download
+  (`logfiles.download_enable`), one stderr file an hour (`postgresql_YYYY_MM_DD_HH_00_00.log`), as the agent's own
+  Azure identity: its managed identity (workload identity, then the host's own), else a service principal from
+  `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` or `AZURE_CLIENT_CERTIFICATE_PATH`. No developer
+  sign-in is tried.
+
+  | call | when |
+  |---|---|
+  | `GET https://management.azure.com/subscriptions/{azure_subscription}/resourceGroups/{azure_resource_group}/providers/Microsoft.DBforPostgreSQL/flexibleServers/{azure_server}/logFiles?api-version=2024-08-01`, then each `nextLink` on `management.azure.com` (any other host is refused) | the probe; each `pg_log` task, once |
+  | `GET` of a file's signed link with `Range`, 64 KB | to find where a window begins in a file that starts before it: the file is halved on the times of its lines; and for a recent window, once, on the newest file's end |
+  | `GET` of a file's signed link with `Range`, 4 MB | from that offset, until a line 5 s past the window's end |
+
+  The list needs `Microsoft.DBforPostgreSQL/flexibleServers/logFiles/read` on the server; a link takes no token. A
+  link that answers 403 or 404 is listed again once. List calls are paced to 2 a second per subscription, file reads
+  to 4 a second (2 for a window that ended more than an hour ago). A window that ended within the hour fails with
+  `not_yet_published` until the newest file holds a line 5 s past its end, or a newer file exists: Azure adds to the
+  newest file every few minutes. The lines are JSON string content: `\"` is a quote, `\n` a newline, and a
+  record's `statement` and `detail_log` follow its text on the same line as `","statement": "...`.
 - `file`, a self-managed server: the directory `options.log_directory`, mounted read-only. Only `.json` files are
-  read when there are any, else `.csv`, else stderr. A file covers [the time in its name, its last write].
+  read when there are any, else `.csv`, else stderr. A file covers [the time in its name, its last write]. From
+  1.22.0 a stderr file of any prefix but RDS's that starts before the window is read from where the window begins,
+  found by halving the file on the times of its lines.
 
 **Windows:** a record belongs to the window when `start <= t < end`, by its own time, in UTC (`log_timezone` must
 be UTC). The files that can hold the window are read in order, and reading stops at the first record 5 s past the
@@ -807,7 +827,20 @@ less than 30 s ago fails with `not_yet_published` (section 5).
 minutes. While a body is open, the agent flushes the compressor at least every 15 s, first writing a blank line
 when no row was sent since the last flush (section 4), for every stream of this engine.
 
-**Records:** stderr with the prefix `%t:%r:%u@%d:[%p]:` (RDS's) or `%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:`;
+**Records:** stderr with the prefix `%t:%r:%u@%d:[%p]:` (RDS's) or `%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:`, and
+from 1.22.0 with the server's own `log_line_prefix`, read at each probe: a line is that prefix's escapes (`%t`, `%m`,
+`%n`, `%p`, `%c`, `%u`, `%d`, `%a`, `%r`, `%h`, `%e`, `%b`, with paddings and `%q`), the level and the message. A
+field the prefix lacks comes from the record's session (`%c`; its process is the part after the dot, in hex) or,
+with no session id, from the newest sign-in of its process (`%p`) with no disconnection since: `user`, `database`,
+`remote_host`, `remote_port` and `application_name`, from the session's `connection received` and `connection
+authorized` lines. Before its sign-in a session's lines have `user` and `database` `[unknown]`, as `%u` writes them;
+a refused sign-in's user is the one its FATAL text names. A session that signed in before what the window reads is
+looked for once: with a session id, the minute after the start the id says; with a process only, up to 2 hours
+before the read; at most 200 look-backs per window. With none of `%u`, `%c` and `%p` a statement, pgaudit or FATAL
+record names no one and counts as `unreadable`. Where the prefix writes `%a`, `%u` or `%d` before more of itself, a
+record written inside a client's name counts as `unreadable` and in `counted.forged`, and is never shipped: a
+connection line whose text holds a level marker (`LOG:  `, `ERROR:  `...), or any record whose text holds the
+FATAL of a refused sign-in, which ends a refused client's line. A statement's own text is never taken as forged;
 csvlog (24 columns on 13, 26 on 14-18); jsonlog. In stderr a message's `DETAIL`, `HINT` and `STATEMENT` are lines of
 their own with the same pid, and a line without the prefix continues the one before. A record is shipped when it is
 one of these, by its level and the start of its message (English messages only):
@@ -894,6 +927,10 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
   open a second row for it), `counted.audit` (lines of other classes), `counted.audit_context` (lines written from
   a function) and `counted.audit_unreadable` (lines whose first seven fields cannot be read). `log_bytes` is the size
   of the window's own lines as the server wrote them (RDS API only; `bytes` is everything downloaded).
+
+  From 1.22.0 the count row adds `look_backs` (reads of the log before the window for a session's sign-in),
+  `counted.no_user` (records shipped without a user: their session's sign-in was not found) and `counted.forged`;
+  `log_bytes` is also given for `azure_files`.
 - `pg_stat_snapshot`: the statement follows the version of the extension installed in `options.database`, not
   the server's (a major upgrade keeps the old version until `ALTER EXTENSION pg_stat_statements UPDATE`): before
   1.9 (PostgreSQL 13) `toplevel`, `dealloc` and `stats_reset` are null, and before 1.8 `total_exec_time` is read
@@ -923,14 +960,16 @@ function, no reset of `pg_stat_statements`, and its text only in `catalog_statem
 
 **The probe** reports `caps.postgres` in the check-in: `platform` (`rds`, `aurora`, `self_managed`, and from 1.21.0
 `azure` for Azure Database for PostgreSQL flexible server, where the server defines Azure's own setting
-`azure.extensions`), `logSource`,
+`azure.extensions`), `logSource` (`rds_api`, `file`, from 1.22.0 `azure_files`),
 `logFormat`, `serverVersionNum`, `statStatements`, `instances` (`id`, `role`, `oldestLogMicros`, `logFileMinutes`)
 and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `role`, `logging`, `lc_messages`, `log_timezone`,
-`logging_collector` (self-managed, not on Azure), `pg_stat_statements` (a warning before extension 1.8, and from
-1.21.0 when `pg_stat_statements.track` is `none`), `log_error_verbosity` (where pgaudit is loaded: a warning at
-`terse`), `instances` (each replica signed in to once), `replicas`, `log_files`, and from 1.21.0 `log_line_prefix`
-(the prefix, and which of `%u`, `%c` and `%p` it lacks; a warning when it is not a prefix the agent reads stderr
-lines of). A failed check does not fail the probe. `earliestEventMicros` and
+`logging_collector` (self-managed, not on Azure; from 1.22.0 only when no log file is found), `pg_stat_statements`
+(a warning before extension 1.8, and from 1.21.0 when `pg_stat_statements.track` is `none`), `log_error_verbosity`
+(where pgaudit is loaded: a warning at `terse`), `instances` (each replica signed in to once), `replicas`,
+`log_files` (for `azure_files`, the files listed and the oldest), and from 1.21.0 `log_line_prefix` (the prefix, and
+which of `%u`, `%c` and `%p` it lacks; in 1.21.0 a warning when it is not a prefix the agent reads stderr lines of;
+from 1.22.0 `ok` when a line's user can be found, a warning when none of the three is there or `%a` comes before
+more of the prefix, and a failure with no time). A failed check does not fail the probe. `earliestEventMicros` and
 `earliestSessionMicros` are the start of the oldest log file. A rejected password (SQLSTATE 28P01) fails the probe
 or the task, and the agent then does not sign in to that source again, for a probe or a task, until it restarts.
 

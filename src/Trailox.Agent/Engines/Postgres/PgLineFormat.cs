@@ -66,20 +66,37 @@ public sealed class PgLineFormat
 
     private static readonly Regex LevelMarker = new($"(?:{Levels}):  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
+    // The server's own text that ends a refused client's line: a sign-in that failed.
+    private static readonly Regex RefusedTail = new(
+        @"FATAL:  (?:password authentication failed for user|no pg_hba\.conf entry for|pg_hba\.conf rejects connection|role ""|database ""|"
+        + @"(?:Ident|Peer|PAM|LDAP|RADIUS|GSSAPI|SSPI|BSD|certificate) authentication failed for user)",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+
     /// <summary>
     /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put the rest of a
-    ///    prefix, a level and any message into its application or user name; read from the left, its line then reads as
-    ///    that message, of that user. The real rest of the prefix and the real level follow inside the text, so where the
-    ///    prefix writes a client's name before its end, a record whose first line holds a level marker is taken as
-    ///    forged: counted, never read. A statement that holds such text itself is counted with them, which shows in the
-    ///    counts; a forged one read would not.
+    ///    prefix, a level and a message into its application name, or a refused client into the user or database name it
+    ///    asked for; read from the left, the line then reads as that message, of the user it names. Where the prefix
+    ///    writes such a name before its end, a record is taken as forged, counted and never read, when
+    ///    <list type="bullet">
+    ///    <item>it is a connection line whose text holds a level marker: that text is the server's, with only the names
+    ///      a client chose in it;</item>
+    ///    <item>its text holds the FATAL of a refused sign-in: the real end of a refused client's line, which follows
+    ///      whatever it wrote inside its name.</item>
+    ///    </list>
+    ///    Any other text is a client's own (a statement's, a message's), so a level marker in it proves nothing: taking
+    ///    it as forged would let anyone hide a statement by writing <c>ERROR:  </c> in it.
     /// </summary>
     /// <remarks>
-    /// ⚠ A NEWLINE IN A NAME IS NOT CAUGHT. A refused client's user name can hold one, and a real stderr file then has a
-    ///   line of the client's that starts with any prefix at all: nothing in it tells it apart. csvlog and jsonlog quote
-    ///   the names, and Azure's download writes a newline as <c>\n</c>.
+    /// ⚠ NOT CAUGHT: a signed-in client's line forged in its application name, with a prefix that writes %a before
+    ///   more of itself (the probe warns of such a prefix), and a newline in a refused client's user name, which starts
+    ///   a line of its own with any prefix at all in a real stderr file. csvlog and jsonlog quote the names, and Azure's
+    ///   download writes a newline as <c>\n</c>.
     /// </remarks>
-    public bool Forged(PgLogRecord r) => ClientTextBeforeEnd && LevelMarker.IsMatch(r.Message);
+    public bool Forged(PgLogRecord r) => ClientTextBeforeEnd
+        && (r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
+                or PgRecordKind.Disconnection
+            ? LevelMarker.IsMatch(r.Message)
+            : RefusedTail.IsMatch(r.Message));
 
     public static PgLineFormat Of(string prefix)
     {

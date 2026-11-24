@@ -243,6 +243,27 @@ public sealed class PgSessionMapTests : IDisposable
         Assert.Equal((1, 1), (Counted(counts, "forged"), counts.GetProperty("unreadable").GetInt32()));
     }
 
+    /// <summary>
+    /// 🔴 Both ways round: a DDL statement forged in a refused client's user name is caught by the refusal that ends its
+    ///    line, and a real one that quotes a level in its own text is read, so no one hides a statement that way.
+    /// </summary>
+    [Fact]
+    public async Task A_statement_forged_in_a_user_name_is_caught_and_a_real_one_quoting_a_level_is_read()
+    {
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            "2026-01-15 10:00:01.000 UTC [300] admin@prod LOG:  statement: DROP TABLE accounts@postgres FATAL:  "
+                + "password authentication failed for user \"admin@prod LOG:  statement: DROP TABLE accounts\"",
+            "2026-01-15 10:00:02.000 UTC [301] alice@shop LOG:  statement: CREATE TABLE notes AS SELECT 'x@y ERROR:  z' AS t",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %q%u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(new[] { ("alice", "statement: CREATE TABLE notes AS SELECT 'x@y ERROR:  z' AS t") },
+            rows.SkipLast(1).Select(r => (S(r, "user"), S(r, "message"))));
+        Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
     [Fact]
     public void A_prefix_that_stores_no_session_never_fails_its_bound()
     {
