@@ -25,6 +25,7 @@ public class AzureLogFilesTests
     private sealed class FakeAzure : IAzureLogFiles
     {
         private readonly Dictionary<string, byte[]> _files = new();
+        private readonly Dictionary<string, long> _modified = new();
         private int _version = 1;
 
         public int Lists { get; private set; }
@@ -32,12 +33,16 @@ public class AzureLogFilesTests
         public long BytesRead { get; private set; }
         public bool ExpireNextRead { get; set; }
 
-        public void Add(string name, byte[] content) => _files[name] = content;
+        public void Add(string name, byte[] content, string? modified = null)
+        {
+            _files[name] = content;
+            _modified[name] = Micros(modified ?? "2026-01-15 11:00:00");
+        }
 
         public Task<IReadOnlyList<AzureLogFile>> ListAsync(CancellationToken ct)
         {
             Lists++;
-            IReadOnlyList<AzureLogFile> list = _files.Select(f => new AzureLogFile(f.Key, Micros("2026-01-15 11:00:00"),
+            IReadOnlyList<AzureLogFile> list = _files.Select(f => new AzureLogFile(f.Key, _modified[f.Key],
                 (f.Value.Length + 1023) / 1024 * 1024, $"https://logs.example/{f.Key}?v={_version}")).ToList();
             return Task.FromResult(list);
         }
@@ -190,6 +195,25 @@ public class AzureLogFilesTests
         var reader = new AzureLogReader(azure, 1000);
 
         Assert.Equal(written, await reader.WrittenPastAsync(Micros("2026-01-15 11:00:05"), PgLineFormat.Of("%t-%c-").TimeOf, CancellationToken.None));
+    }
+
+    /// <summary>Each file holds its own hour: one whose hour ended before the window is not read, though Azure still writes it.</summary>
+    [Fact]
+    public async Task A_file_whose_hour_ended_before_the_window_is_not_read()
+    {
+        var azure = new FakeAzure();
+        azure.Add(FileName, File.ReadAllBytes(PgFixtures.AzureDownload), modified: "2026-01-15 11:24:00");   // written again after its hour
+        azure.Add("postgresql_2026_01_15_11_00_00.log", Encoding.UTF8.GetBytes("2026-01-15 11:00:30 UTC-6968cad6.500-LOG:  checkpoint starting: time\n"),
+            modified: "2026-01-15 11:24:00");
+        var reader = new AzureLogReader(azure, 1000);
+        var format = PgLineFormat.Of("%t-%c-");
+
+        await foreach (var _ in reader.LinesAsync(Micros("2026-01-15 11:00:20"), Micros("2026-01-15 11:00:40"), format.TimeOf, CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(1, reader.Stats.Files);
+        Assert.True(azure.BytesRead < 200);
     }
 
     [Fact]

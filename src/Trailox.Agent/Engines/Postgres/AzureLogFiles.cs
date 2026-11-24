@@ -272,6 +272,8 @@ public sealed class AzureLogReader : IPgLogLines
     /// </summary>
     public const int SizeUnit = 1000;
 
+    private const long HourMicros = 3_600_000_000L;
+
     private readonly IAzureLogFiles _api;
     private readonly TimeSpan _interval;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
@@ -325,7 +327,10 @@ public sealed class AzureLogReader : IPgLogLines
     {
         var margin = PgWindowReader.StopMarginMicros;
         var files = await FilesAsync(ct);
-        foreach (var file in files.Where(f => (f.StartMicros ?? long.MinValue) <= toMicros + margin && f.LastModifiedMicros >= fromMicros - margin))
+        // A file holds its own hour's lines, in order (measured over six hours of files): one whose hour ended before
+        // the stretch has none of it, though Azure writes it again for some time after.
+        foreach (var file in files.Where(f => (f.StartMicros ?? long.MinValue) <= toMicros + margin && f.LastModifiedMicros >= fromMicros - margin
+                     && !(f.StartMicros is { } start && start + HourMicros <= fromMicros - margin)))
         {
             Stats.Read(file.Name);
             var offset = (file.StartMicros ?? long.MinValue) < fromMicros ? await OffsetOfAsync(file, fromMicros - margin, timeOf, ct) : 0;
