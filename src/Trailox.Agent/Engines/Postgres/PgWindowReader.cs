@@ -24,6 +24,7 @@ public sealed class PgWindowReader
     public const long StopMarginMicros = 5_000_000;
     public const int MaxTextChars = 256 * 1024;
     private const int HeartbeatLines = 5000;
+    private const int FlushLines = 1000;
     private const int TailBytes = 1 << 20;
 
     private static readonly JsonSerializerOptions CountsJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -60,6 +61,13 @@ public sealed class PgWindowReader
     private int _filesGone;
     private string? _missing;
 
+    private readonly PgLineFormat? _prefix;
+    private readonly PgSessionMap? _sessions;
+    private readonly IPgLogLines? _lines;
+    private readonly bool _azureFile;
+    private long? _readFrom;
+    private int _lookBacks;
+
     /// <param name="shipText">
     /// The source's <c>storeRawQueryText</c>: when false, a statement record ships its command and shape, never its text.
     /// </param>
@@ -73,9 +81,20 @@ public sealed class PgWindowReader
     /// <c>log_rotation_age</c>, from the probe: a new file at least this often. 0 (unknown, or no rotation by time): a
     /// directory window is never said to be missing.
     /// </param>
+    /// <param name="prefix">The server's <c>log_line_prefix</c>, from the probe; null for RDS's.</param>
+    /// <param name="sessions">
+    /// The source's sessions, when the prefix names no user: each record takes its user from its session's sign-in line.
+    /// </param>
+    /// <param name="lines">Where a look-back reads the log before the window, for a session that signed in before it.</param>
+    /// <param name="azureFile">The lines are Azure's server log download (<see cref="PgAzureLine"/>).</param>
     public PgWindowReader(string instance, long startMicros, long endMicros, bool shipText, RowSink sink, RowWriter? rows = null,
-        bool english = true, int rotationMinutes = 0)
+        bool english = true, int rotationMinutes = 0, PgLineFormat? prefix = null, PgSessionMap? sessions = null,
+        IPgLogLines? lines = null, bool azureFile = false)
     {
+        _prefix = prefix;
+        _sessions = sessions;
+        _lines = lines;
+        _azureFile = azureFile;
         _instance = instance;
         _start = startMicros;
         _end = endMicros;
@@ -122,6 +141,22 @@ public sealed class PgWindowReader
         {
             _outOfWindow++;
             return;
+        }
+        if (r.Forged)
+        {
+            _unreadable++;
+            _counted["forged"] = _counted.GetValueOrDefault("forged") + 1;
+            return;
+        }
+        if (r.NoUser)
+        {
+            // The prefix names no user, no session and no process: the record cannot be told whose it is.
+            if (_prefix is { KnowsUser: false })
+            {
+                _unreadable++;
+                return;
+            }
+            _counted["no_user"] = _counted.GetValueOrDefault("no_user") + 1;
         }
         var kind = r.Kind;
         _audit.Advance(r.TsMicros);
@@ -178,35 +213,50 @@ public sealed class PgWindowReader
             Missing(gap);
         }
         var done = new List<PgLogRecord>();
-        foreach (var file in files)
+        _sessions?.BeginRead();
+        try
         {
-            _files++;
-            var parser = PgLogParser.For(file.Format, file.StartMicros);
-            // A file that starts before the window holds it at its end: its last megabyte usually covers that.
-            var tail = (file.StartMicros ?? long.MinValue) < _start ? directory.Tail(file, TailBytes, _start - StopMarginMicros) : null;
-            if (tail != null)
+            foreach (var file in files)
             {
-                foreach (var line in tail)
+                _files++;
+                var parser = PgLogParser.For(file.Format, file.StartMicros, _prefix, _azureFile);
+                var before = (file.StartMicros ?? long.MinValue) < _start;
+                if (before && parser is PrefixLogParser)
                 {
-                    _bytes += line.Length + 1;
-                    parser.Feed(line, done);
-                    Drain(done);
-                    if (Past)
+                    // A file of any prefix that starts before the window (a daily file, a file named without a time): read
+                    // from where the window's records begin, found on the times of its lines.
+                    var offset = directory.OffsetOf(file, _start - StopMarginMicros, _prefix!.TimeOf);
+                    await ReadLinesAsync(directory.LinesFromAsync(file, offset, ct), parser, done, ct);
+                }
+                // A file that starts before the window holds it at its end: its last megabyte usually covers that.
+                else if ((before ? directory.Tail(file, TailBytes, _start - StopMarginMicros) : null) is { } tail)
+                {
+                    foreach (var line in tail)
                     {
-                        break;
+                        _bytes += line.Length + 1;
+                        parser.Feed(line, done);
+                        await DrainAsync(done, ct);
+                        if (Past)
+                        {
+                            break;
+                        }
                     }
                 }
+                else
+                {
+                    await ReadLinesAsync(directory.LinesFromAsync(file, 0, ct), parser, done, ct);
+                }
+                await CloseAsync(parser, done, ct);
+                await FlushAsync(ct);
+                if (Past)
+                {
+                    break;
+                }
             }
-            else
-            {
-                await ReadWholeAsync(directory, file, parser, done, ct);
-            }
-            Close(parser, done);
-            await FlushAsync(ct);
-            if (Past)
-            {
-                break;
-            }
+        }
+        finally
+        {
+            _sessions?.EndRead();
         }
     }
 
@@ -276,27 +326,94 @@ public sealed class PgWindowReader
     /// <summary>How far into a file the startup lines are: "starting PostgreSQL", "listening on" (one per address), then this.</summary>
     private const int StartupRecords = 20;
 
-    private async Task ReadWholeAsync(PgLogDirectory directory, PgLogFile file, PgLogParser parser, List<PgLogRecord> done,
-        CancellationToken ct)
+    /// <summary>Feeds a file's lines to its parser until a record past the window; flushes the rows as they build up.</summary>
+    private async Task ReadLinesAsync(IAsyncEnumerable<string> lines, PgLogParser parser, List<PgLogRecord> done, CancellationToken ct)
     {
-        await using var stream = directory.Open(file);
-        using var lines = new LogLines(stream, gzip: false);
         var sinceBeat = 0;
-        while (!Past && await lines.FillAsync(ct))
+        await foreach (var line in lines.WithCancellation(ct))
         {
-            while (!Past && lines.TryReadLine(out var span))
+            _bytes += Encoding.UTF8.GetByteCount(line) + 1;
+            parser.Feed(line, done);
+            await DrainAsync(done, ct);
+            if (Past)
             {
-                _bytes += span.Length + 1;
-                parser.Feed(Encoding.UTF8.GetString(span), done);
-                Drain(done);
-                if (++sinceBeat == HeartbeatLines)
+                break;
+            }
+            if (++sinceBeat % FlushLines == 0)
+            {
+                await FlushAsync(ct);
+            }
+            if (sinceBeat == HeartbeatLines)
+            {
+                sinceBeat = 0;
+                TaskHeartbeat.Beat();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the window from Azure's server log download: the part of each hourly file that holds it, its lines parsed by
+    /// the server's prefix, each record's user from its session (<see cref="PgSessionMap"/>).
+    /// </summary>
+    public async Task ReadAsync(AzureLogReader azure, CancellationToken ct)
+    {
+        var prefix = _prefix ?? PgLineFormat.Of(PgSource.AzureDefaultPrefix);
+        var oldest = (await azure.FilesAsync(ct)).Select(f => f.StartMicros).OfType<long>().DefaultIfEmpty(long.MaxValue).Min();
+        if (oldest != long.MaxValue && oldest > _start)
+        {
+            // Azure keeps the files for logfiles.retention_days: the log before the oldest is gone.
+            _firstLogMicros = oldest;
+        }
+        var done = new List<PgLogRecord>();
+        PgLogParser? parser = null;
+        string? file = null;
+        var lines = 0L;
+        var inWindow = false;
+        _sessions?.BeginRead();
+        try
+        {
+            await foreach (var line in azure.LinesAsync(_start, _end, prefix.TimeOf, ct))
+            {
+                // A continuation line belongs where the line it continues does.
+                if (prefix.TimeOf(line.Text) is { } at)
                 {
-                    sinceBeat = 0;
-                    TaskHeartbeat.Beat();
+                    inWindow = at >= _start && at < _end;
+                }
+                if (inWindow)
+                {
+                    _logBytes += Encoding.UTF8.GetByteCount(line.Text) + 1;
+                }
+                if (line.File != file)
+                {
+                    if (parser != null)
+                    {
+                        await CloseAsync(parser, done, ct);
+                    }
+                    parser = PgLogParser.For(PgLogFormat.Stderr, PgLogFileNames.StartMicros(line.File), prefix, azureFile: true);
+                    file = line.File;
+                }
+                parser!.Feed(line.Text, done);
+                await DrainAsync(done, ct);
+                if (Past)
+                {
+                    break;
+                }
+                if (++lines % FlushLines == 0)
+                {
+                    await FlushAsync(ct);
                 }
             }
-            await FlushAsync(ct);
+            if (parser != null)
+            {
+                await CloseAsync(parser, done, ct);
+            }
         }
+        finally
+        {
+            _sessions?.EndRead();
+        }
+        _files += azure.Stats.Files;
+        _bytes += azure.Stats.Bytes;
     }
 
     /// <summary>Reads the window from an RDS instance through the RDS API (stderr only).</summary>
@@ -371,6 +488,7 @@ public sealed class PgWindowReader
             ["files"] = _files,
             ["bytes"] = _bytes,
             ["files_gone"] = _filesGone,
+            ["look_backs"] = _lookBacks,
             ["first_log"] = _firstLogMicros is { } f ? Iso(f) : null,
             ["missing"] = _missing,
         };
@@ -414,6 +532,85 @@ public sealed class PgWindowReader
         parser.Finish(done);
         Drain(done);
         _malformed += parser.Malformed;
+    }
+
+    private async ValueTask CloseAsync(PgLogParser parser, List<PgLogRecord> done, CancellationToken ct)
+    {
+        parser.Finish(done);
+        await DrainAsync(done, ct);
+        _malformed += parser.Malformed;
+    }
+
+    /// <summary>The look-backs one window makes at most; a session not found by then has no user in this window.</summary>
+    public const int MaxLookBacks = 200;
+
+    /// <summary>
+    /// <see cref="Drain"/>, with each record first given what its prefix lacks from its session (<see cref="PgSessionMap"/>).
+    /// A record of a session that signed in before the read waits for a look-back: one record at a time, so the rows keep
+    /// the log's order.
+    /// </summary>
+    private async ValueTask DrainAsync(List<PgLogRecord> done, CancellationToken ct)
+    {
+        if (_sessions == null)
+        {
+            Drain(done);
+            return;
+        }
+        foreach (var r in done)
+        {
+            if (_readFrom == null && r.TsMicros != long.MinValue && r.UnreadLines == 0)
+            {
+                _readFrom = r.TsMicros;
+            }
+            var outcome = _sessions.Take(r);
+            if (outcome == PgSessionMap.Outcome.SessionUnknown && _lines != null && _lookBacks < MaxLookBacks
+                && _sessions.LookBackFor(r, _readFrom ?? r.TsMicros) is { } range)
+            {
+                _lookBacks++;
+                await LookBackAsync(range, ct);
+                outcome = _sessions.Retake(r);
+            }
+            r.NoUser = outcome != PgSessionMap.Outcome.Complete;
+            Add(r);
+        }
+        done.Clear();
+    }
+
+    /// <summary>Reads the log of <paramref name="range"/> into the sessions only: no record of it is the window's.</summary>
+    private async Task LookBackAsync((long From, long To) range, CancellationToken ct)
+    {
+        var saved = _sessions!.BeginLookBack();
+        try
+        {
+            var done = new List<PgLogRecord>();
+            PgLogParser? parser = null;
+            string? file = null;
+            await foreach (var line in _lines!.LinesAsync(range.From, range.To, _prefix!.TimeOf, ct))
+            {
+                if (line.File != file)
+                {
+                    parser?.Finish(done);
+                    parser = PgLogParser.For(PgLogFormat.Stderr, PgLogFileNames.StartMicros(line.File), _prefix, _azureFile);
+                    file = line.File;
+                }
+                parser!.Feed(line.Text, done);
+                foreach (var r in done)
+                {
+                    _sessions.Take(r);
+                }
+                done.Clear();
+            }
+            parser?.Finish(done);
+            foreach (var r in done)
+            {
+                _sessions.Take(r);
+            }
+            TaskHeartbeat.Beat();
+        }
+        finally
+        {
+            _sessions.EndLookBack(saved);
+        }
     }
 
     private void Drain(List<PgLogRecord> done)

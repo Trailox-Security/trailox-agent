@@ -22,13 +22,204 @@ public abstract class PgLogParser
     public abstract void Finish(List<PgLogRecord> done);
 
     /// <param name="fileStartMicros">The time in the file's name, for stderr lines that no record follows.</param>
-    public static PgLogParser For(PgLogFormat format, long? fileStartMicros = null) => format switch
+    /// <param name="prefix">
+    /// The server's <c>log_line_prefix</c>, from the probe: stderr of any prefix but RDS's is read by
+    /// <see cref="PrefixLogParser"/>. Null until a probe read it: RDS's.
+    /// </param>
+    /// <param name="azureFile">An Azure server log download (<see cref="PgAzureLine"/>).</param>
+    public static PgLogParser For(PgLogFormat format, long? fileStartMicros = null, PgLineFormat? prefix = null, bool azureFile = false) => format switch
     {
+        PgLogFormat.Stderr when azureFile || (prefix != null && !StderrLogParser.Reads(prefix.Prefix)) =>
+            new PrefixLogParser(prefix ?? PgLineFormat.Of(StderrLogParser.RdsPrefix), fileStartMicros, azureFile),
         PgLogFormat.Stderr => new StderrLogParser(fileStartMicros),
         PgLogFormat.Csv => new CsvLogParser(),
         PgLogFormat.Json => new JsonLogParser(),
         _ => throw new ArgumentOutOfRangeException(nameof(format)),
     };
+}
+
+/// <summary>
+/// stderr with any <c>log_line_prefix</c> (<see cref="PgLineFormat"/>), and Azure's server log download, whose lines
+/// carry a record's STATEMENT and DETAIL as fields of the same line (<see cref="PgAzureLine"/>). A record has what its
+/// prefix holds; what it lacks (its user, with Azure's <c>%t-%c-</c>) the window reader fills from its session's
+/// sign-in line (<see cref="PgSessionMap"/>).
+/// </summary>
+/// <remarks>
+/// A message's DETAIL, HINT and STATEMENT lines follow it, with the same process when the prefix names one; with a
+/// prefix that names none, the line that follows. Lines it cannot read go to the window reader as
+/// <see cref="PgLogRecord.UnreadLines"/>, as <see cref="StderrLogParser"/>'s do.
+/// </remarks>
+public sealed class PrefixLogParser : PgLogParser
+{
+    private enum Part
+    {
+        Message,
+        Detail,
+        Statement,
+        Ignored,
+    }
+
+    private readonly PgLineFormat _format;
+    private readonly long? _fileStartMicros;
+    private readonly bool _azureFile;
+    private PgLogRecord? _current;
+    private Part _part;
+    private bool _started;
+    private int _preamble;
+
+    public PrefixLogParser(PgLineFormat format, long? fileStartMicros = null, bool azureFile = false)
+    {
+        _format = format;
+        _fileStartMicros = fileStartMicros;
+        _azureFile = azureFile;
+    }
+
+    public override void Feed(string line, List<PgLogRecord> done)
+    {
+        // PostgreSQL on Windows ends its lines with CR LF.
+        if (line.EndsWith('\r'))
+        {
+            line = line[..^1];
+        }
+        List<PgAzureLine.Field>? fields = null;
+        if (_azureFile)
+        {
+            (line, fields) = PgAzureLine.Split(line);
+        }
+        if (_format.Match(line) is not { } f)
+        {
+            Continue(line);
+            return;
+        }
+        var ts = f.TsMicros;
+        if (!_started)
+        {
+            _started = true;
+            EndPreamble(ts, done);
+        }
+        if (f.Level is "DETAIL" or "HINT" or "CONTEXT" or "STATEMENT" or "QUERY" or "LOCATION" && _current != null
+            && (!(_format.HasPid || _format.HasSession) || (_current.Pid == f.Pid && _current.SessionId == f.SessionId)))
+        {
+            Attach(f.Level, f.Text);
+            return;
+        }
+        Flush(done);
+        var record = new PgLogRecord
+        {
+            // A time that cannot be read (a zone that is not UTC, a prefix with no time) is counted as unreadable.
+            TsMicros = ts ?? long.MinValue,
+            Pid = f.Pid,
+            Level = f.Level,
+            SqlState = f.SqlState,
+            SessionId = f.SessionId,
+            User = f.User ?? "",
+            Database = f.Database ?? "",
+            ApplicationName = _format.HasApplication ? f.Application ?? "" : null,
+            BackendType = f.BackendType,
+            Message = f.Text,
+            Format = PgLogFormat.Stderr,
+        };
+        if (f.Remote is { } remote)
+        {
+            record.RemoteHost = remote.Host;
+            record.RemotePort = remote.Port;
+        }
+        record.Forged = _format.Forged(record);
+        _current = record;
+        _part = Part.Message;
+        foreach (var field in fields ?? new List<PgAzureLine.Field>())
+        {
+            Attach(field.Name switch
+            {
+                "statement" => "STATEMENT",
+                "detail_log" or "detail" => "DETAIL",
+                "context" => "CONTEXT",
+                _ => "",
+            }, field.Value);
+        }
+    }
+
+    public override void Finish(List<PgLogRecord> done)
+    {
+        Flush(done);
+        if (!_started)
+        {
+            EndPreamble(_fileStartMicros, done);
+        }
+    }
+
+    private void EndPreamble(long? ts, List<PgLogRecord> done)
+    {
+        if (_preamble == 0)
+        {
+            return;
+        }
+        if (ts is { } at)
+        {
+            done.Add(new PgLogRecord { TsMicros = at, UnreadLines = _preamble, Preamble = true, Format = PgLogFormat.Stderr });
+        }
+        else
+        {
+            Malformed += _preamble;
+        }
+        _preamble = 0;
+    }
+
+    private void Flush(List<PgLogRecord> done)
+    {
+        if (_current != null)
+        {
+            done.Add(_current);
+            _current = null;
+        }
+    }
+
+    private void Attach(string level, string text)
+    {
+        switch (level)
+        {
+            case "DETAIL":
+                _current!.Detail = _current.Detail.Length == 0 ? text : _current.Detail + "\n" + text;
+                _part = Part.Detail;
+                break;
+            case "STATEMENT":
+                _current!.Statement = text;
+                _part = Part.Statement;
+                break;
+            case "CONTEXT":
+                _current!.HasContext = true;
+                _part = Part.Ignored;
+                break;
+            default:
+                _part = Part.Ignored;
+                break;
+        }
+    }
+
+    /// <summary>A line without the prefix continues the part before it; before the file's first record it is preamble.</summary>
+    private void Continue(string line)
+    {
+        if (_current == null)
+        {
+            if (!_started && line.Length > 0)
+            {
+                _preamble++;
+            }
+            return;
+        }
+        switch (_part)
+        {
+            case Part.Message:
+                _current.Message += "\n" + line;
+                break;
+            case Part.Detail:
+                _current.Detail += "\n" + line;
+                break;
+            case Part.Statement:
+                _current.Statement += "\n" + line;
+                break;
+        }
+    }
 }
 
 /// <summary>

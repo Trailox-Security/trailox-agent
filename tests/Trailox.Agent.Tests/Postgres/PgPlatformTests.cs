@@ -69,11 +69,26 @@ public class PgPlatformTests
             ["log_timezone"] = "UTC", ["logging_collector"] = "off",
         };
 
-        var azure = PgProbeChecks.Settings(settings, "file", PgPlatform.Azure).ToList();
+        Assert.All(PgProbeChecks.Settings(settings, "file", PgPlatform.Azure), c => Assert.Equal("ok", c.Status));
+        Assert.Null(PgProbeChecks.LoggingCollector(settings, "file", PgPlatform.Azure, filesFound: false));
+        Assert.Equal("fail", PgProbeChecks.LoggingCollector(settings, "file", PgPlatform.SelfManaged, filesFound: false)!.Status);
+    }
 
-        Assert.DoesNotContain(azure, c => c.Name == "logging_collector");
-        Assert.All(azure, c => Assert.Equal("ok", c.Status));
-        Assert.Contains(PgProbeChecks.Settings(settings, "file", PgPlatform.SelfManaged), c => c.Name == "logging_collector" && c.Status == "fail");
+    /// <summary>
+    /// With the logging collector off, a service manager or a package's start script can save the server's stderr to files: the
+    /// agent reads them where they are, and asks for the logging collector only when it finds none.
+    /// </summary>
+    [Theory]
+    [InlineData("off", "file", true, "ok")]
+    [InlineData("off", "file", false, "fail")]
+    [InlineData("on", "file", false, null)]
+    [InlineData("off", "rds_api", false, null)]
+    public void The_logging_collector_is_asked_for_only_when_no_log_file_is_found(string loggingCollector, string source, bool found, string? status)
+    {
+        var check = PgProbeChecks.LoggingCollector(new Dictionary<string, string> { ["logging_collector"] = loggingCollector }, source,
+            PgPlatform.SelfManaged, found);
+
+        Assert.Equal(status, check?.Status);
     }
 
     [Fact]
@@ -90,10 +105,12 @@ public class PgPlatformTests
     [Theory]
     [InlineData("%t:%r:%u@%d:[%p]:", "stderr", "ok", " (it has no %c)")]
     [InlineData("%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:", "stderr", "ok", "")]
-    [InlineData("%t-%c-", "stderr", "warn", " (it has no %u, %p)")]
-    [InlineData("%t-%c-", "", "warn", " (it has no %u, %p)")]
-    [InlineData("%m [%p] ", "stderr", "warn", " (it has no %u, %c)")]
-    [InlineData("%m [%p] %q%u@%d ", "stderr", "warn", " (it has no %c)")]
+    [InlineData("%t-%c-", "stderr", "ok", " (it has no %u, %p)")]
+    [InlineData("%t-%c-", "", "ok", " (it has no %u, %p)")]
+    [InlineData("%m [%p] ", "stderr", "ok", " (it has no %u, %c)")]
+    [InlineData("%m [%p] %q%u@%d ", "stderr", "ok", " (it has no %c)")]
+    [InlineData("%m %d ", "stderr", "warn", " (it has no %u, %c, %p)")]
+    [InlineData("[%p] %u ", "stderr", "fail", " (it has no %c)")]
     [InlineData("", "jsonlog", "ok", " (it has no %u, %c, %p)")]
     [InlineData("%t-%c-", "csvlog", "ok", " (it has no %u, %p)")]
     public void The_line_prefix_is_reported_with_the_fields_it_lacks(string prefix, string format, string status, string lacks)
@@ -103,6 +120,34 @@ public class PgPlatformTests
         Assert.Equal("log_line_prefix", check.Name);
         Assert.Equal(status, check.Status);
         Assert.StartsWith($"log_line_prefix is '{prefix}'{lacks}: ", check.Message);
+    }
+
+    /// <summary>
+    /// 🔴 A name a client chooses, written before the rest of the prefix: with %a any signed-in client can make its lines
+    ///    read as another's, so the probe warns; a refused client's user or database name is noted.
+    /// </summary>
+    [Theory]
+    [InlineData("%m [%p] %a %u@%d ", "warn", "the application name, which any client chooses")]
+    [InlineData("%t-%c-%a-", "warn", "the application name, which any client chooses")]
+    [InlineData("%m [%p] %q%u@%d ", "ok", "A refused client's user or database name is written into the prefix")]
+    [InlineData("%m [%p] %q%u@%d %a ", "warn", "the application name, which any client chooses")]   // last before the level is no safer
+    [InlineData("%m %u ", "ok", "A refused client's user or database name is written into the prefix")]
+    [InlineData("%t-%c-", "ok", "")]
+    [InlineData("%m [%p] ", "ok", "")]
+    public void A_client_chosen_name_before_the_rest_of_the_prefix_is_said(string prefix, string status, string said)
+    {
+        var check = PgProbeChecks.LinePrefix(prefix, "stderr");
+
+        Assert.Equal(status, check.Status);
+        if (said.Length > 0)
+        {
+            Assert.Contains(said, check.Message);
+        }
+        else
+        {
+            Assert.DoesNotContain("chooses", check.Message);
+            Assert.DoesNotContain("refused client", check.Message);
+        }
     }
 
     [Fact]

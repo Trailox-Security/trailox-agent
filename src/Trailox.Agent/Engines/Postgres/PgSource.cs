@@ -7,7 +7,8 @@ namespace Trailox.Agent.Engines.Postgres;
 
 /// <summary>
 /// One PostgreSQL source: its servers (the primary and, on RDS, the replicas listed in agent.yaml), the server log of
-/// each, read through the RDS API or from a mounted directory, and the SQL reads of <see cref="PgCatalog"/>.
+/// each, read through the RDS API, Azure's server log download or from a mounted directory, and the SQL reads of
+/// <see cref="PgCatalog"/>.
 /// </summary>
 public sealed class PgSource : IEngineSource
 {
@@ -23,6 +24,9 @@ public sealed class PgSource : IEngineSource
     private readonly EndpointConfig _endpoint;
     private readonly PgCatalog _catalog;
     private readonly IRdsLogs? _rds;
+
+    /// <summary>The server's log files on Azure (<c>log_source: azure_files</c>); null for any other source.</summary>
+    private readonly IAzureLogFiles? _azure;
 
     /// <summary>The Region's RDS API calls, shared with this agent's other sources there; null without the RDS API.</summary>
     private readonly RdsCallBudget? _budget;
@@ -45,16 +49,46 @@ public sealed class PgSource : IEngineSource
     /// </summary>
     private int _rotationMinutes;
 
-    public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null)
+    /// <summary>
+    /// The server says its logging collector is off: its stderr goes to files another program writes and rotates, so
+    /// <c>log_rotation_age</c> says nothing of them. A window of such files is never said to be missing.
+    /// </summary>
+    private bool _collectorOff;
+
+    /// <summary>
+    /// The server's <c>log_line_prefix</c>, from the newest probe; null until one reads it (the stderr parser then reads
+    /// RDS's). The parser of a log file follows it.
+    /// </summary>
+    private PgLineFormat? _prefix;
+
+    /// <summary>
+    /// The sessions of the server's log, for a prefix that names no user (<see cref="PgSessionMap"/>): kept from window to
+    /// window, and started again when the prefix changes.
+    /// </summary>
+    private PgSessionMap? _sessions;
+
+    /// <summary>Azure's default <c>log_line_prefix</c>, read until a probe reads the server's own.</summary>
+    public const string AzureDefaultPrefix = "%t-%c-";
+
+    public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null, IAzureLogFiles? azure = null,
+        HttpClient? http = null)
     {
         _endpoint = endpoint;
         _catalog = new PgCatalog(endpoint);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
-        if (endpoint.Options.GetValueOrDefault("log_source") == PostgresEngine.LogSourceRdsApi)
+        var source = endpoint.Options.GetValueOrDefault("log_source");
+        if (source == PostgresEngine.LogSourceRdsApi)
         {
             _instances = PostgresEngine.Instances(endpoint, out _);
             _rds = rds ?? new AwsRdsLogs(endpoint.Options["rds_region"]);
             _budget = RdsCallBudget.For(endpoint.Options["rds_region"]);
+        }
+        else if (source == PostgresEngine.LogSourceAzureFiles)
+        {
+            var server = endpoint.Options["azure_server"];
+            _instances = new[] { new PgInstance(server, endpoint.Host, "primary") };
+            _azure = azure ?? new ArmAzureLogFiles(http ?? new HttpClient(), endpoint.Options["azure_subscription"],
+                endpoint.Options["azure_resource_group"], server);
         }
         else
         {
@@ -66,7 +100,10 @@ public sealed class PgSource : IEngineSource
     public async Task<EndpointCaps> ProbeAsync(CancellationToken ct)
     {
         var checks = new List<PostgresCheck>();
-        var caps = new PostgresCaps { LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : PostgresEngine.LogSourceFile };
+        var caps = new PostgresCaps
+        {
+            LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : _azure != null ? PostgresEngine.LogSourceAzureFiles : PostgresEngine.LogSourceFile,
+        };
         string version;
         Dictionary<string, string> settings;
         await using (var conn = await _catalog.OpenAsync(_endpoint.Host, _catalog.Database, ct))
@@ -87,6 +124,8 @@ public sealed class PgSource : IEngineSource
             _english = PgProbeChecks.English(settings.GetValueOrDefault("lc_messages", ""));
             _rotationMinutes = int.TryParse(settings.GetValueOrDefault("log_rotation_age", ""), System.Globalization.NumberStyles.None,
                 System.Globalization.CultureInfo.InvariantCulture, out var minutes) ? minutes : 0;
+            // log_rotation_age is the logging collector's: with it off, whatever saves the server's stderr rotates the files.
+            _collectorOff = settings.GetValueOrDefault("logging_collector", "") == "off";
             var extension = await ScalarAsync(conn, PgSql.StatStatementsVersion, ct) as string;
             caps.StatStatements = extension != null;
             checks.Add(PgProbeChecks.StatStatements(extension, settings, _catalog.Database));
@@ -103,13 +142,20 @@ public sealed class PgSource : IEngineSource
         {
             checks.Add(await ReplicasAnswerAsync(ct));
         }
-        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct) : DirectoryLogs(caps.Platform);
+        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct)
+            : _azure != null ? await AzureLogsAsync(ct)
+            : DirectoryLogs(caps.Platform);
         caps.Instances = instances;
         caps.LogFormat = format;
         checks.AddRange(logChecks);
+        if (PgProbeChecks.LoggingCollector(settings, caps.LogSource, caps.Platform, format.Length > 0) is { } loggingCollector)
+        {
+            checks.Add(loggingCollector);
+        }
         if (settings.TryGetValue("log_line_prefix", out var prefix))
         {
             checks.Add(PgProbeChecks.LinePrefix(prefix, format));
+            Prefix(prefix);
         }
         caps.Checks = checks;
         var oldest = instances.Where(i => i.OldestLogMicros > 0).Select(i => i.OldestLogMicros).DefaultIfEmpty(0).Min();
@@ -163,19 +209,88 @@ public sealed class PgSource : IEngineSource
         var callsPerSecond = _utcNow() - FromMicros(task.EndMicros) > CatchUp ? CatchUpCallsPerSecond : LiveCallsPerSecond;
         foreach (var instance in _instances)
         {
-            var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
-                _english, _rotationMinutes);
             if (_rds != null)
             {
+                // RDS writes its own prefix, which names the user on every line.
+                var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+                    _english, _rotationMinutes);
                 await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond, budget: _budget), ct);
+                window.WriteCounts();
+            }
+            else if (_azure != null)
+            {
+                await AzureWindowAsync(task, instance, rows, callsPerSecond, ct);
             }
             else
             {
-                await window.ReadAsync(new PgLogDirectory(_logDirectory!), ct);
+                var directory = new PgLogDirectory(_logDirectory!);
+                var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+                    _english, _collectorOff ? 0 : _rotationMinutes, _prefix, _sessions, directory);
+                await window.ReadAsync(directory, ct);
+                window.WriteCounts();
             }
-            window.WriteCounts();
             await rows.FlushAsync(ct);
         }
+    }
+
+    /// <summary>
+    /// A window older than this is read as Azure's files hold it: Azure writes them about every 20 minutes, the hour
+    /// before's too, up to about 25 minutes after that hour ended.
+    /// </summary>
+    internal static readonly TimeSpan AzureSettled = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// One window of Azure's server log download. Azure writes the files about every 20 minutes, so a recent window
+    /// waits until a line past its end is there (or <see cref="AzureSettled"/> has gone by: an idle server writes nothing
+    /// to wait for).
+    /// </summary>
+    private async Task AzureWindowAsync(AgentTask task, PgInstance instance, RowWriter rows, double callsPerSecond, CancellationToken ct)
+    {
+        if (_prefix == null)
+        {
+            Prefix(AzureDefaultPrefix);
+        }
+        var reader = new AzureLogReader(_azure!, callsPerSecond);
+        var recent = _utcNow() - FromMicros(task.EndMicros) < AzureSettled;
+        if (recent && !await reader.WrittenPastAsync(task.EndMicros + PgWindowReader.StopMarginMicros, _prefix!.TimeOf, ct))
+        {
+            throw new SourceException("Azure has not written the whole window to the server's log files yet") { NotYetPublished = true };
+        }
+        var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+            _english, _rotationMinutes, _prefix, _sessions, reader, azureFile: true);
+        await window.ReadAsync(reader, ct);
+        window.WriteCounts();
+    }
+
+    /// <summary>The server's log files on Azure: how many, and the oldest; Azure keeps them for <c>logfiles.retention_days</c>.</summary>
+    private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> AzureLogsAsync(CancellationToken ct)
+    {
+        var report = new PostgresInstance { Id = _instances[0].Id, Role = "primary" };
+        var checks = new List<PostgresCheck>();
+        try
+        {
+            var files = await new AzureLogReader(_azure!, LiveCallsPerSecond).FilesAsync(ct);
+            var starts = files.Select(f => f.StartMicros).OfType<long>().OrderBy(t => t).ToList();
+            report.OldestLogMicros = starts.FirstOrDefault();
+            report.LogFileMinutes = PgProbeChecks.FileMinutes(starts);
+            checks.Add(PgProbeChecks.AzureLogFiles(report.Id, files.Count, report.OldestLogMicros));
+        }
+        catch (SourceException ex)
+        {
+            checks.Add(new PostgresCheck { Name = "log_files", Status = "fail", Message = Runner.EndpointSession.Trim(ex.Message) });
+        }
+        return (new List<PostgresInstance> { report }, checks, "stderr");
+    }
+
+    /// <summary>The prefix the newest probe read: a new one gets a parser, and sessions, of its own.</summary>
+    internal void Prefix(string prefix)
+    {
+        if (_prefix?.Prefix == prefix)
+        {
+            return;
+        }
+        _prefix = PgLineFormat.Of(prefix);
+        _sessions = _prefix.HasUser ? null : new PgSessionMap(_prefix);
     }
 
     private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> RdsLogsAsync(CancellationToken ct)
@@ -228,7 +343,9 @@ public sealed class PgSource : IEngineSource
                 var starts = files.Where(f => f.Format == newest.Format).Select(f => f.StartMicros).OfType<long>().OrderBy(t => t).ToList();
                 report.OldestLogMicros = starts.FirstOrDefault();
                 report.LogFileMinutes = PgProbeChecks.FileMinutes(starts);
-                checks.Add(PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes, _rotationMinutes));
+                checks.Add(_collectorOff
+                    ? PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes)
+                    : PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes, _rotationMinutes));
             }
         }
         catch (SourceException ex)

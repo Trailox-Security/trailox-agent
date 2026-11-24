@@ -6,7 +6,8 @@ over HTTPS, **outbound only, on port 443**. Nothing inbound, no IP allow-list, n
 database credentials never leave your network.
 
 Supported databases: **ClickHouse**, **Databricks**, **Amazon Redshift**, **Snowflake**, from
-1.8.0 **MongoDB Atlas**, from 1.12.0 **PostgreSQL** (Amazon RDS, Aurora and self-managed), and from 1.16.0
+1.8.0 **MongoDB Atlas**, from 1.12.0 **PostgreSQL** (Amazon RDS, Aurora, Azure Database for PostgreSQL and
+self-managed), and from 1.16.0
 **Oracle** (Amazon RDS for Oracle and self-managed). One agent can read any number of endpoints across them.
 
 ## What the agent does
@@ -371,13 +372,15 @@ connects to the cluster.
 
 ### PostgreSQL
 
-PostgreSQL 13 or later, from 1.12.0: Amazon RDS and Aurora, whose server log the agent reads through the RDS API,
+PostgreSQL 13 or later, from 1.12.0: Amazon RDS and Aurora, whose server log the agent reads through the RDS API;
+from 1.22.0 Azure Database for PostgreSQL flexible server, whose server log the agent reads from Azure's log download;
 or a self-managed server, whose log directory is mounted read-only into the agent.
 
 - **Reads:**
   - the server log, for sign-ins (`log_connections`, `log_disconnections`), failed sign-ins and DDL
     (`log_statement = 'ddl'`). On RDS and Aurora through `DescribeDBLogFiles` and `DownloadDBLogFilePortion`:
-    no CloudWatch export is needed. On a self-managed server from the log directory;
+    no CloudWatch export is needed. On Azure from the server log download, through Azure Resource Manager. On a
+    self-managed server from the log directory, where the server writes it;
   - at most every 15 minutes, the counters of `pg_stat_statements` without their text (`showtext := false`),
     on each server;
   - daily: tables (sizes from the planner's `relpages`, never a size function), columns (1,000 tables per
@@ -400,10 +403,12 @@ or a self-managed server, whose log directory is mounted read-only into the agen
   (SCRAM-SHA-256-PLUS), so a machine between the agent and the server cannot pass it on; the agent does not check
   the server's certificate. Point the agent at the server itself, not at a connection pooler.
 - **agent.yaml:** `host`/`port`/`tls` = the primary's address; `username` and its password;
-  `options.log_source` = `rds_api` or `file`. With `rds_api`: `options.instances` = the instance identifiers,
+  `options.log_source` = `rds_api`, `azure_files` or `file`. With `rds_api`: `options.instances` = the instance identifiers,
   primary first, each `id` or `id=host`, and `options.rds_region`. A replica's host is derived only when `host` is
   the primary's RDS instance endpoint; with an address, a CNAME or an Aurora cluster endpoint, name each replica's
   host (`id=host`). A server the agent cannot reach is skipped, and the others are read.
+  With `azure_files`: `options.azure_subscription` (the subscription id), `options.azure_resource_group` and
+  `options.azure_server` (the server's name, the first label of its host).
   With `file`: `options.log_directory` = where the log directory is mounted in the container. `options.database`
   = where the agent signs in for the counters (default `postgres`).
 - **Amazon RDS and Aurora:** in a custom parameter group, `log_connections`, `log_disconnections`,
@@ -418,16 +423,35 @@ or a self-managed server, whose log directory is mounted read-only into the agen
   (`csvlog` on 13 and 14), `log_timezone = UTC` and `log_rotation_age = 10min`. Mount the directory read-only and
   run the agent with its group: `group_add` in compose, `logVolume` and `supplementalGroups` in the chart. On the
   database host, `network_mode: host` lets the agent reach a server that listens on `localhost`.
-- **Azure Database for PostgreSQL flexible server** (from 1.21.0): the probe reports the platform `azure`. The agent
-  signs in and reads the counters and the catalog, but no server log, so no sign-ins, failed sign-ins or DDL. Azure's
+- **A log that is already written** (from 1.22.0), for one that another reader already uses: mount its directory as
+  it is (Debian's `/var/log/postgresql`, with the group that can read it, `adm` there). The agent reads stderr files
+  in their own `log_line_prefix`, whatever it is, from where each window begins (a daily file, or one named with no
+  time, is not read from its start), and with the logging collector off it reads the files that hold the server's
+  stderr. Nothing of the server's logging needs to change; `log_timezone` must still be UTC.
+- **A line's user** (from 1.22.0): from `%u` in the prefix; with none, from the line's session (`%c`, Azure's
+  default `%t-%c-`) or process (`%p`, PostgreSQL's default `%m [%p] `) and that session's sign-in line. A session
+  that signed in before the window is looked for in the log before it: its session id says when it began; a process
+  is looked for up to 2 hours back. A prefix with none of `%u`, `%c` and `%p` names no one: its statements count as
+  unread. ⚠ PostgreSQL writes a client's names into stderr lines as they are, so where the prefix writes `%a`, or a
+  refused client's `%u` or `%d`, before more of the prefix, a client can put a line of its own inside the name, and a
+  newline in a refused client's user name starts a line of its own in any stderr file. The agent counts a line it
+  finds forged so as unread; csvlog and jsonlog quote the names, and Azure's download writes a newline as `\n`.
+- **Azure Database for PostgreSQL flexible server** (from 1.21.0): the probe reports the platform `azure`. Azure's
   own role `azuresu` and its databases `azure_sys` and `azure_maintenance` are left out of the counters, the statement
   texts and the catalog. Azure ships `pg_stat_statements.track = none`, which records nothing: set it to `top` in the
-  server parameters.
+  server parameters. From 1.22.0 the agent reads the server log with `log_source: azure_files`: set the server
+  parameters `logfiles.download_enable = on` and `logfiles.retention_days` (at most 7; a longer outage loses the gap),
+  and `log_statement = ddl` (sign-ins and disconnections are logged by default). The agent's Azure identity, its
+  managed identity first (workload identity on AKS), else a service principal in `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`
+  and `AZURE_CLIENT_SECRET` (or `AZURE_CLIENT_CERTIFICATE_PATH`), needs a role with only
+  `Microsoft.DBforPostgreSQL/flexibleServers/logFiles/read` on the server: the list gives each file's signed link,
+  which the agent reads in ranges, only the part of each hourly file that holds the window. Azure adds to the newest
+  file every few minutes, so a window is read once a line past its end is there.
 - **The probe's checks:** `role`, `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
-  (UTC), `logging_collector` (self-managed), `pg_stat_statements` (created, and `pg_stat_statements.track` not
-  `none`), `log_error_verbosity` (where pgaudit is loaded, not `terse`), `instances` (each replica answers),
-  `replicas`, `log_files` and `log_line_prefix` (the prefix, and which of `%u`, `%c` and `%p` it lacks), each `ok`,
-  `warn` or `fail` with what to change.
+  (UTC), `logging_collector` (self-managed, when no log file is found), `pg_stat_statements` (created, and
+  `pg_stat_statements.track` not `none`), `log_error_verbosity` (where pgaudit is loaded, not `terse`), `instances`
+  (each replica answers), `replicas`, `log_files` and `log_line_prefix` (the prefix, which of `%u`, `%c` and `%p` it
+  lacks, and how a line's user is found), each `ok`, `warn` or `fail` with what to change.
 - **A rejected password:** the agent stops signing in to that source, for its probe and its tasks, until it
   restarts, so it never fills your log with its own failed sign-ins. Fix the password, then restart the agent.
 

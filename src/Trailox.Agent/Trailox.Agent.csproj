@@ -23,6 +23,7 @@
          a web identity (IRSA) from the default credential chain. -->
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.1" />
     <PackageReference Include="AWSSDK.SecurityToken" Version="4.0.101.1" />
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="MongoDB.Driver" Version="3.12.0" />

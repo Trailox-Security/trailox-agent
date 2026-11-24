@@ -37,7 +37,7 @@ public static class PgProbeChecks
             : Warn("role", "the agent's role: " + string.Join("; ", problems));
     }
 
-    /// <param name="platform">The probe's platform (<see cref="PgPlatform"/>): Azure runs with no logging collector, and lets none be turned on.</param>
+    /// <remarks>The logging collector is checked once the log directory is listed: <see cref="LoggingCollector"/>.</remarks>
     public static IEnumerable<PostgresCheck> Settings(IReadOnlyDictionary<string, string> s, string logSource, string platform = "")
     {
         var missing = new List<string>();
@@ -66,11 +66,6 @@ public static class PgProbeChecks
         yield return UtcZones.Contains(zone)
             ? Ok("log_timezone", "the log's times are UTC")
             : Fail("log_timezone", $"the log's times are in {zone}: set log_timezone = 'UTC'");
-
-        if (logSource == PostgresEngine.LogSourceFile && platform != PgPlatform.Azure && !On(s.GetValueOrDefault("logging_collector", "")))
-        {
-            yield return Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart)");
-        }
 
         // A pgaudit line carries no CONTEXT, and a function's RAISE LOG 'AUDIT: ...' does; terse writes no CONTEXT at all.
         if (Loads(s, "pgaudit"))
@@ -129,19 +124,69 @@ public static class PgProbeChecks
         {
             return Ok("log_line_prefix", $"{shown}: the agent reads {format}, whose records name their user, database and session whatever the prefix");
         }
-        return StderrLogParser.Reads(prefix)
-            ? Ok("log_line_prefix", $"{shown}: each line names its user, database and process")
-            : Warn("log_line_prefix", $"{shown}: the agent reads stderr lines with the prefix '{StderrLogParser.RdsPrefix}' only, so lines "
-                + "with this one count as unread");
+        var line = PgLineFormat.Of(prefix);
+        if (!line.HasTime)
+        {
+            return Fail("log_line_prefix", $"{shown}: it has no %t, %m or %n, so no stderr line has a time and the agent reads none of them");
+        }
+        if (line.ClientEscape == 'a' && !StderrLogParser.Reads(prefix))
+        {
+            return Warn("log_line_prefix", $"{shown}: it writes the application name, which any client chooses, so a client can make "
+                + "its own lines read as another user's or as a sign-in. The agent counts a line that holds a level in its text as "
+                + "forged, and does not read it; csvlog and jsonlog quote the name");
+        }
+        var forgeable = line.ClientText && !StderrLogParser.Reads(prefix)
+            ? ". A refused client's user or database name is written into the prefix as it is: a line forged in one counts as unread"
+            : "";
+        if (line.HasUser)
+        {
+            return Ok("log_line_prefix", $"{shown}: each line names its user{forgeable}");
+        }
+        if (line.HasSession)
+        {
+            return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its session (%c), "
+                + $"on the session's sign-in line{forgeable}");
+        }
+        if (line.HasPid)
+        {
+            return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its process (%p), "
+                + $"on the process's newest sign-in line, up to {PgSessionMap.PidLookBackMicros / 3_600_000_000} hours before{forgeable}");
+        }
+        return Warn("log_line_prefix", $"{shown}: a line names no user, session or process, so the agent cannot tell whose a statement "
+            + "is: those lines count as unread. Sign-ins, failed sign-ins and disconnections name their user and are read");
+    }
+
+    /// <summary>
+    /// A self-managed server with the logging collector off writes its log to stderr, which another program can save to
+    /// files (a service manager, a package's start script): the agent reads those files where they are. Only with no
+    /// file found does it ask for the logging collector. Null when there is nothing to check.
+    /// </summary>
+    public static PostgresCheck? LoggingCollector(IReadOnlyDictionary<string, string> s, string logSource, string platform, bool filesFound)
+    {
+        if (logSource != PostgresEngine.LogSourceFile || platform == PgPlatform.Azure || On(s.GetValueOrDefault("logging_collector", "")))
+        {
+            return null;
+        }
+        return filesFound
+            ? Ok("logging_collector", "logging_collector is off: the agent reads the log files it found, as they are written")
+            : Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart), or "
+                + "mount the directory where its stderr is saved");
     }
 
     private const int MaxPrefixShown = 80;
 
     /// <summary>log_files when no file was found in the log directory.</summary>
     public static PostgresCheck NoLogFiles(string directory, string platform) => platform == PgPlatform.Azure
-        ? Fail("log_files", "Azure Database for PostgreSQL flexible server has no log directory to mount, so the agent reads no server "
-            + "log: sign-ins, failed sign-ins and DDL are not collected")
+        ? Fail("log_files", "Azure Database for PostgreSQL flexible server has no log directory to mount: read its server log with "
+            + "log_source: azure_files")
         : Fail("log_files", $"no log file in {directory}: check logging_collector, log_directory and the mount");
+
+    /// <summary>log_files of Azure's server log download: one file an hour, kept for logfiles.retention_days.</summary>
+    public static PostgresCheck AzureLogFiles(string server, int files, long oldestMicros) => files == 0
+        ? Fail("log_files", $"{server}: no server log file to download: set the server parameter logfiles.download_enable = on")
+        : Ok("log_files", $"{server}: {files} log files, the oldest from "
+            + DateTime.UnixEpoch.AddTicks(oldestMicros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+            + " UTC. Azure keeps them for logfiles.retention_days (at most 7): a longer outage loses the gap");
 
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0

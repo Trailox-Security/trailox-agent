@@ -1,0 +1,479 @@
+2026-01-15 10:52:42 UTC-6968c633.3c4-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:52:45 UTC-6968c6fd.429-LOG:  connection received: host=127.0.0.1 port=44930
+2026-01-15 10:52:45 UTC-6968c6fd.429-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:52:45 UTC-6968c6fd.429-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:52:45 UTC-6968c6fd.429-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:52:58 UTC-6968c633.3c4-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:53:06 UTC-6968c4bc.7-LOG:  received SIGHUP, reloading configuration files
+2026-01-15 10:53:06 UTC-6968c4bc.7-LOG:  parameter \"shared_preload_libraries\" cannot be changed without restarting the server
+2026-01-15 10:53:06 UTC-6968c4bc.7-LOG:  configuration file \"/datadrive/pg/data/conf.d/030-user-supplied-server-parameters.conf\" contains errors; unaffected changes were applied
+2026-01-15 10:53:06 UTC-6968c4c6.2f5-LOG:  pg_qs: qs bgworker: reloaded configuration in response to SIGHUP
+2026-01-15 10:53:06 UTC-6968c633.3c4-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:53:09 UTC-6968c4bc.261-LOG:  [pg-availability]: current_lsn: 0/50058A8, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:53:14 UTC-6968c633.3c4-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:53:16 UTC-6968c6a4.403-LOG:  disconnection: session time: 0:02:00.046 user=azuresu database=postgres host=127.0.0.1 port=51784
+2026-01-15 10:53:16 UTC-6968c71c.43b-LOG:  connection received: host=127.0.0.1 port=56216
+2026-01-15 10:53:16 UTC-6968c71c.43b-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:16 UTC-6968c71c.43b-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:16 UTC-6968c71c.43b-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:16 UTC-6968c71c.43c-LOG:  connection received: host=127.0.0.1 port=56228
+2026-01-15 10:53:16 UTC-6968c71c.43c-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:16 UTC-6968c71c.43c-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:16 UTC-6968c71c.43c-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:21 UTC-6968c6a9.405-LOG:  disconnection: session time: 0:02:00.051 user=azuresu database=azure_sys host=127.0.0.1 port=35880
+2026-01-15 10:53:21 UTC-6968c721.43f-LOG:  connection received: host=192.0.2.10 port=51026
+2026-01-15 10:53:22 UTC-6968c633.3c4-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:53:22 UTC-6968c722.441-LOG:  connection received: host=127.0.0.1 port=45700
+2026-01-15 10:53:22 UTC-6968c722.441-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:22 UTC-6968c722.441-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:22 UTC-6968c722.441-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:23 UTC-6968c633.3c4-LOG:  disconnection: session time: 0:04:00.061 user=azuresu database=azure_maintenance host=127.0.0.1 port=59744
+2026-01-15 10:53:23 UTC-6968c723.442-LOG:  connection received: host=127.0.0.1 port=45714
+2026-01-15 10:53:23 UTC-6968c723.442-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:23 UTC-6968c723.442-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:23 UTC-6968c723.442-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:23 UTC-6968c4bc.25a-LOG:  checkpoint starting: immediate force wait
+2026-01-15 10:53:23 UTC-6968c4bc.25a-LOG:  checkpoint complete: wrote 43 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.013 s, sync=0.007 s, total=0.041 s; sync files=27, longest=0.005 s, average=0.001 s; distance=32790 kB, estimate=32790 kB; lsn=0/5005AA8, redo lsn=0/5005A50
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  received fast shutdown request
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  aborting any active transactions
+2026-01-15 10:53:30 UTC-6968c723.442-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c723.442-LOG:  disconnection: session time: 0:00:06.217 user=azuresu database=postgres host=127.0.0.1 port=45714
+2026-01-15 10:53:30 UTC-6968c4c6.2f5-LOG:  pg_qs: qs bgworker: received SIGTERM, shutting down
+2026-01-15 10:53:30 UTC-6968c722.441-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c722.441-LOG:  disconnection: session time: 0:00:07.362 user=azuresu database=azure_sys host=127.0.0.1 port=45700
+2026-01-15 10:53:30 UTC-6968c71c.43c-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c71c.43c-LOG:  disconnection: session time: 0:00:13.295 user=azuresu database=postgres host=127.0.0.1 port=56228
+2026-01-15 10:53:30 UTC-6968c71c.43b-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c71c.43b-LOG:  disconnection: session time: 0:00:13.381 user=azuresu database=postgres host=127.0.0.1 port=56216
+2026-01-15 10:53:30 UTC-6968c6fd.429-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c6fd.429-LOG:  disconnection: session time: 0:00:44.402 user=azuresu database=azure_sys host=127.0.0.1 port=44930
+2026-01-15 10:53:30 UTC-6968c6bd.40c-FATAL:  terminating connection due to administrator command
+2026-01-15 10:53:30 UTC-6968c6bd.40c-LOG:  disconnection: session time: 0:01:49.117 user=azuresu database=postgres host=127.0.0.1 port=33862
+2026-01-15 10:53:30 UTC-6968c4bc.265-FATAL:  terminating background worker \"pg_cron launcher\" due to administrator command
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  background worker \"pgms_stats_background_worker\" (PID 756) exited with exit code 1
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  background worker \"pg_qs_background_worker\" (PID 757) exited with exit code 1
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  background worker \"logical replication launcher\" (PID 614) exited with exit code 1
+2026-01-15 10:53:30 UTC-6968c4bc.7-LOG:  background worker \"pg_cron launcher\" (PID 613) exited with exit code 1
+2026-01-15 10:53:30 UTC-6968c4bc.25a-LOG:  shutting down
+2026-01-15 10:53:30 UTC-6968c4bc.25a-LOG:  checkpoint starting: shutdown immediate
+2026-01-15 10:53:30 UTC-6968c4bc.25a-LOG:  checkpoint complete: wrote 0 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.359 s; sync files=0, longest=0.000 s, average=0.000 s; distance=16361 kB, estimate=31147 kB; lsn=0/6000028, redo lsn=0/6000028
+2026-01-15 10:53:30 UTC-6968c72a.450-LOG:  connection received: host=127.0.0.1 port=36364
+2026-01-15 10:53:30 UTC-6968c72a.450-FATAL:  the database system is shutting down
+2026-01-15 10:53:35 UTC-6968c4bc.7-LOG:  database system is shut down
+2026-01-15 10:53:40 UTC-6968c734.7-LOG:  pg_qs: pgqs_num_lock_partitions set to 32.
+2026-01-15 10:53:40 UTC-6968c734.7-LOG:  pgms_stats: Finishing PG_init
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  starting PostgreSQL 17.11 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 13.2.0, 64-bit
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  listening on IPv4 address \"0.0.0.0\", port 5432
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  listening on IPv6 address \"::\", port 5432
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  listening on Unix socket \"/tmp/.s.PGSQL.5432\"
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  listening on Unix socket \"/tmp/tuning_sockets/.s.PGSQL.5432\"
+2026-01-15 10:53:41 UTC-6968c735.337-LOG:  database system was shut down at 2026-01-15 10:53:30 UTC
+2026-01-15 10:53:41 UTC-6968c734.7-LOG:  database system is ready to accept connections
+2026-01-15 10:53:41 UTC-6968c735.33f-LOG:  pg_qs: qs bgworker: pid: 831.
+2026-01-15 10:53:41 UTC-6968c735.33e-LOG:  pgms_stats: bgworker: pid: 830.
+2026-01-15 10:53:41 UTC-6968c735.33f-LOG:  pg_qs: qs bgworker: bgworker started running with host database: azure_sys
+2026-01-15 10:53:41 UTC-6968c735.33e-LOG:  pgms_stats: qs bgworker: bgworker started running with host database: azure_sys
+2026-01-15 10:53:41 UTC-6968c735.340-LOG:  pg_cron scheduler started
+2026-01-15 10:53:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/60000A0, current_lsn_counter: 1, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:53:43 UTC-6968c737.343-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.343-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.343-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.343-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.343-LOG:  disconnection: session time: 0:00:00.021 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:43 UTC-6968c737.345-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.345-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.345-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.345-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.346-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.346-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.346-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.346-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.345-LOG:  disconnection: session time: 0:00:00.028 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:43 UTC-6968c737.346-LOG:  disconnection: session time: 0:00:00.040 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.348-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.348-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.348-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.348-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.348-LOG:  disconnection: session time: 0:00:00.032 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  statement: DROP EXTENSION IF EXISTS pg_availability;
+2026-01-15 10:53:43 UTC-6968c737.349-LOG:  disconnection: session time: 0:00:00.024 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:43 UTC-6968c737.362-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.362-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.362-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.362-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.362-LOG:  disconnection: session time: 0:00:00.017 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  statement: ALTER DATABASE template0 WITH ALLOW_CONNECTIONS true;
+2026-01-15 10:53:43 UTC-6968c737.365-LOG:  disconnection: session time: 0:00:00.020 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  connection authorized: user=azuresu database=template0 application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  statement: GRANT EXECUTE ON FUNCTION pg_replication_origin_advance(text, pg_lsn) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_create(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_drop(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_progress(text, boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_is_setup() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_progress(boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_setup TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_setup(pg_lsn, timestamp with time zone) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_show_replication_origin_status() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_shared(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_table_counters(oid) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_function_counters(oid) TO azure_pg_admin;\r
+2026-01-15 10:53:43 UTC-6968c737.367-LOG:  disconnection: session time: 0:00:00.051 user=azuresu database=template0 host=[local]
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  statement: ALTER DATABASE template0 WITH ALLOW_CONNECTIONS false;
+2026-01-15 10:53:43 UTC-6968c737.369-LOG:  disconnection: session time: 0:00:00.024 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  connection authorized: user=azuresu database=template1 application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  statement: GRANT EXECUTE ON FUNCTION pg_replication_origin_advance(text, pg_lsn) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_create(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_drop(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_progress(text, boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_is_setup() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_progress(boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_setup TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_setup(pg_lsn, timestamp with time zone) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_show_replication_origin_status() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_shared(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_table_counters(oid) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_function_counters(oid) TO azure_pg_admin;\r
+2026-01-15 10:53:43 UTC-6968c737.36b-LOG:  disconnection: session time: 0:00:00.036 user=azuresu database=template1 host=[local]
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  statement: GRANT EXECUTE ON FUNCTION pg_replication_origin_advance(text, pg_lsn) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_create(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_drop(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_progress(text, boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_is_setup() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_progress(boolean) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_session_setup TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_replication_origin_xact_setup(pg_lsn, timestamp with time zone) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_show_replication_origin_status() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset() TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_shared(text) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_table_counters(oid) TO azure_pg_admin;\r\nGRANT EXECUTE ON FUNCTION pg_stat_reset_single_function_counters(oid) TO azure_pg_admin;\r
+2026-01-15 10:53:43 UTC-6968c737.36d-LOG:  disconnection: session time: 0:00:00.039 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.371-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.371-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.371-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.371-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.371-LOG:  disconnection: session time: 0:00:00.025 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  statement: CREATE EXTENSION IF NOT EXISTS tablefunc SCHEMA public;
+2026-01-15 10:53:43 UTC-6968c737.373-LOG:  disconnection: session time: 0:00:00.027 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.376-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.376-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.376-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.376-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.376-LOG:  disconnection: session time: 0:00:00.018 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  statement: CREATE EXTENSION IF NOT EXISTS pgms_wait_sampling SCHEMA public;
+2026-01-15 10:53:43 UTC-6968c737.378-LOG:  disconnection: session time: 0:00:00.016 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.37b-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.37b-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.37b-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.37b-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.37b-LOG:  disconnection: session time: 0:00:00.026 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  statement: CREATE EXTENSION IF NOT EXISTS pg_qs SCHEMA public;
+2026-01-15 10:53:43 UTC-6968c737.37d-LOG:  disconnection: session time: 0:00:00.023 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.380-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.380-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.380-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.380-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.380-LOG:  disconnection: session time: 0:00:00.017 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  statement: CREATE EXTENSION IF NOT EXISTS pgms_stats;
+2026-01-15 10:53:43 UTC-6968c737.382-LOG:  disconnection: session time: 0:00:00.016 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  statement: CREATE EXTENSION IF NOT EXISTS azure SCHEMA public;
+2026-01-15 10:53:43 UTC-6968c737.384-LOG:  disconnection: session time: 0:00:00.024 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  statement: ALTER ROLE azuresu SET SEARCH_PATH TO pg_catalog;
+2026-01-15 10:53:43 UTC-6968c737.386-LOG:  disconnection: session time: 0:00:00.021 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.389-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.389-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.389-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.389-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.389-LOG:  disconnection: session time: 0:00:00.025 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:43 UTC-6968c737.38b-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.38b-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.38b-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.38b-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.38b-LOG:  disconnection: session time: 0:00:00.015 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:43 UTC-6968c737.38e-LOG:  connection received: host=[local]
+2026-01-15 10:53:43 UTC-6968c737.38e-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:43 UTC-6968c737.38e-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:43 UTC-6968c737.38e-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:43 UTC-6968c737.38e-LOG:  disconnection: session time: 0:00:00.018 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.39c-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.39c-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.39c-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.39c-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.39c-LOG:  disconnection: session time: 0:00:00.023 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a0-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a0-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3a0-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3a0-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3a0-LOG:  disconnection: session time: 0:00:00.015 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a3-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a3-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3a3-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3a3-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3a3-LOG:  disconnection: session time: 0:00:00.020 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a7-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a7-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3a7-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3a7-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3a7-LOG:  disconnection: session time: 0:00:00.023 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a9-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3a9-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3a9-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3a9-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3a9-LOG:  disconnection: session time: 0:00:00.020 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3ab-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3ab-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3ab-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3ab-LOG:  connection authorized: user=azuresu database=template1 application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3ab-LOG:  disconnection: session time: 0:00:00.021 user=azuresu database=template1 host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3ad-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3ad-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3ad-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3ad-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3ad-LOG:  disconnection: session time: 0:00:00.016 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3af-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3af-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3af-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3af-LOG:  connection authorized: user=azuresu database=azure_maintenance application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3af-LOG:  disconnection: session time: 0:00:00.024 user=azuresu database=azure_maintenance host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3b1-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3b1-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3b1-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3b1-LOG:  connection authorized: user=azuresu database=azure_sys application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3b1-LOG:  disconnection: session time: 0:00:00.018 user=azuresu database=azure_sys host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  connection received: host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  connection authenticated: user=\"azuresu\" method=trust (/datadrive/pg/data/pg_hba.conf:8)
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  connection authorized: user=azuresu database=postgres application_name=psql
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  statement: GRANT pg_read_all_data, pg_write_all_data, pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables, pg_monitor, pg_checkpoint, pg_create_subscription, pg_signal_backend, pg_use_reserved_connections TO azure_pg_admin WITH ADMIN OPTION;
+2026-01-15 10:53:44 UTC-6968c738.3bf-LOG:  disconnection: session time: 0:00:00.024 user=azuresu database=postgres host=[local]
+2026-01-15 10:53:44 UTC-6968c738.3c0-LOG:  connection received: host=127.0.0.1 port=40276
+2026-01-15 10:53:44 UTC-6968c738.3c0-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:44 UTC-6968c738.3c0-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:44 UTC-6968c738.3c0-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:46 UTC-6968c73a.3c1-LOG:  connection received: host=127.0.0.1 port=40290
+2026-01-15 10:53:46 UTC-6968c73a.3c1-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:46 UTC-6968c73a.3c1-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:46 UTC-6968c73a.3c1-LOG:  connection authorized: user=azuresu database=azure_maintenance SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:46 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:53:53 UTC-6968c741.3c4-LOG:  connection received: host=127.0.0.1 port=50010
+2026-01-15 10:53:53 UTC-6968c741.3c4-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:53:53 UTC-6968c741.3c4-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:53:53 UTC-6968c741.3c4-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:53:54 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:02 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:10 UTC-6968c752.3ca-LOG:  connection received: host=127.0.0.1 port=45424
+2026-01-15 10:54:10 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:10 UTC-6968c752.3ca-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:54:10 UTC-6968c752.3ca-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:54:10 UTC-6968c752.3ca-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:54:18 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:26 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:34 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:38 UTC-6968c76e.3db-LOG:  connection received: host=127.0.0.1 port=52628
+2026-01-15 10:54:39 UTC-6968c76e.3db-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:54:39 UTC-6968c76e.3db-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:54:39 UTC-6968c76e.3db-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:54:39 UTC-6968c76e.3db-LOG:  disconnection: session time: 0:00:00.141 user=azuresu database=postgres host=127.0.0.1 port=52628
+2026-01-15 10:54:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/602BAE8, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:54:42 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:50 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:54:58 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:06 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:14 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:22 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:30 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:38 UTC-6968c73a.3c1-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:39 UTC-6968c7ab.3f7-LOG:  connection received: host=127.0.0.1 port=57520
+2026-01-15 10:55:39 UTC-6968c7ab.3f7-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:55:39 UTC-6968c7ab.3f7-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:55:39 UTC-6968c7ab.3f7-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:55:39 UTC-6968c7ab.3f7-LOG:  disconnection: session time: 0:00:00.113 user=azuresu database=postgres host=127.0.0.1 port=57520
+2026-01-15 10:55:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/602C1A0, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:55:44 UTC-6968c738.3c0-LOG:  disconnection: session time: 0:02:00.040 user=azuresu database=postgres host=127.0.0.1 port=40276
+2026-01-15 10:55:46 UTC-6968c73a.3c1-LOG:  disconnection: session time: 0:02:00.038 user=azuresu database=azure_maintenance host=127.0.0.1 port=40290
+2026-01-15 10:55:46 UTC-6968c7b2.3fa-LOG:  connection received: host=127.0.0.1 port=57526
+2026-01-15 10:55:46 UTC-6968c7b2.3fa-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:55:46 UTC-6968c7b2.3fa-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:55:46 UTC-6968c7b2.3fa-LOG:  connection authorized: user=azuresu database=azure_maintenance SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:55:46 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:47 UTC-6968c7b3.3fb-LOG:  connection received: host=127.0.0.1 port=47550
+2026-01-15 10:55:47 UTC-6968c7b3.3fb-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:55:47 UTC-6968c7b3.3fb-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:55:47 UTC-6968c7b3.3fb-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:55:53 UTC-6968c741.3c4-LOG:  disconnection: session time: 0:02:00.040 user=azuresu database=azure_sys host=127.0.0.1 port=50010
+2026-01-15 10:55:54 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:55:54 UTC-6968c7ba.3ff-LOG:  connection received: host=127.0.0.1 port=47564
+2026-01-15 10:55:54 UTC-6968c7ba.3ff-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:55:54 UTC-6968c7ba.3ff-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:55:54 UTC-6968c7ba.3ff-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:56:00 UTC-6968c7c0.401-LOG:  connection received: host=192.0.2.10 port=54553
+2026-01-15 10:56:01 UTC-6968c7c0.401-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:56:02 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:03 UTC-6968c7c0.401-FATAL:  password authentication failed for user \"dbadmin\"","detail_log": "Connection matched file \"/datadrive/pg/data/pg_hba.conf\" line 29: \"hostssl all all  0.0.0.0/0 md5\"
+2026-01-15 10:56:10 UTC-6968c752.3ca-LOG:  disconnection: session time: 0:02:00.055 user=azuresu database=postgres host=127.0.0.1 port=45424
+2026-01-15 10:56:10 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:18 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:20 UTC-6968c7d4.408-LOG:  connection received: host=192.0.2.10 port=52943
+2026-01-15 10:56:20 UTC-6968c7d4.408-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:56:22 UTC-6968c7d4.408-FATAL:  password authentication failed for user \"dbadmin\"","detail_log": "Connection matched file \"/datadrive/pg/data/pg_hba.conf\" line 29: \"hostssl all all  0.0.0.0/0 md5\"
+2026-01-15 10:56:26 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:34 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:39 UTC-6968c7e7.417-LOG:  connection received: host=127.0.0.1 port=44598
+2026-01-15 10:56:39 UTC-6968c7e7.417-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:56:39 UTC-6968c7e7.417-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:56:39 UTC-6968c7e7.417-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:56:39 UTC-6968c7e7.417-LOG:  disconnection: session time: 0:00:00.119 user=azuresu database=postgres host=127.0.0.1 port=44598
+2026-01-15 10:56:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/602C750, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:56:42 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:50 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:56:58 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:06 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:14 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:17 UTC-6968c80d.423-LOG:  connection received: host=192.0.2.10 port=52128
+2026-01-15 10:57:18 UTC-6968c80d.423-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:18 UTC-6968c80d.423-LOG:  connection authenticated: identity=\"dbadmin\" method=md5 (/datadrive/pg/data/pg_hba.conf:29)
+2026-01-15 10:57:18 UTC-6968c80d.423-LOG:  connection authorized: user=dbadmin database=postgres application_name=setup-script SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:18 UTC-6968c80d.423-LOG:  statement: CREATE ROLE \"monitor\" LOGIN
+2026-01-15 10:57:18 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" LOGIN CONNECTION LIMIT 2
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" SET \"statement_timeout\" = '30s'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" SET \"lock_timeout\" = '1s'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" SET \"idle_in_transaction_session_timeout\" = '60s'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" SET \"default_transaction_read_only\" = 'on'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: GRANT pg_read_all_stats, pg_read_all_settings TO \"monitor\"
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: CREATE EXTENSION IF NOT EXISTS pg_stat_statements
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: ALTER SYSTEM SET log_statement = 'ddl'
+2026-01-15 10:57:19 UTC-6968c80d.423-ERROR:  permission denied to set parameter \"log_statement\"","statement": "ALTER SYSTEM SET log_statement = 'ddl'
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: GRANT pg_monitor TO \"monitor\"
+2026-01-15 10:57:19 UTC-6968c80d.423-LOG:  statement: REVOKE pg_monitor FROM \"monitor\"
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: CREATE EXTENSION IF NOT EXISTS pgaudit
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"monitor\" SET pgaudit.log = 'none'
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: CREATE ROLE \"app_user\" LOGIN
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"app_user\" PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy'
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: ALTER ROLE \"app_user\" SET pgaudit.log = 'read, write'
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: CREATE SCHEMA IF NOT EXISTS shop
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: CREATE TABLE IF NOT EXISTS shop.cards (id int PRIMARY KEY, holder text, pan text)
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: GRANT USAGE ON SCHEMA shop TO \"app_user\"; GRANT SELECT, INSERT ON shop.cards TO \"app_user\"
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  statement: ALTER TABLE shop.cards ADD COLUMN IF NOT EXISTS added_at timestamptz DEFAULT now()
+2026-01-15 10:57:20 UTC-6968c80d.423-LOG:  disconnection: session time: 0:00:03.301 user=dbadmin database=postgres host=192.0.2.10 port=52128
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  connection received: host=192.0.2.10 port=58870
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  connection authenticated: identity=\"app_user\" method=md5 (/datadrive/pg/data/pg_hba.conf:29)
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  connection authorized: user=app_user database=postgres application_name=setup-script SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  AUDIT: SESSION,1,1,WRITE,INSERT,,,\"INSERT INTO shop.cards (id, holder, pan) SELECT g, 'holder ' || g, '4111' || g FROM generate_series(1, 100) g ON CONFLICT DO NOTHING\",<not logged>
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  AUDIT: SESSION,2,1,READ,SELECT,,,SELECT count(*) FROM shop.cards,<not logged>
+2026-01-15 10:57:21 UTC-6968c811.425-LOG:  disconnection: session time: 0:00:00.770 user=app_user database=postgres host=192.0.2.10 port=58870
+2026-01-15 10:57:21 UTC-6968c811.426-LOG:  connection received: host=192.0.2.10 port=58871
+2026-01-15 10:57:22 UTC-6968c811.426-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:22 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:24 UTC-6968c811.426-FATAL:  password authentication failed for user \"app_user\"","detail_log": "Connection matched file \"/datadrive/pg/data/pg_hba.conf\" line 29: \"hostssl all all  0.0.0.0/0 md5\"
+2026-01-15 10:57:24 UTC-6968c814.428-LOG:  connection received: host=192.0.2.10 port=58872
+2026-01-15 10:57:24 UTC-6968c814.428-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:27 UTC-6968c814.428-FATAL:  password authentication failed for user \"no_such_user\"","detail_log": "Role \"no_such_user\" does not exist.\nConnection matched file \"/datadrive/pg/data/pg_hba.conf\" line 29: \"hostssl all all  0.0.0.0/0 md5\"
+2026-01-15 10:57:27 UTC-6968c817.429-LOG:  connection received: host=192.0.2.10 port=58873
+2026-01-15 10:57:27 UTC-6968c817.429-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:27 UTC-6968c817.429-LOG:  connection authenticated: identity=\"monitor\" method=md5 (/datadrive/pg/data/pg_hba.conf:29)
+2026-01-15 10:57:27 UTC-6968c817.429-LOG:  connection authorized: user=monitor database=postgres application_name=setup-script SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:28 UTC-6968c817.429-LOG:  statement: CREATE TABLE shop.nope (x int)
+2026-01-15 10:57:28 UTC-6968c817.429-ERROR:  cannot execute CREATE TABLE in a read-only transaction","statement": "CREATE TABLE shop.nope (x int)
+2026-01-15 10:57:28 UTC-6968c817.429-LOG:  disconnection: session time: 0:00:00.837 user=monitor database=postgres host=192.0.2.10 port=58873
+2026-01-15 10:57:30 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:38 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:39 UTC-6968c823.437-LOG:  connection received: host=127.0.0.1 port=57320
+2026-01-15 10:57:39 UTC-6968c823.437-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:39 UTC-6968c823.437-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:39 UTC-6968c823.437-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:39 UTC-6968c823.437-LOG:  disconnection: session time: 0:00:00.100 user=azuresu database=postgres host=127.0.0.1 port=57320
+2026-01-15 10:57:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/607B5E8, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:57:45 UTC-6968c829.43a-LOG:  connection received: host=127.0.0.1 port=57322
+2026-01-15 10:57:45 UTC-6968c829.43a-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:45 UTC-6968c829.43a-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:45 UTC-6968c829.43a-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:46 UTC-6968c7b2.3fa-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:46 UTC-6968c7b2.3fa-LOG:  disconnection: session time: 0:02:00.150 user=azuresu database=azure_maintenance host=127.0.0.1 port=57526
+2026-01-15 10:57:47 UTC-6968c7b3.3fb-LOG:  disconnection: session time: 0:02:00.035 user=azuresu database=postgres host=127.0.0.1 port=47550
+2026-01-15 10:57:48 UTC-6968c82c.43b-LOG:  connection received: host=127.0.0.1 port=35992
+2026-01-15 10:57:48 UTC-6968c82c.43b-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:48 UTC-6968c82c.43b-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:48 UTC-6968c82c.43b-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:54 UTC-6968c7ba.3ff-LOG:  disconnection: session time: 0:02:00.068 user=azuresu database=azure_sys host=127.0.0.1 port=47564
+2026-01-15 10:57:54 UTC-6968c832.43f-LOG:  connection received: host=127.0.0.1 port=36008
+2026-01-15 10:57:54 UTC-6968c832.43f-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:54 UTC-6968c832.43f-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:54 UTC-6968c832.43f-LOG:  connection authorized: user=azuresu database=azure_maintenance SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:54 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:57:55 UTC-6968c833.440-LOG:  connection received: host=127.0.0.1 port=36014
+2026-01-15 10:57:55 UTC-6968c833.440-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:55 UTC-6968c833.440-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:55 UTC-6968c833.440-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:57:57 UTC-6968c835.441-LOG:  connection received: host=127.0.0.1 port=53394
+2026-01-15 10:57:57 UTC-6968c835.441-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:57:57 UTC-6968c835.441-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:57:57 UTC-6968c835.441-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:58:02 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:10 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:18 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:26 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:34 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:39 UTC-6968c85f.457-LOG:  connection received: host=127.0.0.1 port=60338
+2026-01-15 10:58:39 UTC-6968c85f.457-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:58:39 UTC-6968c85f.457-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:58:39 UTC-6968c85f.457-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:58:39 UTC-6968c85f.457-LOG:  disconnection: session time: 0:00:00.099 user=azuresu database=postgres host=127.0.0.1 port=60338
+2026-01-15 10:58:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/60829C0, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:58:42 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:50 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:58:58 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:01 UTC-6968c875.45e-LOG:  connection received: host=192.0.2.10 port=54802
+2026-01-15 10:59:01 UTC-6968c875.45e-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:01 UTC-6968c875.45e-LOG:  connection authenticated: identity=\"monitor\" method=md5 (/datadrive/pg/data/pg_hba.conf:29)
+2026-01-15 10:59:01 UTC-6968c875.45e-LOG:  connection authorized: user=monitor database=postgres application_name=reader-app SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:59:02 UTC-6968c875.45e-LOG:  disconnection: session time: 0:00:01.114 user=monitor database=postgres host=192.0.2.10 port=54802
+2026-01-15 10:59:06 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:14 UTC-6968c882.463-LOG:  connection received: host=192.0.2.10 port=50709
+2026-01-15 10:59:14 UTC-6968c882.463-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:14 UTC-6968c882.463-LOG:  connection authenticated: identity=\"monitor\" method=md5 (/datadrive/pg/data/pg_hba.conf:29)
+2026-01-15 10:59:14 UTC-6968c882.463-LOG:  connection authorized: user=monitor database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:59:14 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:15 UTC-6968c882.463-LOG:  disconnection: session time: 0:00:01.015 user=monitor database=postgres host=192.0.2.10 port=50709
+2026-01-15 10:59:22 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:30 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:38 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:39 UTC-6968c89b.474-LOG:  connection received: host=127.0.0.1 port=55232
+2026-01-15 10:59:40 UTC-6968c89b.474-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:40 UTC-6968c89b.474-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:59:40 UTC-6968c89b.474-LOG:  connection authorized: user=azuresu database=postgres application_name=psql SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:59:40 UTC-6968c89b.474-LOG:  disconnection: session time: 0:00:00.110 user=azuresu database=postgres host=127.0.0.1 port=55232
+2026-01-15 10:59:41 UTC-6968c735.33c-LOG:  [pg-availability]: current_lsn: 0/6083118, current_lsn_counter: 6, spi_return_msg: SPI_OK_UPDATE
+2026-01-15 10:59:45 UTC-6968c829.43a-LOG:  disconnection: session time: 0:02:00.038 user=azuresu database=azure_sys host=127.0.0.1 port=57322
+2026-01-15 10:59:46 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:48 UTC-6968c835.441-LOG:  disconnection: session time: 0:01:50.361 user=azuresu database=postgres host=127.0.0.1 port=53394
+2026-01-15 10:59:48 UTC-6968c82c.43b-LOG:  disconnection: session time: 0:02:00.075 user=azuresu database=postgres host=127.0.0.1 port=35992
+2026-01-15 10:59:48 UTC-6968c8a4.477-LOG:  connection received: host=127.0.0.1 port=55964
+2026-01-15 10:59:48 UTC-6968c8a4.477-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:48 UTC-6968c8a4.477-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:59:48 UTC-6968c8a4.477-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:59:48 UTC-6968c8a4.478-LOG:  connection received: host=127.0.0.1 port=55970
+2026-01-15 10:59:48 UTC-6968c8a4.478-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:48 UTC-6968c8a4.478-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:59:48 UTC-6968c8a4.478-LOG:  connection authorized: user=azuresu database=postgres SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)
+2026-01-15 10:59:48 UTC-6968c8a4.478-LOG:  execute _p1: ALTER ROLE \"dbadmin\" ENCRYPTED PASSWORD 'SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy'
+2026-01-15 10:59:54 UTC-6968c832.43f-LOG:  execute _p3: create table if not exists public.lsnmover (single_row_id bool default true, id bigint, update_time timestamp default now(), constraint ensure_one_row CHECK (single_row_id), constraint lsnmover_pk primary key (single_row_id))
+2026-01-15 10:59:54 UTC-6968c832.43f-LOG:  disconnection: session time: 0:02:00.056 user=azuresu database=azure_maintenance host=127.0.0.1 port=36008
+2026-01-15 10:59:55 UTC-6968c833.440-LOG:  disconnection: session time: 0:02:00.039 user=azuresu database=azure_sys host=127.0.0.1 port=36014
+2026-01-15 10:59:57 UTC-6968c8ad.47c-LOG:  connection received: host=127.0.0.1 port=55764
+2026-01-15 10:59:57 UTC-6968c8ad.47c-LOG:  [Microsoft Entra] aad_tenant_id is NULL
+2026-01-15 10:59:57 UTC-6968c8ad.47c-LOG:  connection authenticated: identity=\"CN=azuresu.0123456789ab.database.azure.com\" method=cert (/datadrive/pg/data/pg_hba.conf:12)
+2026-01-15 10:59:57 UTC-6968c8ad.47c-LOG:  connection authorized: user=azuresu database=azure_sys SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)

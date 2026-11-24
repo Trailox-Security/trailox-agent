@@ -125,8 +125,28 @@ endpoints:
   #   pollMinutes: 10
   #   backfillDays: 7                                    # RDS keeps log files 3 days by default, 7 at most
   #
+  # Azure Database for PostgreSQL flexible server (agent 1.22.0 or later): the log comes from Azure's server log
+  # download (server parameter logfiles.download_enable = on), as the agent's own Azure identity: its managed
+  # identity, or a service principal in AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET. It needs a role
+  # with Microsoft.DBforPostgreSQL/flexibleServers/logFiles/read on the server, and nothing else.
+  # - alias: orders-azure
+  #   engine: postgres
+  #   kind: cloud
+  #   host: orders.postgres.database.azure.com
+  #   port: 5432
+  #   tls: true
+  #   username: trailox_monitor
+  #   password_env: TRAILOX_PG_PASSWORD
+  #   options:
+  #     log_source: azure_files
+  #     azure_subscription: 00000000-0000-0000-0000-000000000000
+  #     azure_resource_group: rg-databases
+  #     azure_server: orders                             # the server's name, the first label of host
+  #   backfillDays: 7                                    # Azure keeps the files logfiles.retention_days, 7 at most
+  #
   # A self-managed server: its log directory is mounted read-only (see docker-compose.yml), and the agent
-  # runs on the database host with network_mode: host.
+  # runs on the database host with network_mode: host. A log another reader already uses is read where it is,
+  # in its own log_line_prefix: mount that directory (Debian: /var/log/postgresql, readable by group adm).
   # - alias: billing
   #   engine: postgres
   #   kind: onprem
