@@ -75,17 +75,17 @@ public class PgPlatformTests
     }
 
     /// <summary>
-    /// With the collector off, a service manager or a package's start script can save the server's stderr to files: the
-    /// agent reads them where they are, and asks for the collector only when it finds none.
+    /// With the logging collector off, a service manager or a package's start script can save the server's stderr to files: the
+    /// agent reads them where they are, and asks for the logging collector only when it finds none.
     /// </summary>
     [Theory]
     [InlineData("off", "file", true, "ok")]
     [InlineData("off", "file", false, "fail")]
     [InlineData("on", "file", false, null)]
     [InlineData("off", "rds_api", false, null)]
-    public void The_logging_collector_is_asked_for_only_when_no_log_file_is_found(string collector, string source, bool found, string? status)
+    public void The_logging_collector_is_asked_for_only_when_no_log_file_is_found(string loggingCollector, string source, bool found, string? status)
     {
-        var check = PgProbeChecks.LoggingCollector(new Dictionary<string, string> { ["logging_collector"] = collector }, source,
+        var check = PgProbeChecks.LoggingCollector(new Dictionary<string, string> { ["logging_collector"] = loggingCollector }, source,
             PgPlatform.SelfManaged, found);
 
         Assert.Equal(status, check?.Status);

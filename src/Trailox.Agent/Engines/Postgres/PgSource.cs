@@ -148,9 +148,9 @@ public sealed class PgSource : IEngineSource
         caps.Instances = instances;
         caps.LogFormat = format;
         checks.AddRange(logChecks);
-        if (PgProbeChecks.LoggingCollector(settings, caps.LogSource, caps.Platform, format.Length > 0) is { } collector)
+        if (PgProbeChecks.LoggingCollector(settings, caps.LogSource, caps.Platform, format.Length > 0) is { } loggingCollector)
         {
-            checks.Add(collector);
+            checks.Add(loggingCollector);
         }
         if (settings.TryGetValue("log_line_prefix", out var prefix))
         {

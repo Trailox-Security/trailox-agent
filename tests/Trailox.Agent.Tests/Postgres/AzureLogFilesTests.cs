@@ -97,7 +97,7 @@ public class AzureLogFilesTests
 
     private static string S(JsonElement row, string column) => row.GetProperty(column).ToString();
 
-    /// <summary>🔴 What the collector needs of a window: a user on every row, from the download's sessions.</summary>
+    /// <summary>🔴 Every row of a window names its user, from the download's sessions.</summary>
     [Fact]
     public async Task A_window_of_the_download_ships_every_row_with_its_user()
     {

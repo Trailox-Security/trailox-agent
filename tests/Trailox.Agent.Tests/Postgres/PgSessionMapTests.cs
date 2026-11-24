@@ -48,8 +48,8 @@ public sealed class PgSessionMapTests : IDisposable
         counts.GetProperty("counted").TryGetProperty(key, out var v) ? v.GetInt32() : 0;
 
     /// <summary>
-    /// 🔴 The collector of a window needs a user on every event. With Azure's prefix no line names one: each takes its
-    ///    session's, from the session's connection authorized line.
+    /// 🔴 With Azure's prefix no line names its user: each row takes its session's, from the session's connection
+    ///    authorized line, so every row of the window names one.
     /// </summary>
     [Fact]
     public async Task Every_row_of_azures_download_has_its_user_from_its_sessions_sign_in()

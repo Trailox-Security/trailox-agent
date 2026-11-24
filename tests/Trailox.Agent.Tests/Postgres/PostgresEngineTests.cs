@@ -153,14 +153,14 @@ public class PostgresEngineTests
     }
 
     private static Dictionary<string, string> Settings(string connections = "on", string statement = "ddl", string lc = "en_US.UTF-8",
-        string zone = "UTC", string collector = "on") => new()
+        string zone = "UTC", string loggingCollector = "on") => new()
     {
         ["log_connections"] = connections,
         ["log_disconnections"] = "on",
         ["log_statement"] = statement,
         ["lc_messages"] = lc,
         ["log_timezone"] = zone,
-        ["logging_collector"] = collector,
+        ["logging_collector"] = loggingCollector,
     };
 
     private static string StatusOf(IEnumerable<PostgresCheck> checks, string name) => checks.Single(c => c.Name == name).Status;
@@ -212,9 +212,9 @@ public class PostgresEngineTests
     [Fact]
     public void A_self_managed_server_without_the_logging_collector_or_log_files_fails()
     {
-        Assert.Equal("fail", PgProbeChecks.LoggingCollector(Settings(collector: "off"), "file", "self_managed", filesFound: false)!.Status);
-        Assert.Null(PgProbeChecks.LoggingCollector(Settings(collector: "off"), "rds_api", "rds", filesFound: false));
-        Assert.DoesNotContain(PgProbeChecks.Settings(Settings(collector: "off"), "file"), c => c.Name == "logging_collector");
+        Assert.Equal("fail", PgProbeChecks.LoggingCollector(Settings(loggingCollector: "off"), "file", "self_managed", filesFound: false)!.Status);
+        Assert.Null(PgProbeChecks.LoggingCollector(Settings(loggingCollector: "off"), "rds_api", "rds", filesFound: false));
+        Assert.DoesNotContain(PgProbeChecks.Settings(Settings(loggingCollector: "off"), "file"), c => c.Name == "logging_collector");
     }
 
     [Fact]

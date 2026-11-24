@@ -159,7 +159,7 @@ public static class PgProbeChecks
     /// <summary>
     /// A self-managed server with the logging collector off writes its log to stderr, which another program can save to
     /// files (a service manager, a package's start script): the agent reads those files where they are. Only with no
-    /// file found does it ask for the collector. Null when there is nothing to check.
+    /// file found does it ask for the logging collector. Null when there is nothing to check.
     /// </summary>
     public static PostgresCheck? LoggingCollector(IReadOnlyDictionary<string, string> s, string logSource, string platform, bool filesFound)
     {
