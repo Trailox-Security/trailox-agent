@@ -188,6 +188,32 @@ public static class PgProbeChecks
             + DateTime.UnixEpoch.AddTicks(oldestMicros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
             + " UTC. Azure keeps them for logfiles.retention_days (at most 7): a longer outage loses the gap");
 
+    /// <summary>
+    /// The server's rows in Log Analytics over the last day. None fails: a diagnostic setting that sends no
+    /// <c>PostgreSQLLogs</c> there would make every window read as empty.
+    /// </summary>
+    /// <param name="others">
+    /// Other tables that hold the server's rows. With none in <paramref name="table"/>, that is a table given in
+    /// <c>options.azure_log_table</c> while the rows go to the other; with some, a second diagnostic setting.
+    /// </param>
+    public static PostgresCheck AzureLogAnalytics(string server, string table, long rowsLastDay, long oldestMicros, IReadOnlyList<string> others)
+    {
+        if (rowsLastDay == 0)
+        {
+            return Fail("log_analytics", others.Count > 0
+                ? $"{server}: no row of its server log came to {table} in the last day, but {string.Join(", ", others)} has them: "
+                    + "set options.azure_log_table to it, or leave it out"
+                : $"{server}: no row of its server log came to Log Analytics in the last day in {table}. Send its PostgreSQLLogs "
+                    + "category there with a diagnostic setting (destination table: Resource specific), or read it with log_source: azure_files");
+        }
+        var message = $"{server}: {rowsLastDay} rows of its server log came to {table} in the last day, the oldest kept from "
+            + DateTime.UnixEpoch.AddTicks(oldestMicros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+            + " UTC. Log Analytics leaves out a record longer than about 64 KB";
+        return others.Count > 0
+            ? Warn("log_analytics", message + $"; {string.Join(", ", others)} also holds them: the agent reads {table} only")
+            : Ok("log_analytics", message);
+    }
+
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0
         ? Ok("instances", listed == 1 ? "the agent signs in to the replica" : $"the agent signs in to all {listed} replicas")

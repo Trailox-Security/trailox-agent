@@ -261,7 +261,7 @@ public sealed class AzureReadStats
 /// one file an hour and keeps it 1 to 7 days, so a window reads its part of a file only: the offset where the window
 /// begins is found by halving the file on the times of its lines, then the file is read from there in ranges.
 /// </summary>
-public sealed class AzureLogReader : IPgLogLines
+public sealed class AzureLogReader : IAzureLog
 {
     public const int ChunkBytes = 4 << 20;
     public const int ProbeBytes = 64 << 10;
@@ -292,6 +292,10 @@ public sealed class AzureLogReader : IPgLogLines
     }
 
     public AzureReadStats Stats { get; } = new();
+
+    /// <summary>The hour of the oldest file: Azure keeps the files for <c>logfiles.retention_days</c>.</summary>
+    public async Task<long?> OldestMicrosAsync(CancellationToken ct) =>
+        (await FilesAsync(ct)).Select(f => f.StartMicros).Where(s => s != null).Min();
 
     /// <summary>The files, oldest first; listed once per reader, and again when a link no longer reads.</summary>
     public async Task<IReadOnlyList<AzureLogFile>> FilesAsync(CancellationToken ct, bool again = false)

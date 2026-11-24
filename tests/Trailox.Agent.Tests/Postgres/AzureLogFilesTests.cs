@@ -373,7 +373,7 @@ public class AzureLogFilesTests
             Options = new Dictionary<string, string> { ["log_source"] = "file", ["log_directory"] = "/var/log/postgresql", ["azure_server"] = "orders" },
         };
 
-        Assert.Contains(new PostgresEngine().Validate(file), p => p == "options.azure_server: only with log_source: azure_files");
+        Assert.Contains(new PostgresEngine().Validate(file), p => p == "options.azure_server: only with log_source: azure_files or azure_log_analytics");
     }
 
     [Theory]

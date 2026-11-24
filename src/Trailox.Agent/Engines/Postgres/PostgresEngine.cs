@@ -5,7 +5,8 @@ namespace Trailox.Agent.Engines.Postgres;
 
 /// <summary>
 /// PostgreSQL 13 and later (agent 1.12): Amazon RDS and Aurora, read through the RDS API, Azure Database for PostgreSQL
-/// flexible server, read through Azure's server log download, and self-managed servers, read from their log directory.
+/// flexible server, read through Azure's server log download or Log Analytics, and self-managed servers, read from their
+/// log directory.
 /// The agent reads the server log for sign-ins, failed sign-ins and DDL, and signs in to the server for
 /// <c>pg_stat_statements</c> counters and the catalog.
 /// </summary>
@@ -13,11 +14,14 @@ namespace Trailox.Agent.Engines.Postgres;
 /// agent.yaml for this engine: <c>host</c>/<c>port</c> = the primary's address, <c>username</c> = the monitoring role,
 /// and its password reference. <c>options</c>:
 /// <list type="bullet">
-/// <item><c>log_source</c>: <c>rds_api</c>, <c>azure_files</c> or <c>file</c>;</item>
+/// <item><c>log_source</c>: <c>rds_api</c>, <c>azure_files</c>, <c>azure_log_analytics</c> or <c>file</c>;</item>
 /// <item><c>rds_api</c>: <c>instances</c> (the instance identifiers, primary first, each <c>id</c> or <c>id=host</c>)
 ///   and <c>rds_region</c>; the agent's own AWS identity reads the log files;</item>
 /// <item><c>azure_files</c>: <c>azure_subscription</c>, <c>azure_resource_group</c> and <c>azure_server</c>; the
 ///   agent's own Azure identity lists the log files (<see cref="ArmAzureLogFiles"/>);</item>
+/// <item><c>azure_log_analytics</c>: the same three, and optionally <c>azure_workspace_id</c> (query the workspace, not
+///   the server) and <c>azure_log_table</c> (<c>PGSQLServerLogs</c> or <c>AzureDiagnostics</c>; default: the one the
+///   server's rows are in); the agent's own Azure identity queries them (<see cref="ArmLogAnalyticsQuery"/>);</item>
 /// <item><c>file</c>: <c>log_directory</c>, the server's log directory mounted read-only in the agent's container;</item>
 /// <item><c>database</c>: where the agent signs in for the counters (default <c>postgres</c>).</item>
 /// </list>
@@ -27,15 +31,19 @@ public sealed class PostgresEngine : IEngine
     public const string LogSourceRdsApi = "rds_api";
     public const string LogSourceFile = "file";
     public const string LogSourceAzureFiles = "azure_files";
+    public const string LogSourceAzureLogAnalytics = "azure_log_analytics";
     public const string DefaultDatabase = "postgres";
 
     private static readonly HashSet<string> KnownOptions = new(StringComparer.Ordinal)
     {
         "log_source", "instances", "rds_region", "log_directory", "database", "azure_subscription", "azure_resource_group", "azure_server",
+        "azure_workspace_id", "azure_log_table",
     };
 
     private static readonly string[] RdsOptions = { "instances", "rds_region" };
     private static readonly string[] AzureOptions = { "azure_subscription", "azure_resource_group", "azure_server" };
+    private static readonly string[] LogAnalyticsOptions = { "azure_workspace_id", "azure_log_table" };
+    private const string AzureSources = LogSourceAzureFiles + " or " + LogSourceAzureLogAnalytics;
 
     // Azure: a subscription is a GUID; a resource group is 1-90 letters, digits, '-', '_', '.', '(' and ')', not ending in
     // '.'; a flexible server's name is 3-63 lower-case letters, digits and '-', neither first nor last.
@@ -101,7 +109,14 @@ public sealed class PostgresEngine : IEngine
         else if (source == LogSourceAzureFiles)
         {
             e.Kind = "cloud";
+            OnlyWith(e, LogAnalyticsOptions, LogSourceAzureLogAnalytics, problems);
             ValidateAzure(e, problems);
+        }
+        else if (source == LogSourceAzureLogAnalytics)
+        {
+            e.Kind = "cloud";
+            ValidateAzure(e, problems);
+            ValidateLogAnalytics(e, problems);
         }
         else if (source == LogSourceFile)
         {
@@ -109,8 +124,9 @@ public sealed class PostgresEngine : IEngine
         }
         else
         {
-            problems.Add($"options.log_source: {LogSourceRdsApi} (Amazon RDS and Aurora), {LogSourceAzureFiles} (Azure Database for "
-                + $"PostgreSQL flexible server) or {LogSourceFile} (a self-managed server's log directory)");
+            problems.Add($"options.log_source: {LogSourceRdsApi} (Amazon RDS and Aurora), {LogSourceAzureFiles} or "
+                + $"{LogSourceAzureLogAnalytics} (Azure Database for PostgreSQL flexible server: its server log download, or its "
+                + $"rows in Log Analytics) or {LogSourceFile} (a self-managed server's log directory)");
         }
         return problems;
     }
@@ -126,7 +142,8 @@ public sealed class PostgresEngine : IEngine
     private static void ValidateRds(EndpointConfig e, List<string> problems)
     {
         OnlyWith(e, new[] { "log_directory" }, LogSourceFile, problems);
-        OnlyWith(e, AzureOptions, LogSourceAzureFiles, problems);
+        OnlyWith(e, AzureOptions, AzureSources, problems);
+        OnlyWith(e, LogAnalyticsOptions, LogSourceAzureLogAnalytics, problems);
         if (!RegionPattern.IsMatch(e.Options.GetValueOrDefault("rds_region", "")))
         {
             problems.Add("options.rds_region: the instances' AWS region, e.g. eu-west-1");
@@ -157,10 +174,25 @@ public sealed class PostgresEngine : IEngine
         }
     }
 
+    private static void ValidateLogAnalytics(EndpointConfig e, List<string> problems)
+    {
+        if (e.Options.TryGetValue("azure_workspace_id", out var workspace) && !SubscriptionPattern.IsMatch(workspace))
+        {
+            problems.Add("options.azure_workspace_id: the Log Analytics workspace's id (a GUID, its \"Workspace ID\"), e.g. "
+                + "00000000-0000-0000-0000-000000000000; leave it out to query the server's own rows");
+        }
+        if (e.Options.TryGetValue("azure_log_table", out var table) && !AzureLogTables.All.Contains(table, StringComparer.Ordinal))
+        {
+            problems.Add($"options.azure_log_table: {string.Join(" or ", AzureLogTables.All)} (the diagnostic setting's destination "
+                + "table: Resource specific, or Azure diagnostics); leave it out to use the one that holds the server's rows");
+        }
+    }
+
     private static void ValidateFile(EndpointConfig e, List<string> problems)
     {
         OnlyWith(e, RdsOptions, LogSourceRdsApi, problems);
-        OnlyWith(e, AzureOptions, LogSourceAzureFiles, problems);
+        OnlyWith(e, AzureOptions, AzureSources, problems);
+        OnlyWith(e, LogAnalyticsOptions, LogSourceAzureLogAnalytics, problems);
         var dir = e.Options.GetValueOrDefault("log_directory", "");
         if (!dir.StartsWith('/'))
         {

@@ -226,6 +226,15 @@ internal static class PgFixtures
     /// <summary>An hour of Azure Database for PostgreSQL's server log download (prefix %t-%c-), its first 479 lines.</summary>
     public static string AzureDownload => Path.Combine(Root(), "tests", "Trailox.Agent.Tests", "Fixtures", "pg-azure-download.log");
 
+    /// <summary>
+    /// The same stretch of one server's log read from both of Azure's sources: <c>.json</c> is Log Analytics' answer to
+    /// the agent's query (<c>PGSQLServerLogs</c>), <c>.log</c> the download's lines. <c>traffic</c> (15:30 to 15:40)
+    /// holds sign-ins, refused sign-ins, DDL and pgaudit rows; <c>odd</c> (16:50 to 16:55) statements with newlines, a
+    /// tab, quotes, a backslash and a field separator written in their text.
+    /// </summary>
+    public static string AzureBoth(string name, string extension) =>
+        Path.Combine(Root(), "tests", "Trailox.Agent.Tests", "Fixtures", $"pg-azure-la-{name}.{extension}");
+
     private static string Root()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

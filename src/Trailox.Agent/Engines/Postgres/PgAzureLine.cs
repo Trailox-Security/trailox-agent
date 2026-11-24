@@ -87,6 +87,55 @@ public static class PgAzureLine
             : null;
     }
 
+    /// <summary>
+    /// A record as Azure's download writes it, from the record's text and fields as Log Analytics keeps them: the text,
+    /// then each field that has a value as <c>","name": "value</c>, all escaped as JSON string content.
+    /// </summary>
+    /// <remarks>Every quote of a value is escaped, so no value can forge a field (<see cref="Split"/> reads it back whole).</remarks>
+    public static string Join(string text, IEnumerable<Field> fields)
+    {
+        var b = new StringBuilder(text.Length + 16);
+        Escape(text, b);
+        foreach (var f in fields.Where(f => !string.IsNullOrEmpty(f.Value)))
+        {
+            b.Append("\",\"").Append(f.Name).Append("\": \"");
+            Escape(f.Value, b);
+        }
+        return b.ToString();
+    }
+
+    /// <summary>Text as JSON string content: the escapes <see cref="Unescape"/> reads back.</summary>
+    internal static void Escape(string s, StringBuilder b)
+    {
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"':
+                    b.Append("\\\"");
+                    break;
+                case '\\':
+                    b.Append("\\\\");
+                    break;
+                case '\n':
+                    b.Append("\\n");
+                    break;
+                case '\r':
+                    b.Append("\\r");
+                    break;
+                case '\t':
+                    b.Append("\\t");
+                    break;
+                case < ' ':
+                    b.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    break;
+                default:
+                    b.Append(c);
+                    break;
+            }
+        }
+    }
+
     /// <summary>JSON string content as text; an escape JSON does not know is kept as it is.</summary>
     internal static string Unescape(ReadOnlySpan<char> s)
     {
