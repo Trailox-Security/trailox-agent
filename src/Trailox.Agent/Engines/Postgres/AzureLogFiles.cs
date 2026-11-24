@@ -254,6 +254,9 @@ public sealed class AzureReadStats
     /// <summary>Everything downloaded, the look-backs' and the binary searches' reads included.</summary>
     public long Bytes { get; internal set; }
     public int Reads { get; internal set; }
+
+    /// <summary>Rows the source could not make a line of (a Log Analytics row with no message); counted as unreadable.</summary>
+    public int Unreadable { get; internal set; }
 }
 
 /// <summary>

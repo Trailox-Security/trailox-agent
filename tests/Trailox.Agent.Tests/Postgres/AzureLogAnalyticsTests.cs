@@ -29,34 +29,58 @@ public class AzureLogAnalyticsTests
         return ArmLogAnalyticsQuery.Page(doc, 0).Rows;
     }
 
-    /// <summary>Answers as the query API does: rows by time then id, a page at a time; a page can be cut short.</summary>
+    private const string WorkspaceA = "aaaaaaaa-0000-0000-0000-000000000001";
+    private const string WorkspaceB = "bbbbbbbb-0000-0000-0000-000000000002";
+
+    /// <summary>
+    /// Answers as the query API does: rows by time then id, a page at a time; a page can be cut short. Without a
+    /// workspace named, every workspace's rows answer, as the server's own query does.
+    /// </summary>
     private sealed class FakeLogs : IAzureLogQuery
     {
-        private readonly IReadOnlyList<AzureLogRow> _rows;
+        private readonly List<(string Workspace, AzureLogRow Row)> _rows;
 
-        public FakeLogs(string fixture) => _rows = FixtureRows(fixture);
+        /// <param name="workspaces">
+        /// The workspaces that hold the fixture: each the same records with ids of its own, as two diagnostic settings write them.
+        /// </param>
+        public FakeLogs(string fixture, params string[] workspaces)
+        {
+            var rows = FixtureRows(fixture);
+            _rows = (workspaces.Length == 0 ? new[] { WorkspaceA } : workspaces)
+                .SelectMany((w, i) => rows.Select(r => (w, i == 0 ? r : r with { ItemId = r.ItemId[..^12] + i.ToString("x12", CultureInfo.InvariantCulture) })))
+                .ToList();
+        }
+
+        public FakeLogs(IEnumerable<AzureLogRow> rows) => _rows = rows.Select(r => (WorkspaceA, r)).ToList();
 
         public List<int> Pages { get; } = new();
+        public List<AzureLogTarget> Targets { get; } = new();
         public Func<int, bool> CutShort { get; set; } = _ => false;
-        public List<AzureLogTableRows> Tables { get; set; } = new();
 
-        public Task<AzureLogPage> RowsAsync(string table, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct)
+        private IEnumerable<AzureLogRow> Of(AzureLogTarget target)
         {
-            Assert.Equal(AzureLogTables.ResourceSpecific, table);
+            Assert.Equal(AzureLogTables.ResourceSpecific, target.Table);
+            return _rows.Where(x => target.Workspace == null || x.Workspace == target.Workspace).Select(x => x.Row);
+        }
+
+        public Task<AzureLogPage> RowsAsync(AzureLogTarget target, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct)
+        {
+            Targets.Add(target);
             Pages.Add(max);
-            var rows = _rows.Where(r => r.Micros >= fromMicros && r.Micros < toMicros)
+            var rows = Of(target).Where(r => r.Micros >= fromMicros && r.Micros < toMicros)
                 .Where(r => after is not { } p || r.Ticks > p.Ticks || (r.Ticks == p.Ticks && string.CompareOrdinal(r.ItemId, p.ItemId) > 0))
                 .OrderBy(r => r.Ticks).ThenBy(r => r.ItemId, StringComparer.Ordinal).Take(max).ToList();
             return Task.FromResult(CutShort(max)
-                ? new AzureLogPage(rows.Take(rows.Count / 2).ToList(), 10, Partial: true)
+                ? new AzureLogPage(Array.Empty<AzureLogRow>(), 10, Partial: true)
                 : new AzureLogPage(rows, rows.Sum(r => r.Message.Length), Partial: false));
         }
 
-        public Task<bool> AnyFromAsync(string table, long micros, CancellationToken ct) => Task.FromResult(_rows.Any(r => r.Micros >= micros));
+        public Task<bool> AnyFromAsync(AzureLogTarget target, long micros, CancellationToken ct) => Task.FromResult(Of(target).Any(r => r.Micros >= micros));
 
-        public Task<IReadOnlyList<AzureLogTableRows>> TablesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureLogTableRows>>(Tables);
+        public Task<IReadOnlyList<AzureLogTableRows>> TablesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<AzureLogTableRows>>(
+            _rows.GroupBy(x => x.Workspace).Select(g => new AzureLogTableRows(AzureLogTables.ResourceSpecific, g.Key, g.Count(), g.Max(x => x.Row.Micros))).ToList());
 
-        public Task<long?> OldestMicrosAsync(string table, CancellationToken ct) => Task.FromResult<long?>(_rows.Min(r => r.Micros));
+        public Task<long?> OldestMicrosAsync(AzureLogTarget target, CancellationToken ct) => Task.FromResult<long?>(Of(target).Min(r => r.Micros));
     }
 
     /// <summary>The same stretch as one hourly file of the download.</summary>
@@ -106,6 +130,8 @@ public class AzureLogAnalyticsTests
 
     private static string S(JsonElement row, string column) => row.GetProperty(column).ToString();
 
+    private static readonly AzureLogTarget Rs = new(AzureLogTables.ResourceSpecific);
+
     private static async Task<List<JsonElement>> ShippedAsync(PgSource source, string from, string to) =>
         (await RowsAsync((await source.OpenAsync(Window(from, to), CancellationToken.None))!)).Where(r => S(r, "level") != "summary").ToList();
 
@@ -127,7 +153,7 @@ public class AzureLogAnalyticsTests
     /// </summary>
     [Theory]
     [InlineData("traffic", "15", "2026-01-15 15:32:00", "2026-01-15 15:36:00")]
-    [InlineData("traffic", "15", "2026-01-15 15:30:00", "2026-01-15 15:40:00")]
+    [InlineData("traffic", "15", "2026-01-15 15:30:00", "2026-01-15 15:39:00")]   // the fixture's last row is 15:39:59
     [InlineData("odd", "16", "2026-01-15 16:51:00", "2026-01-15 16:54:00")]
     public async Task A_window_ships_the_same_rows_from_log_analytics_as_from_the_download(string fixture, string hour, string from, string to)
     {
@@ -223,8 +249,8 @@ public class AzureLogAnalyticsTests
         var one = new FakeLogs("traffic");
         var paged = new FakeLogs("traffic");
 
-        var whole = await LinesAsync(new AzureLogAnalyticsReader(one, AzureLogTables.ResourceSpecific), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
-        var pages = await LinesAsync(new AzureLogAnalyticsReader(paged, AzureLogTables.ResourceSpecific, pageRows: 100), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
+        var whole = await LinesAsync(new AzureLogAnalyticsReader(one, Rs), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
+        var pages = await LinesAsync(new AzureLogAnalyticsReader(paged, Rs, pageRows: 100), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
 
         Assert.Equal(whole, pages);
         Assert.Single(one.Pages);
@@ -236,13 +262,13 @@ public class AzureLogAnalyticsTests
     [Fact]
     public async Task A_page_cut_short_is_asked_again_with_fewer_rows()
     {
-        var expected = await LinesAsync(new AzureLogAnalyticsReader(new FakeLogs("traffic"), AzureLogTables.ResourceSpecific), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
+        var expected = await LinesAsync(new AzureLogAnalyticsReader(new FakeLogs("traffic"), Rs), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
         var logs = new FakeLogs("traffic") { CutShort = max => max > 150 };
 
-        var lines = await LinesAsync(new AzureLogAnalyticsReader(logs, AzureLogTables.ResourceSpecific), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
+        var lines = await LinesAsync(new AzureLogAnalyticsReader(logs, Rs), "2026-01-15 15:30:00", "2026-01-15 15:39:00");
 
         Assert.Equal(expected, lines);
-        Assert.Equal(new[] { 20_000, 10_000, 5_000, 2_500, 1_250, 625, 312, 156, 100 }, logs.Pages.Take(9));
+        Assert.Equal(new[] { 10_000, 5_000, 2_500, 1_250, 625, 312, 156, 100 }, logs.Pages.Take(8));
     }
 
     [Fact]
@@ -251,7 +277,7 @@ public class AzureLogAnalyticsTests
         var logs = new FakeLogs("traffic") { CutShort = _ => true };
 
         var ex = await Assert.ThrowsAsync<SourceException>(() =>
-            LinesAsync(new AzureLogAnalyticsReader(logs, AzureLogTables.ResourceSpecific), "2026-01-15 15:30:00", "2026-01-15 15:39:00"));
+            LinesAsync(new AzureLogAnalyticsReader(logs, Rs), "2026-01-15 15:30:00", "2026-01-15 15:39:00"));
 
         Assert.Contains("cut short even 100 rows", ex.Message);
     }
@@ -281,28 +307,118 @@ public class AzureLogAnalyticsTests
         }
     }
 
+    /// <summary>
+    /// 🔴 No row after a window is never read as an empty window: on Azure the platform's own sign-ins write rows every
+    ///    minute, so silence means the server stopped or its diagnostic setting no longer sends there. The traffic
+    ///    fixture's newest row is 15:39:59.
+    /// </summary>
     [Fact]
-    public void The_table_is_the_one_that_holds_the_servers_rows_resource_specific_first()
+    public async Task An_old_window_with_no_row_after_it_fails_and_says_why()
     {
-        AzureLogTableRows Rows(string table, long n) => new(table, n);
+        var source = new PgSource(Endpoint(), utcNow: () => new DateTime(2026, 1, 15, 17, 0, 0, DateTimeKind.Utc), logAnalytics: new FakeLogs("traffic"));
 
-        Assert.Equal("PGSQLServerLogs", PgSource.LogTableOf(new[] { Rows("PGSQLServerLogs", 5), Rows("AzureDiagnostics", 9) }));
-        Assert.Equal("AzureDiagnostics", PgSource.LogTableOf(new[] { Rows("PGSQLServerLogs", 0), Rows("AzureDiagnostics", 9) }));
-        Assert.Equal("PGSQLServerLogs", PgSource.LogTableOf(new[] { Rows("AzureDiagnostics", 0) }));
-        Assert.Equal("PGSQLServerLogs", PgSource.LogTableOf(Array.Empty<AzureLogTableRows>()));
+        var ex = await Assert.ThrowsAsync<SourceException>(async () =>
+            await RowsAsync((await source.OpenAsync(Window("2026-01-15 15:39:00", "2026-01-15 15:40:00"), CancellationToken.None))!));
+
+        Assert.False(ex.NotYetPublished);
+        Assert.Contains("Log Analytics has no row of orders in PGSQLServerLogs after the window: the server is stopped, or nothing sends "
+            + "its PostgreSQLLogs there any more (check its diagnostic setting)", ex.Message);
+    }
+
+    /// <summary>
+    /// 🔴 Two diagnostic settings send each record to two workspaces, and the server's own query answers it from both:
+    ///    only one workspace is read, so every row ships once.
+    /// </summary>
+    [Fact]
+    public async Task Rows_that_reach_two_workspaces_ship_once()
+    {
+        var once = new PgSource(Endpoint(), utcNow: () => Later, logAnalytics: new FakeLogs("traffic"));
+        var twice = new FakeLogs("traffic", WorkspaceA, WorkspaceB);
+        var both = new PgSource(Endpoint(), utcNow: () => Later, logAnalytics: twice);
+
+        var expected = await ShippedAsync(once, "2026-01-15 15:32:00", "2026-01-15 15:36:00");
+        var shipped = await ShippedAsync(both, "2026-01-15 15:32:00", "2026-01-15 15:36:00");
+
+        Assert.Equal(expected.Select(r => r.GetRawText()), shipped.Select(r => r.GetRawText()));
+        Assert.All(twice.Targets, t => Assert.Equal(WorkspaceA, t.Workspace));
+    }
+
+    [Fact]
+    public void The_target_is_the_table_that_holds_the_rows_and_one_workspace_of_them()
+    {
+        AzureLogTableRows Rows(string table, long n, string workspace = WorkspaceA) => new(table, workspace, n, null);
+
+        Assert.Equal(new AzureLogTarget("PGSQLServerLogs"), PgSource.LogTargetOf(new[] { Rows("PGSQLServerLogs", 5), Rows("AzureDiagnostics", 9) }));
+        Assert.Equal(new AzureLogTarget("AzureDiagnostics"), PgSource.LogTargetOf(new[] { Rows("PGSQLServerLogs", 0), Rows("AzureDiagnostics", 9) }));
+        Assert.Equal(new AzureLogTarget("PGSQLServerLogs"), PgSource.LogTargetOf(new[] { Rows("AzureDiagnostics", 0) }));
+        Assert.Equal(new AzureLogTarget("PGSQLServerLogs"), PgSource.LogTargetOf(Array.Empty<AzureLogTableRows>()));
+        Assert.Equal(new AzureLogTarget("AzureDiagnostics"), PgSource.LogTargetOf(new[] { Rows("PGSQLServerLogs", 5) }, given: "AzureDiagnostics"));
+        // Two workspaces: the one with the most rows, the first by id on a tie.
+        Assert.Equal(new AzureLogTarget("PGSQLServerLogs", WorkspaceB),
+            PgSource.LogTargetOf(new[] { Rows("PGSQLServerLogs", 5, WorkspaceA), Rows("PGSQLServerLogs", 7, WorkspaceB) }));
+        Assert.Equal(new AzureLogTarget("PGSQLServerLogs", WorkspaceA),
+            PgSource.LogTargetOf(new[] { Rows("PGSQLServerLogs", 7, WorkspaceB), Rows("PGSQLServerLogs", 7, WorkspaceA) }));
     }
 
     [Theory]
-    [InlineData(0, new string[0], "fail", "no row of its server log came to Log Analytics in the last day in PGSQLServerLogs. Send its PostgreSQLLogs category there")]
-    [InlineData(0, new[] { "AzureDiagnostics" }, "fail", "no row of its server log came to PGSQLServerLogs in the last day, but AzureDiagnostics has them: set options.azure_log_table")]
-    [InlineData(6480, new string[0], "ok", "6480 rows of its server log came to PGSQLServerLogs in the last day, the oldest kept from 2026-01-15 11:13 UTC")]
-    [InlineData(6480, new[] { "AzureDiagnostics" }, "warn", "AzureDiagnostics also holds them: the agent reads PGSQLServerLogs only")]
-    public void The_probe_says_whether_log_analytics_receives_the_servers_log(long rows, string[] others, string status, string said)
+    [InlineData(0, "16:39", new string[0], 1, "fail", "no row of its server log came to Log Analytics in the last day in PGSQLServerLogs. Send its PostgreSQLLogs category there")]
+    [InlineData(0, "16:39", new[] { "AzureDiagnostics" }, 1, "fail", "no row of its server log came to PGSQLServerLogs in the last day, but AzureDiagnostics has them: set options.azure_log_table")]
+    [InlineData(6480, "15:20", new string[0], 1, "fail", "the newest row of its server log in PGSQLServerLogs is from 2026-01-15 15:20 UTC: nothing has sent it there since")]
+    [InlineData(6480, "16:39", new string[0], 1, "ok", "6480 rows of its server log came to PGSQLServerLogs in the last day, the newest from 2026-01-15 16:39 UTC, the oldest kept from 2026-01-15 11:13 UTC")]
+    [InlineData(6480, "16:39", new[] { "AzureDiagnostics" }, 1, "warn", "AzureDiagnostics also holds them: the agent reads PGSQLServerLogs only")]
+    [InlineData(6480, "16:39", new string[0], 2, "warn", "its rows reach 2 workspaces (" + WorkspaceA + ", " + WorkspaceB + "), each with the same rows: the agent reads " + WorkspaceA + "'s only")]
+    public void The_probe_says_whether_log_analytics_receives_the_servers_log(long rows, string newest, string[] tables, int workspaces, string status, string said)
     {
-        var check = PgProbeChecks.AzureLogAnalytics("orders", "PGSQLServerLogs", rows, Micros("2026-01-15 11:13:00"), others);
+        var check = PgProbeChecks.AzureLogAnalytics("orders", new AzureLogTarget("PGSQLServerLogs", workspaces > 1 ? WorkspaceA : null), rows,
+            Micros("2026-01-15 11:13:00"), Micros("2026-01-15 " + newest), Micros("2026-01-15 16:40:00"), tables,
+            new[] { WorkspaceA, WorkspaceB }.Take(workspaces).ToList());
 
         Assert.Equal(("log_analytics", status), (check.Name, check.Status));
         Assert.Contains(said, check.Message);
+    }
+
+    /// <summary>A row with no message is no record: it is counted as unreadable, and joins no record before it.</summary>
+    [Fact]
+    public async Task A_row_with_no_message_is_counted_not_joined_to_the_record_before()
+    {
+        var rows = FixtureRows("traffic").ToList();
+        var at = rows.FindIndex(r => r.Message.Contains("connection authorized: user=app_user", StringComparison.Ordinal));
+        rows.Insert(at + 1, rows[at] with { ItemId = rows[at].ItemId[..^1] + "f", Message = "",
+            Fields = new[] { new PgAzureLine.Field("statement", "DROP TABLE shop.cards") } });
+        var source = new PgSource(Endpoint(), utcNow: () => Later, logAnalytics: new FakeLogs(rows));
+
+        var all = await RowsAsync((await source.OpenAsync(Window("2026-01-15 15:33:00", "2026-01-15 15:35:00"), CancellationToken.None))!);
+
+        Assert.Contains(all, r => S(r, "message").StartsWith("connection authorized: user=app_user", StringComparison.Ordinal) && !S(r, "message").Contains('\n'));
+        Assert.DoesNotContain(all, r => S(r, "message").Contains("DROP TABLE shop.cards", StringComparison.Ordinal));
+        var counts = JsonDocument.Parse(S(all.Single(r => S(r, "level") == "summary"), "message")).RootElement;
+        Assert.Equal(1, counts.GetProperty("unreadable").GetInt32());
+    }
+
+    /// <summary>🔴 A page that ends inside one millisecond goes on after the last row's id, not its time: none lost, none twice.</summary>
+    [Fact]
+    public async Task A_page_that_ends_inside_one_millisecond_goes_on_by_id()
+    {
+        var at = ArmLogAnalyticsQuery.Ticks("2026-01-15T15:30:00.123Z");
+        var rows = Enumerable.Range(1, 150).Select(i => new AzureLogRow(at, $"{i:x8}-0000-1000-8000-000000000000",
+            $"2026-01-15 15:30:00 UTC-6968fe48.{i:x}-LOG:  connection received: host=127.0.0.1 port={i}", Array.Empty<PgAzureLine.Field>())).ToList();
+        var logs = new FakeLogs(rows);
+
+        var lines = await LinesAsync(new AzureLogAnalyticsReader(logs, Rs, pageRows: 100), "2026-01-15 15:30:00", "2026-01-15 15:31:00");
+
+        Assert.Equal(rows.Select(r => r.Message), lines);
+        Assert.Equal(2, logs.Pages.Count);
+    }
+
+    /// <summary>A page is sized by the page before: long statements make smaller pages, never past the first size.</summary>
+    [Theory]
+    [InlineData(10_000, 3_000_000, 10_000)]   // 300 bytes a row: as many as the first page
+    [InlineData(1_000, 10_000_000, 838)]      // 10 KB a row: about 8 MB
+    [InlineData(100, 6_500_000, 129)]         // 65 KB a row
+    [InlineData(100, 100_000_000, 100)]       // never fewer than 100
+    public void The_next_page_is_sized_by_the_bytes_of_the_last(int rows, long bytes, int next)
+    {
+        Assert.Equal(next, new AzureLogAnalyticsReader(new FakeLogs("traffic"), Rs).NextPageRows(rows, bytes));
     }
 
     private sealed class Token : TokenCredential
@@ -329,13 +445,13 @@ public class AzureLogAnalyticsTests
 
         public Api(params Func<HttpResponseMessage>[] answers) => _answers = new Queue<Func<HttpResponseMessage>>(answers);
 
-        public List<(string Url, string? Prefer, string? Auth, JsonElement Body)> Sent { get; } = new();
+        public List<(string Url, string? Prefer, string? Auth, string? CacheControl, JsonElement Body)> Sent { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken)).RootElement.Clone();
             Sent.Add((request.RequestUri!.ToString(), request.Headers.TryGetValues("Prefer", out var p) ? p.Single() : null,
-                request.Headers.Authorization?.ToString(), body));
+                request.Headers.Authorization?.ToString(), request.Headers.CacheControl?.ToString(), body));
             return (_answers.Count > 1 ? _answers.Dequeue() : _answers.Peek())();
         }
     }
@@ -359,7 +475,7 @@ public class AzureLogAnalyticsTests
         var api = new Api(Fixture());
         var token = new Token();
 
-        var page = await Query(api, token: token).RowsAsync("PGSQLServerLogs", Micros("2026-01-15 15:30:00"), Micros("2026-01-15 15:40:00"), null, 20_000, CancellationToken.None);
+        var page = await Query(api, token: token).RowsAsync(Rs, Micros("2026-01-15 15:30:00"), Micros("2026-01-15 15:40:00"), null, 20_000, CancellationToken.None);
 
         Assert.Equal(208, page.Rows.Count);
         Assert.False(page.Partial);
@@ -372,6 +488,7 @@ public class AzureLogAnalyticsTests
         var kql = sent.Body.GetProperty("query").GetString()!;
         Assert.StartsWith("PGSQLServerLogs\n| where TimeGenerated >= datetime(2026-01-15T15:30:00.0000000Z) and TimeGenerated < datetime(2026-01-15T15:40:00.0000000Z)", kql);
         Assert.EndsWith("| sort by TimeGenerated asc, _ItemId asc\n| take 20000", kql);
+        Assert.Equal("no-cache", sent.CacheControl);
         Assert.DoesNotContain("_ResourceId", kql);
     }
 
@@ -381,7 +498,7 @@ public class AzureLogAnalyticsTests
     {
         var api = new Api(Fixture());
 
-        await Query(api, Workspace).RowsAsync("PGSQLServerLogs", Micros("2026-01-15 15:30:00"), Micros("2026-01-15 15:40:00"), null, 100, CancellationToken.None);
+        await Query(api, Workspace).RowsAsync(Rs, Micros("2026-01-15 15:30:00"), Micros("2026-01-15 15:40:00"), null, 100, CancellationToken.None);
 
         Assert.Equal($"https://api.loganalytics.azure.com/v1/workspaces/{Workspace}/query", api.Sent.Single().Url);
         Assert.Contains($"| where _ResourceId =~ '/subscriptions/{Subscription}/resourceGroups/rg-databases/providers/Microsoft.DBforPostgreSQL/flexibleServers/orders'",
@@ -389,11 +506,19 @@ public class AzureLogAnalyticsTests
     }
 
     [Fact]
+    public void A_target_with_a_workspace_reads_that_workspaces_rows_only()
+    {
+        var kql = ArmLogAnalyticsQuery.RowsQuery(new AzureLogTarget(AzureLogTables.ResourceSpecific, WorkspaceA), null, 0, 1, null, 50);
+
+        Assert.StartsWith($"PGSQLServerLogs\n| where TenantId == '{WorkspaceA}'\n| where TimeGenerated", kql);
+    }
+
+    [Fact]
     public void The_next_page_starts_after_the_last_rows_time_and_id()
     {
         var after = new AzureLogPosition(ArmLogAnalyticsQuery.Ticks("2026-01-15T15:30:02.29Z"), "0000003c-0000-1000-8000-000000000000");
 
-        var kql = ArmLogAnalyticsQuery.RowsQuery("PGSQLServerLogs", null, 0, 1, after, 50);
+        var kql = ArmLogAnalyticsQuery.RowsQuery(Rs, null, 0, 1, after, 50);
 
         Assert.Contains("| where TimeGenerated > datetime(2026-01-15T15:30:02.2900000Z) or (TimeGenerated == datetime(2026-01-15T15:30:02.2900000Z) "
             + "and strcmp(_ItemId, '0000003c-0000-1000-8000-000000000000') > 0)", kql);
@@ -410,7 +535,7 @@ public class AzureLogAnalyticsTests
     [Fact]
     public void The_legacy_table_is_read_by_its_category()
     {
-        var kql = ArmLogAnalyticsQuery.RowsQuery("AzureDiagnostics", "/subscriptions/x", 0, 1, null, 50);
+        var kql = ArmLogAnalyticsQuery.RowsQuery(new AzureLogTarget(AzureLogTables.AzureDiagnostics), "/subscriptions/x", 0, 1, null, 50);
 
         Assert.StartsWith("AzureDiagnostics\n| where Category == 'PostgreSQLLogs'\n| where _ResourceId =~ '/subscriptions/x'", kql);
         Assert.Contains("Statement = tostring(column_ifexists('statement_s', ''))", kql);
@@ -428,9 +553,22 @@ public class AzureLogAnalyticsTests
         var cut = File.ReadAllText(PgFixtures.AzureBoth("traffic", "json")).TrimEnd()[..^1]
             + ",\"error\":{\"code\":\"PartialError\",\"message\":\"There were some errors when processing your query.\"}}";
 
-        var page = await Query(new Api(() => Json(HttpStatusCode.OK, cut))).RowsAsync("PGSQLServerLogs", 0, 1, null, 20_000, CancellationToken.None);
+        var page = await Query(new Api(() => Json(HttpStatusCode.OK, cut))).RowsAsync(Rs, 0, 1, null, 20_000, CancellationToken.None);
 
         Assert.True(page.Partial);
+        Assert.Empty(page.Rows);   // never read, so never built: a cut answer is up to 64 MB
+    }
+
+    [Theory]
+    [InlineData("""{"tables":[{"name":"PrimaryResult","rows":[]}]}""", "no columns or rows")]
+    [InlineData("""{"tables":[{"name":"PrimaryResult","columns":[{"name":"TimeGenerated"}],"rows":[{"a":1}]}]}""", "not a list of values")]
+    [InlineData("""{"tables":[{"name":"PrimaryResult","columns":[{"name":"TimeGenerated"},{"name":"_ItemId"}],"rows":[[null,"x"]]}]}""", "no TimeGenerated or _ItemId")]
+    public async Task An_answer_of_another_shape_fails_as_the_sources_error(string body, string said)
+    {
+        var ex = await Assert.ThrowsAsync<SourceException>(() =>
+            Query(new Api(() => Json(HttpStatusCode.OK, body))).RowsAsync(Rs, 0, 1, null, 50, CancellationToken.None));
+
+        Assert.Contains(said, ex.Message);
     }
 
     private const string NoTable = """
@@ -446,7 +584,9 @@ public class AzureLogAnalyticsTests
 
     [Theory]
     [InlineData(HttpStatusCode.Forbidden, Denied, null, "access denied (AuthorizationFailedError). The agent's Azure identity needs Microsoft.Insights/logs/*/read on the server")]
-    [InlineData(HttpStatusCode.Forbidden, Denied, Workspace, "needs Log Analytics Reader on workspace " + Workspace)]
+    [InlineData(HttpStatusCode.Forbidden, Denied, Workspace, "needs, on workspace " + Workspace + ", a role with Microsoft.OperationalInsights/workspaces/read, "
+        + "workspaces/query/read and workspaces/query/PGSQLServerLogs/read (or Log Analytics Reader)")]
+    [InlineData(HttpStatusCode.Forbidden, """{"error":{"code":5,"message":["not","text"]}}""", null, "access denied (). The agent's Azure identity needs")]
     [InlineData(HttpStatusCode.NotFound, """{"error":{"code":"WorkspaceNotFoundError","message":"m"}}""", Workspace, "no such workspace (WorkspaceNotFoundError)")]
     [InlineData(HttpStatusCode.BadRequest, NoTable, null, "no table PGSQLServerLogs there. Send the server's PostgreSQLLogs there with a diagnostic setting")]
     [InlineData(HttpStatusCode.GatewayTimeout, "", null, "the query ran out of its 600 s")]
@@ -454,7 +594,7 @@ public class AzureLogAnalyticsTests
     public async Task A_refused_query_says_what_to_change(HttpStatusCode status, string body, string? workspace, string said)
     {
         var ex = await Assert.ThrowsAsync<SourceException>(() =>
-            Query(new Api(() => Json(status, body)), workspace).RowsAsync("PGSQLServerLogs", 0, 1, null, 50, CancellationToken.None));
+            Query(new Api(() => Json(status, body)), workspace).RowsAsync(Rs, 0, 1, null, 50, CancellationToken.None));
 
         Assert.Contains(said, ex.Message);
     }
@@ -471,7 +611,7 @@ public class AzureLogAnalyticsTests
         var api = new Api(Throttled, () => Json(HttpStatusCode.ServiceUnavailable, ""), Fixture());
         var waits = new List<TimeSpan>();
 
-        var page = await Query(api, waits: waits).RowsAsync("PGSQLServerLogs", 0, 1, null, 50, CancellationToken.None);
+        var page = await Query(api, waits: waits).RowsAsync(Rs, 0, 1, null, 50, CancellationToken.None);
 
         Assert.Equal(208, page.Rows.Count);
         Assert.Equal(new[] { TimeSpan.FromSeconds(7), TimeSpan.FromSeconds(20) }, waits);
@@ -482,24 +622,30 @@ public class AzureLogAnalyticsTests
     {
         var api = new Api(() => Json(HttpStatusCode.TooManyRequests, """{"error":{"code":"ThrottledError","message":"m"}}"""));
 
-        var ex = await Assert.ThrowsAsync<SourceException>(() => Query(api).RowsAsync("PGSQLServerLogs", 0, 1, null, 50, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<SourceException>(() => Query(api).RowsAsync(Rs, 0, 1, null, 50, CancellationToken.None));
 
         Assert.Contains("throttled (ThrottledError), 4 times", ex.Message);
         Assert.Equal(4, api.Sent.Count);
     }
 
     [Fact]
-    public async Task The_tables_are_counted_together_a_missing_one_left_out()
+    public async Task The_tables_are_counted_together_by_workspace_a_missing_one_left_out()
     {
         var api = new Api(() => Json(HttpStatusCode.OK, """
-            {"tables":[{"name":"PrimaryResult","columns":[{"name":"Table","type":"string"},{"name":"Rows","type":"long"}],
-              "rows":[["PGSQLServerLogs",6480],["AzureDiagnostics",0]]}]}
+            {"tables":[{"name":"PrimaryResult","columns":[{"name":"Table","type":"string"},{"name":"TenantId","type":"string"},
+              {"name":"Rows","type":"long"},{"name":"Newest","type":"datetime"}],
+              "rows":[["PGSQLServerLogs","aaaaaaaa-0000-0000-0000-000000000001",6480,"2026-01-15T16:39:57.181Z"],
+                      ["PGSQLServerLogs","bbbbbbbb-0000-0000-0000-000000000002",6470,"2026-01-15T16:39:50Z"]]}]}
             """));
 
         var tables = await Query(api).TablesAsync(CancellationToken.None);
 
-        Assert.Equal(new[] { ("PGSQLServerLogs", 6480L), ("AzureDiagnostics", 0L) }, tables.Select(t => (t.Table, t.Rows)));
-        Assert.StartsWith("union isfuzzy=true\n(PGSQLServerLogs\n", api.Sent.Single().Body.GetProperty("query").GetString());
+        Assert.Equal(new[] { ("PGSQLServerLogs", WorkspaceA, 6480L), ("PGSQLServerLogs", WorkspaceB, 6470L) },
+            tables.Select(t => (t.Table, t.Workspace, t.Rows)));
+        Assert.Equal(Micros("2026-01-15 16:39:57.181"), tables[0].NewestMicros);
+        var kql = api.Sent.Single().Body.GetProperty("query").GetString()!;
+        Assert.StartsWith("union isfuzzy=true\n(PGSQLServerLogs\n", kql);
+        Assert.Contains("| summarize Rows = count(), Newest = max(TimeGenerated) by TenantId", kql);
     }
 
     [Fact]

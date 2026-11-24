@@ -31,12 +31,14 @@ public sealed class PgSource : IEngineSource
     /// <summary>The server's rows in Log Analytics (<c>log_source: azure_log_analytics</c>); null for any other source.</summary>
     private readonly IAzureLogQuery? _logAnalytics;
 
+    /// <summary>The Log Analytics table given in <c>options.azure_log_table</c>; null to read the one the rows are in.</summary>
+    private readonly string? _givenTable;
+
     /// <summary>
-    /// The Log Analytics table the server's log is read from: <c>options.azure_log_table</c>, else the one the newest probe
-    /// found the server's rows in (<see cref="AzureLogTables.ResourceSpecific"/> until a probe says otherwise).
+    /// Where the server's rows in Log Analytics are read (<see cref="LogTargetOf"/>), from the newest probe, or the first
+    /// window when no probe found it: null until then. No window reads a table it has not seen the rows in.
     /// </summary>
-    private string _logTable = AzureLogTables.ResourceSpecific;
-    private readonly bool _logTableGiven;
+    private AzureLogTarget? _logTarget;
 
     /// <summary>The Region's RDS API calls, shared with this agent's other sources there; null without the RDS API.</summary>
     private readonly RdsCallBudget? _budget;
@@ -106,11 +108,7 @@ public sealed class PgSource : IEngineSource
             _instances = new[] { new PgInstance(server, endpoint.Host, "primary") };
             _logAnalytics = logAnalytics ?? new ArmLogAnalyticsQuery(http ?? new HttpClient(), endpoint.Options["azure_subscription"],
                 endpoint.Options["azure_resource_group"], server, endpoint.Options.GetValueOrDefault("azure_workspace_id"));
-            if (endpoint.Options.TryGetValue("azure_log_table", out var table))
-            {
-                _logTable = table;
-                _logTableGiven = true;
-            }
+            _givenTable = endpoint.Options.GetValueOrDefault("azure_log_table");
         }
         else
         {
@@ -293,7 +291,7 @@ public sealed class PgSource : IEngineSource
     }
 
     /// <summary>
-    /// A window older than this is read as Log Analytics holds it: an idle server sends no row past the window to wait for.
+    /// A window older than this needs only some row of the server after it: every row of the window has arrived by then.
     /// </summary>
     internal static readonly TimeSpan LogAnalyticsSettled = TimeSpan.FromHours(1);
 
@@ -306,19 +304,29 @@ public sealed class PgSource : IEngineSource
 
     /// <summary>
     /// One window of the server's rows in Log Analytics. A recent window waits until a row stamped
-    /// <see cref="LogAnalyticsArrivalMicros"/> past its end is there (or <see cref="LogAnalyticsSettled"/> has gone by).
+    /// <see cref="LogAnalyticsArrivalMicros"/> past its end is there; an older one needs a row after its end.
     /// </summary>
+    /// <remarks>
+    /// 🔴 No row after a window is never read as an empty window: on Azure the platform's own sign-ins write rows every
+    ///    minute, so none means the server is stopped or nothing sends its log there any more (a diagnostic setting
+    ///    removed or changed). The window fails and says so, while the download still holds those days.
+    /// </remarks>
     private async Task LogAnalyticsWindowAsync(AgentTask task, PgInstance instance, RowWriter rows, CancellationToken ct)
     {
         if (_prefix == null)
         {
             Prefix(AzureDefaultPrefix);
         }
-        var reader = new AzureLogAnalyticsReader(_logAnalytics!, _logTable);
+        var target = _logTarget ?? (await LogTargetAsync(ct)).Target;
+        var reader = new AzureLogAnalyticsReader(_logAnalytics!, target);
         var recent = _utcNow() - FromMicros(task.EndMicros) < LogAnalyticsSettled;
-        if (recent && !await reader.WrittenPastAsync(task.EndMicros + LogAnalyticsArrivalMicros, ct))
+        if (!await reader.WrittenPastAsync(task.EndMicros + (recent ? LogAnalyticsArrivalMicros : 0), ct))
         {
-            throw new SourceException("Log Analytics has not received the whole window yet") { NotYetPublished = true };
+            throw recent
+                ? new SourceException("Log Analytics has not received the whole window yet") { NotYetPublished = true }
+                : new SourceException($"Log Analytics has no row of {instance.Id} in {target.Table} after the window: the server is stopped, "
+                    + "or nothing sends its PostgreSQLLogs there any more (check its diagnostic setting). The server log download keeps "
+                    + "the last logfiles.retention_days");
         }
         var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
             _english, _rotationMinutes, _prefix, _sessions, reader, azureFile: true);
@@ -327,8 +335,8 @@ public sealed class PgSource : IEngineSource
     }
 
     /// <summary>
-    /// The server's rows in Log Analytics: which table holds them (the one given, else the resource-specific one first),
-    /// how many came in the last day, and the oldest. A workspace keeps them for its retention.
+    /// The server's rows in Log Analytics: which table and workspace hold them (<see cref="LogTargetOf"/>), how many came
+    /// in the last day, the newest and the oldest. A workspace keeps them for its retention.
     /// </summary>
     private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> LogAnalyticsAsync(CancellationToken ct)
     {
@@ -336,15 +344,15 @@ public sealed class PgSource : IEngineSource
         var checks = new List<PostgresCheck>();
         try
         {
-            var tables = await _logAnalytics!.TablesAsync(ct);
-            if (!_logTableGiven)
-            {
-                _logTable = LogTableOf(tables);
-            }
-            var found = tables.FirstOrDefault(r => r.Table == _logTable);
-            report.OldestLogMicros = found is { Rows: > 0 } ? await _logAnalytics.OldestMicrosAsync(_logTable, ct) ?? 0 : 0;
-            checks.Add(PgProbeChecks.AzureLogAnalytics(report.Id, _logTable, found?.Rows ?? 0, report.OldestLogMicros,
-                tables.Where(r => r.Table != _logTable && r.Rows > 0).Select(r => r.Table).ToList()));
+            var (target, tables) = await LogTargetAsync(ct);
+            var inTable = tables.Where(r => r.Table == target.Table && r.Rows > 0).ToList();
+            var read = inTable.Where(r => target.Workspace == null || r.Workspace == target.Workspace).ToList();
+            var rows = read.Sum(r => r.Rows);
+            report.OldestLogMicros = rows > 0 ? await _logAnalytics!.OldestMicrosAsync(target, ct) ?? 0 : 0;
+            checks.Add(PgProbeChecks.AzureLogAnalytics(report.Id, target, rows, report.OldestLogMicros,
+                read.Select(r => r.NewestMicros ?? 0).DefaultIfEmpty(0).Max(), (_utcNow() - DateTime.UnixEpoch).Ticks / 10,
+                tables.Where(r => r.Table != target.Table && r.Rows > 0).Select(r => r.Table).Distinct().ToList(),
+                inTable.Select(r => r.Workspace).Distinct().ToList()));
         }
         catch (SourceException ex)
         {
@@ -353,9 +361,28 @@ public sealed class PgSource : IEngineSource
         return (new List<PostgresInstance> { report }, checks, "stderr");
     }
 
-    /// <summary>The table that holds the server's rows: the resource-specific one first, and it when neither does.</summary>
-    internal static string LogTableOf(IReadOnlyList<AzureLogTableRows> tables) =>
-        AzureLogTables.All.FirstOrDefault(t => tables.Any(r => r.Table == t && r.Rows > 0)) ?? AzureLogTables.ResourceSpecific;
+    /// <summary>Finds where the server's rows are (<see cref="LogTargetOf"/>) and keeps it for the windows.</summary>
+    private async Task<(AzureLogTarget Target, IReadOnlyList<AzureLogTableRows> Tables)> LogTargetAsync(CancellationToken ct)
+    {
+        var tables = await _logAnalytics!.TablesAsync(ct);
+        var target = LogTargetOf(tables, _givenTable);
+        _logTarget = target;
+        return (target, tables);
+    }
+
+    /// <summary>
+    /// Where the server's rows are read: the table given, else the one that holds them (the resource-specific one first,
+    /// and it when neither does). 🔴 When they reach more than one workspace (two diagnostic settings), the server's own
+    /// query answers every row once per workspace, as Microsoft documents a resource's query (not measured: only one
+    /// workspace was there to send to): only the workspace with the most of them is read.
+    /// </summary>
+    internal static AzureLogTarget LogTargetOf(IReadOnlyList<AzureLogTableRows> tables, string? given = null)
+    {
+        var table = given ?? AzureLogTables.All.FirstOrDefault(t => tables.Any(r => r.Table == t && r.Rows > 0)) ?? AzureLogTables.ResourceSpecific;
+        var workspaces = tables.Where(r => r.Table == table && r.Rows > 0 && r.Workspace.Length > 0)
+            .OrderByDescending(r => r.Rows).ThenBy(r => r.Workspace, StringComparer.Ordinal).ToList();
+        return new AzureLogTarget(table, workspaces.Count > 1 ? workspaces[0].Workspace : null);
+    }
 
     /// <summary>The server's log files on Azure: how many, and the oldest; Azure keeps them for <c>logfiles.retention_days</c>.</summary>
     private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> AzureLogsAsync(CancellationToken ct)

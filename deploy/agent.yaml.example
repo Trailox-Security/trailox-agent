@@ -146,7 +146,8 @@ endpoints:
   #
   # The same server when a diagnostic setting already sends its PostgreSQLLogs to Log Analytics: the agent reads
   # those rows (minutes behind, not the download's up to 25). It needs a custom role with only
-  # Microsoft.Insights/logs/*/read on the server, or Log Analytics Reader on the workspace with azure_workspace_id.
+  # Microsoft.Insights/logs/*/read on the server. (With azure_workspace_id instead: workspaces/read,
+  # workspaces/query/read and workspaces/query/PGSQLServerLogs/read on the workspace.)
   # - alias: orders-azure-la
   #   engine: postgres
   #   kind: cloud

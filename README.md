@@ -455,8 +455,10 @@ or from Log Analytics; or a self-managed server, whose log directory is mounted 
   `AzureDiagnostics`): nothing new on the server, and no second copy. Rows reach Log Analytics 2 to 6 minutes after
   they are written (the download up to 25), so a window is read once a row 5 minutes past its end is there. The agent's
   Azure identity needs a custom role with only `Microsoft.Insights/logs/*/read`, assigned on the server: it reads that
-  server's rows and nothing else, in whatever workspace they are (Azure refuses a role that names one table). With
-  `azure_workspace_id` it needs Log Analytics Reader on the workspace instead. ⚠ Azure leaves out of both its sources
+  server's own logs and nothing of any other resource, in whatever workspace they are (Azure refuses a role that names
+  one table). With `azure_workspace_id` it needs, on the workspace, a custom role with
+  `Microsoft.OperationalInsights/workspaces/read`, `workspaces/query/read` and `workspaces/query/PGSQLServerLogs/read`
+  (or Log Analytics Reader): it reads that table only, but every server's rows in it. ⚠ Azure leaves out of both its sources
   a record longer than about 64 KB: a 70,000-character DDL statement was in neither, a 10,000-character one in both.
 - **The probe's checks:** `role`, `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
   (UTC), `logging_collector` (self-managed, when no log file is found), `pg_stat_statements` (created, and

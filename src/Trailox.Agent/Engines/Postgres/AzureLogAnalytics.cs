@@ -32,6 +32,10 @@ public static class AzureLogTables
     public static readonly IReadOnlyList<string> All = new[] { ResourceSpecific, AzureDiagnostics };
 }
 
+/// <summary>Where the server's rows are read: a table, and the one workspace they are read from when they reach several.</summary>
+/// <param name="Workspace">A workspace id (<c>TenantId</c> of its rows), or null for every workspace the query reaches.</param>
+public readonly record struct AzureLogTarget(string Table, string? Workspace = null);
+
 /// <summary>One row of the server's log in Log Analytics: its time (100 ns ticks), its id, the record's text and fields.</summary>
 public sealed record AzureLogRow(long Ticks, string ItemId, string Message, IReadOnlyList<PgAzureLine.Field> Fields)
 {
@@ -47,29 +51,31 @@ public sealed record AzureLogRow(long Ticks, string ItemId, string Message, IRea
 public readonly record struct AzureLogPosition(long Ticks, string ItemId);
 
 /// <summary>One answer of the query API.</summary>
-/// <param name="Partial">Azure cut the answer short (past 500,000 rows or about 64 MB) and said so beside the rows.</param>
+/// <param name="Partial">
+/// Azure cut the answer short (past 500,000 rows or about 64 MB) and said so beside the rows; its rows are not read.
+/// </param>
 public sealed record AzureLogPage(IReadOnlyList<AzureLogRow> Rows, long Bytes, bool Partial);
 
-/// <summary>How many of the server's rows a table received in the last day.</summary>
-public sealed record AzureLogTableRows(string Table, long Rows);
+/// <summary>How many of the server's rows a table received in one workspace in the last day, and the newest.</summary>
+public sealed record AzureLogTableRows(string Table, string Workspace, long Rows, long? NewestMicros);
 
 /// <summary>The reads the agent makes for <c>log_source: azure_log_analytics</c>. A seam, so tests run without Azure.</summary>
 public interface IAzureLogQuery
 {
     /// <summary>
-    /// Up to <paramref name="max"/> of the server's rows in <paramref name="table"/> stamped from
+    /// Up to <paramref name="max"/> of the server's rows of <paramref name="target"/> stamped from
     /// <paramref name="fromMicros"/> to before <paramref name="toMicros"/>, after <paramref name="after"/>, in order.
     /// </summary>
-    Task<AzureLogPage> RowsAsync(string table, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct);
+    Task<AzureLogPage> RowsAsync(AzureLogTarget target, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct);
 
-    /// <summary>Whether <paramref name="table"/> holds a row of the server stamped at or after <paramref name="micros"/>.</summary>
-    Task<bool> AnyFromAsync(string table, long micros, CancellationToken ct);
+    /// <summary>Whether <paramref name="target"/> holds a row of the server stamped at or after <paramref name="micros"/>.</summary>
+    Task<bool> AnyFromAsync(AzureLogTarget target, long micros, CancellationToken ct);
 
-    /// <summary>The server's rows in each of <see cref="AzureLogTables.All"/> over the last day.</summary>
+    /// <summary>The server's rows in each of <see cref="AzureLogTables.All"/>, by workspace, over the last day.</summary>
     Task<IReadOnlyList<AzureLogTableRows>> TablesAsync(CancellationToken ct);
 
-    /// <summary>The time of the server's oldest row in <paramref name="table"/>; null when it has none.</summary>
-    Task<long?> OldestMicrosAsync(string table, CancellationToken ct);
+    /// <summary>The time of the server's oldest row of <paramref name="target"/>; null when it has none.</summary>
+    Task<long?> OldestMicrosAsync(AzureLogTarget target, CancellationToken ct);
 }
 
 /// <summary>
@@ -80,14 +86,21 @@ public interface IAzureLogQuery
 /// <para>
 /// Without a workspace the query is the server's own (<c>/v1/{the server's resource id}/query</c>): Azure answers it with
 /// the server's rows only, in whatever workspace they are, and it needs <c>Microsoft.Insights/logs/*/read</c> on the
-/// server. Azure refuses a role that names one table (<c>Microsoft.Insights/logs/PGSQLServerLogs/read</c>: "does not
-/// match any of the actions supported", measured). The workspace must allow resource permissions, as every
-/// workspace made since 2019 does by default. With <c>azure_workspace_id</c> the workspace is queried and its rows
-/// filtered on the server's <c>_ResourceId</c>: that needs read access to the workspace (Log Analytics Reader).
+/// server, nothing else (measured with that role alone). Azure refuses a role that names one table
+/// (<c>Microsoft.Insights/logs/PGSQLServerLogs/read</c>: "does not match any of the actions supported", measured). The
+/// workspace must allow resource permissions, as every workspace made since 2019 does by default. With
+/// <c>azure_workspace_id</c> the workspace is queried and its rows filtered on the server's <c>_ResourceId</c>: that
+/// needs, on the workspace, a custom role with <c>Microsoft.OperationalInsights/workspaces/read</c>,
+/// <c>.../workspaces/query/read</c> and <c>.../workspaces/query/PGSQLServerLogs/read</c>, or Log Analytics Reader
+/// (both measured). Without <c>query/read</c> the role is refused. With it, <c>search *</c> over the workspace reaches
+/// <c>PGSQLServerLogs</c> only (the server's sessions table answered no rows), but every server's rows in it: the
+/// server's own query, which reaches this server's logs only, is the narrower grant.
 /// </para>
 /// <para>
-/// Measured: an answer stops at 500,000 rows or about 64 MB of JSON, still with 200 and the
-/// rows it has, and a <c>PartialError</c> beside them; 850 small queries in 35 s were not throttled.
+/// Measured: an answer stops at 500,000 rows or about 64 MB of JSON, still with 200 and the rows it has, and a
+/// <c>PartialError</c> beside them; 850 small queries in 35 s were not throttled. 🔴 Azure answers a query whose text
+/// it saw in the last 2 minutes or so from a cache, without rows that came since: every query asks for a fresh answer
+/// (<c>Cache-Control: no-cache</c>, measured to work).
 /// </para>
 /// </remarks>
 public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
@@ -103,7 +116,7 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
     // Entra ID has no resource api.loganalytics.azure.com (AADSTS500011, measured): the token is for the older name.
     private static readonly TokenRequestContext Scope = new(new[] { "https://api.loganalytics.io/.default" });
 
-    /// <summary>How long the oldest row of a table is kept before it is asked again.</summary>
+    /// <summary>How long the oldest row of a target is kept before it is asked again.</summary>
     private static readonly TimeSpan OldestFor = TimeSpan.FromHours(1);
 
     private readonly HttpClient _http;
@@ -115,7 +128,7 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
     private readonly string? _workspace;
     private readonly string? _resourceFilter;
     private readonly string _url;
-    private readonly Dictionary<string, (DateTime At, long? Micros)> _oldest = new(StringComparer.Ordinal);
+    private readonly Dictionary<AzureLogTarget, (DateTime At, long? Micros)> _oldest = new();
     private AccessToken _token;
 
     public ArmLogAnalyticsQuery(HttpClient http, string subscription, string resourceGroup, string server, string? workspaceId = null,
@@ -136,19 +149,19 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
             + $"/providers/Microsoft.DBforPostgreSQL/flexibleServers/{server}";
     }
 
-    public async Task<AzureLogPage> RowsAsync(string table, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct)
+    public async Task<AzureLogPage> RowsAsync(AzureLogTarget target, long fromMicros, long toMicros, AzureLogPosition? after, int max, CancellationToken ct)
     {
-        var (doc, bytes) = await QueryAsync(RowsQuery(table, _resourceFilter, fromMicros, toMicros, after, max), (fromMicros, toMicros), table, ct);
+        var (doc, bytes) = await QueryAsync(RowsQuery(target, _resourceFilter, fromMicros, toMicros, after, max), (fromMicros, toMicros), target.Table, ct);
         using (doc)
         {
             return Page(doc, bytes);
         }
     }
 
-    public async Task<bool> AnyFromAsync(string table, long micros, CancellationToken ct)
+    public async Task<bool> AnyFromAsync(AzureLogTarget target, long micros, CancellationToken ct)
     {
-        var (doc, _) = await QueryAsync($"{Source(table, _resourceFilter)}\n| where TimeGenerated >= {Time(micros)}\n| take 1\n| project TimeGenerated",
-            (micros, Micros(_utcNow()) + 86_400_000_000L), table, ct);
+        var (doc, _) = await QueryAsync($"{Source(target, _resourceFilter)}\n| where TimeGenerated >= {Time(micros)}\n| take 1\n| project TimeGenerated",
+            (micros, Micros(_utcNow()) + 86_400_000_000L), target.Table, ct);
         using (doc)
         {
             return Rows(doc.RootElement).Any();
@@ -157,47 +170,54 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
 
     public async Task<IReadOnlyList<AzureLogTableRows>> TablesAsync(CancellationToken ct)
     {
-        var parts = AzureLogTables.All.Select(t => $"({Source(t, _resourceFilter)}\n| where TimeGenerated > ago(1d)\n"
-            + $"| summarize Rows = count()\n| extend Table = {Literal(t)})");
+        var parts = AzureLogTables.All.Select(t => $"({Source(new AzureLogTarget(t), _resourceFilter)}\n| where TimeGenerated > ago(1d)\n"
+            + $"| summarize Rows = count(), Newest = max(TimeGenerated) by TenantId\n| extend Table = {Literal(t)})");
         // isfuzzy: a workspace that never received the legacy table has none; the other table is still counted.
-        var (doc, _) = await QueryAsync($"union isfuzzy=true\n{string.Join(",\n", parts)}\n| project Table, Rows", null, "", ct);
+        var (doc, _) = await QueryAsync($"union isfuzzy=true\n{string.Join(",\n", parts)}\n| project Table, TenantId, Rows, Newest", null, "", ct);
         using (doc)
         {
             var found = new List<AzureLogTableRows>();
             foreach (var row in Rows(doc.RootElement))
             {
-                var table = Str(row, "Table") ?? "";
-                var rows = row.TryGetValue("Rows", out var r) && r.TryGetInt64(out var n) ? n : 0;
-                found.Add(new AzureLogTableRows(table, rows));
+                var rows = row.TryGetValue("Rows", out var r) && r.ValueKind == JsonValueKind.Number && r.TryGetInt64(out var n) ? n : 0;
+                found.Add(new AzureLogTableRows(Str(row, "Table") ?? "", Str(row, "TenantId") ?? "", rows,
+                    Str(row, "Newest") is { } at ? Micros(Ticks(at)) : null));
             }
             return found;
         }
     }
 
-    public async Task<long?> OldestMicrosAsync(string table, CancellationToken ct)
+    public async Task<long?> OldestMicrosAsync(AzureLogTarget target, CancellationToken ct)
     {
-        if (_oldest.TryGetValue(table, out var known) && _utcNow() - known.At < OldestFor)
+        if (_oldest.TryGetValue(target, out var known) && _utcNow() - known.At < OldestFor)
         {
             return known.Micros;
         }
-        var (doc, _) = await QueryAsync($"{Source(table, _resourceFilter)}\n| summarize Oldest = min(TimeGenerated)", null, table, ct);
+        var (doc, _) = await QueryAsync($"{Source(target, _resourceFilter)}\n| summarize Oldest = min(TimeGenerated)", null, target.Table, ct);
         using (doc)
         {
             long? oldest = Rows(doc.RootElement).Select(r => Str(r, "Oldest")).FirstOrDefault(s => s != null) is { } at ? Micros(Ticks(at)) : null;
-            _oldest[table] = (_utcNow(), oldest);
+            _oldest[target] = (_utcNow(), oldest);
             return oldest;
         }
     }
 
-    /// <summary>The server's rows of <paramref name="table"/>; in a workspace, filtered on the server's resource id.</summary>
-    internal static string Source(string table, string? resourceFilter)
+    /// <summary>
+    /// The server's rows of <paramref name="target"/>: in a workspace filtered on the server's resource id, and from one
+    /// workspace only when it names one.
+    /// </summary>
+    internal static string Source(AzureLogTarget target, string? resourceFilter)
     {
-        var q = new StringBuilder(table == AzureLogTables.AzureDiagnostics
+        var q = new StringBuilder(target.Table == AzureLogTables.AzureDiagnostics
             ? "AzureDiagnostics\n| where Category == 'PostgreSQLLogs'"
             : AzureLogTables.ResourceSpecific);
         if (resourceFilter != null)
         {
             q.Append("\n| where _ResourceId =~ ").Append(Literal(resourceFilter));
+        }
+        if (target.Workspace != null)
+        {
+            q.Append("\n| where TenantId == ").Append(Literal(target.Workspace));
         }
         return q.ToString();
     }
@@ -206,9 +226,9 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
     /// One page of rows, in order of time then id: with a page's last row as <paramref name="after"/>, the next page
     /// starts right after it, whatever else arrived meanwhile.
     /// </summary>
-    internal static string RowsQuery(string table, string? resourceFilter, long fromMicros, long toMicros, AzureLogPosition? after, int max)
+    internal static string RowsQuery(AzureLogTarget target, string? resourceFilter, long fromMicros, long toMicros, AzureLogPosition? after, int max)
     {
-        var q = new StringBuilder(Source(table, resourceFilter));
+        var q = new StringBuilder(Source(target, resourceFilter));
         q.Append($"\n| where TimeGenerated >= {Time(fromMicros)} and TimeGenerated < {Time(toMicros)}");
         if (after is { } p)
         {
@@ -217,7 +237,7 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
         }
         // The legacy table's names follow its _s suffixes; only Message is documented. Not measured: the legacy
         // table is read as Microsoft documents it, the resource-specific one as measured.
-        q.Append(table == AzureLogTables.AzureDiagnostics
+        q.Append(target.Table == AzureLogTables.AzureDiagnostics
             ? "\n| project TimeGenerated, _ItemId, Message, Statement = tostring(column_ifexists('statement_s', '')), "
                 + "DetailLog = tostring(column_ifexists('detail_log_s', '')), Detail = tostring(column_ifexists('Detail', '')), "
                 + "Context = tostring(column_ifexists('context_s', ''))"
@@ -227,10 +247,13 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
         return q.ToString();
     }
 
-    /// <summary>A page of the query's answer. A row with no message is an empty line: the parser counts it as unreadable.</summary>
+    /// <summary>A page of the query's answer. An answer cut short gives no rows: it is asked again with fewer.</summary>
     internal static AzureLogPage Page(JsonDocument doc, long bytes)
     {
-        var partial = doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.Object;
+        if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.Object)
+        {
+            return new AzureLogPage(Array.Empty<AzureLogRow>(), bytes, Partial: true);
+        }
         var rows = new List<AzureLogRow>();
         foreach (var row in Rows(doc.RootElement))
         {
@@ -246,20 +269,32 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
                 new PgAzureLine.Field("statement", Str(row, "Statement") ?? ""),
             }));
         }
-        return new AzureLogPage(rows, bytes, partial);
+        return new AzureLogPage(rows, bytes, Partial: false);
     }
 
     /// <summary>The first table's rows, each as its columns by name.</summary>
     private static IEnumerable<Dictionary<string, JsonElement>> Rows(JsonElement root)
     {
-        if (!root.TryGetProperty("tables", out var tables) || tables.ValueKind != JsonValueKind.Array || tables.GetArrayLength() == 0)
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("tables", out var tables)
+            || tables.ValueKind != JsonValueKind.Array || tables.GetArrayLength() == 0)
         {
             yield break;
         }
         var table = tables[0];
-        var names = table.GetProperty("columns").EnumerateArray().Select(c => c.GetProperty("name").GetString() ?? "").ToList();
-        foreach (var row in table.GetProperty("rows").EnumerateArray())
+        if (table.ValueKind != JsonValueKind.Object || !table.TryGetProperty("columns", out var columns) || columns.ValueKind != JsonValueKind.Array
+            || !table.TryGetProperty("rows", out var rows) || rows.ValueKind != JsonValueKind.Array)
         {
+            throw new SourceException("Log Analytics answered a table with no columns or rows");
+        }
+        var names = columns.EnumerateArray()
+            .Select(c => c.ValueKind == JsonValueKind.Object && c.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString()! : "")
+            .ToList();
+        foreach (var row in rows.EnumerateArray())
+        {
+            if (row.ValueKind != JsonValueKind.Array)
+            {
+                throw new SourceException("Log Analytics answered a row that is not a list of values");
+            }
             var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
             var i = 0;
             foreach (var v in row.EnumerateArray())
@@ -276,6 +311,9 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
 
     private static string? Str(Dictionary<string, JsonElement> row, string name) =>
         row.TryGetValue(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static string? Str(JsonElement o, string name) =>
+        o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     /// <summary>
     /// A time as Azure writes it. 🔴 Compare times, never their text: Azure drops trailing zeros (<c>20.29Z</c> is after
@@ -298,6 +336,9 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
     /// <summary>A KQL string literal. Every value in a query is the agent's own or validated; this keeps it so.</summary>
     internal static string Literal(string s) => "'" + s.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal) + "'";
 
+    /// <summary>
+    /// One query. The answer is parsed from its bytes, never turned into a string first: a page can be 64 MB of JSON.
+    /// </summary>
     private async Task<(JsonDocument Doc, long Bytes)> QueryAsync(string kql, (long From, long To)? span, string table, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
@@ -315,13 +356,14 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await TokenAsync(ct));
             request.Headers.TryAddWithoutValidation("Prefer", $"wait={WaitSeconds}");
+            request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
             using var response = await SendAsync(request, ct);
-            var text = await response.Content.ReadAsStringAsync(ct);
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct);
             if (response.IsSuccessStatusCode)
             {
                 try
                 {
-                    return (JsonDocument.Parse(text), Encoding.UTF8.GetByteCount(text));
+                    return (JsonDocument.Parse(bytes), bytes.Length);
                 }
                 catch (JsonException)
                 {
@@ -333,7 +375,7 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
                 await _delay(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10 * (attempt + 1)), ct);
                 continue;
             }
-            throw Worded(response.StatusCode, text, table);
+            throw Worded(response.StatusCode, bytes, table);
         }
     }
 
@@ -371,23 +413,23 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
     /// A failed query as what to change. Azure nests its errors: a missing table is <c>BadArgumentError</c>, in it
     /// <c>SemanticError</c>, in that <c>SEM0100</c> "Failed to resolve table or column expression named '...'" (measured).
     /// </summary>
-    private SourceException Worded(HttpStatusCode status, string body, string table)
+    private SourceException Worded(HttpStatusCode status, byte[] body, string table)
     {
         var codes = new List<string>();
         var inner = "";
         try
         {
             using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.Object)
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.Object)
             {
                 // The innermost error says what is wrong; the outer ones say the request was invalid.
-                for (var x = e; ; x = x.GetProperty("innererror"))
+                for (var x = e; ; )
                 {
-                    if (x.TryGetProperty("code", out var c) && c.GetString() is { Length: > 0 } name)
+                    if (Str(x, "code") is { Length: > 0 } name)
                     {
                         codes.Add(name);
                     }
-                    if (x.TryGetProperty("message", out var m) && m.GetString() is { Length: > 0 } said)
+                    if (Str(x, "message") is { Length: > 0 } said)
                     {
                         inner = said;
                     }
@@ -395,6 +437,7 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
                     {
                         break;
                     }
+                    x = i;
                 }
             }
         }
@@ -409,8 +452,11 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
         {
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new SourceException(_workspace == null
                 ? $"{what}: access denied ({code}). The agent's Azure identity needs Microsoft.Insights/logs/*/read on the server "
-                    + "(a custom role assigned on the server), or set options.azure_workspace_id and give it Log Analytics Reader there"
-                : $"{what}: access denied ({code}). The agent's Azure identity needs Log Analytics Reader on workspace {_workspace}"),
+                    + "(a custom role assigned on the server), or set options.azure_workspace_id and give it read access there"
+                : $"{what}: access denied ({code}). The agent's Azure identity needs, on workspace {_workspace}, a role with "
+                    + "Microsoft.OperationalInsights/workspaces/read, workspaces/query/read and "
+                    + $"workspaces/query/{(table.Length > 0 ? table : AzureLogTables.ResourceSpecific)}/read (or Log Analytics Reader); "
+                    + "or leave out options.azure_workspace_id and give it Microsoft.Insights/logs/*/read on the server"),
             HttpStatusCode.NotFound => new SourceException(_workspace == null
                 ? $"{what}: no such server ({code}): check options.azure_subscription, azure_resource_group and azure_server"
                 : $"{what}: no such workspace ({code}): check options.azure_workspace_id, the workspace's id (a GUID, not its name)"),
@@ -432,16 +478,22 @@ public sealed class ArmLogAnalyticsQuery : IAzureLogQuery
 /// <para>
 /// The order is the rows' time to the millisecond, then their id. 🔴 A sign-in's lines can share a millisecond
 /// (<c>connection authorized</c> before <c>connection authenticated</c> in 87 of 981 sessions by time alone, measured);
-/// by id, none were out of order. The id is a version-1 UUID that Azure gives in the order it receives the lines.
+/// by id, none of the 6,480 rows measured was out of order. The id is a version-1 UUID whose text begins with the low
+/// bits of its time, which wrap about every 7 minutes: two lines of one millisecond can still swap at a wrap. That is
+/// rare, and swaps two lines of one sign-in, which the session map reads in either order.
 /// </para>
 /// <para>
-/// A page that Azure cuts short is read again with half as many rows: a page counts only when it is whole.
+/// A page that Azure cuts short is read again with half as many rows: a page counts only when it is whole. Pages are
+/// sized to about <see cref="PageBytes"/> by the rows of the page before, so long statements make smaller pages.
 /// </para>
 /// </remarks>
 public sealed class AzureLogAnalyticsReader : IAzureLog
 {
-    public const int PageRows = 20_000;
+    public const int PageRows = 10_000;
     public const int MinPageRows = 100;
+
+    /// <summary>About how large a page's answer is meant to be: well inside the agent's memory, far below Azure's 64 MB.</summary>
+    public const long PageBytes = 8 << 20;
 
     /// <summary>Rows from a second before the stretch: records of one second can be out of order (<see cref="IPgLogLines"/>).</summary>
     private const long BeforeMicros = 1_000_000;
@@ -452,23 +504,23 @@ public sealed class AzureLogAnalyticsReader : IAzureLog
     private readonly IAzureLogQuery _query;
     private readonly int _pageRows;
 
-    public AzureLogAnalyticsReader(IAzureLogQuery query, string table, int pageRows = PageRows)
+    public AzureLogAnalyticsReader(IAzureLogQuery query, AzureLogTarget target, int pageRows = PageRows)
     {
         _query = query;
-        Table = table;
+        Target = target;
         _pageRows = Math.Max(MinPageRows, pageRows);
     }
 
-    /// <summary>The table the rows are read from (<see cref="AzureLogTables"/>).</summary>
-    public string Table { get; }
+    /// <summary>The table, and workspace, the rows are read from.</summary>
+    public AzureLogTarget Target { get; }
 
     /// <summary>The queries made and the bytes of their answers (no files: <see cref="AzureReadStats.Files"/> stays 0).</summary>
     public AzureReadStats Stats { get; } = new();
 
-    public Task<long?> OldestMicrosAsync(CancellationToken ct) => _query.OldestMicrosAsync(Table, ct);
+    public Task<long?> OldestMicrosAsync(CancellationToken ct) => _query.OldestMicrosAsync(Target, ct);
 
     /// <summary>Whether Log Analytics has received a row stamped at or after <paramref name="micros"/>.</summary>
-    public Task<bool> WrittenPastAsync(long micros, CancellationToken ct) => _query.AnyFromAsync(Table, micros, ct);
+    public Task<bool> WrittenPastAsync(long micros, CancellationToken ct) => _query.AnyFromAsync(Target, micros, ct);
 
     public async IAsyncEnumerable<PgFileLine> LinesAsync(long fromMicros, long toMicros, Func<string, long?> timeOf,
         [EnumeratorCancellation] CancellationToken ct)
@@ -477,7 +529,7 @@ public sealed class AzureLogAnalyticsReader : IAzureLog
         var max = _pageRows;
         while (true)
         {
-            var page = await _query.RowsAsync(Table, fromMicros - BeforeMicros, toMicros + AfterMicros, after, max, ct);
+            var page = await _query.RowsAsync(Target, fromMicros - BeforeMicros, toMicros + AfterMicros, after, max, ct);
             Stats.Reads++;
             Stats.Bytes += page.Bytes;
             if (page.Partial)
@@ -491,8 +543,14 @@ public sealed class AzureLogAnalyticsReader : IAzureLog
             }
             foreach (var row in page.Rows)
             {
+                if (row.Message.Length == 0)
+                {
+                    // No record to read: a line of nothing would join the record before it.
+                    Stats.Unreadable++;
+                    continue;
+                }
                 var line = row.Line();
-                yield return new PgFileLine(Table, line);
+                yield return new PgFileLine(Target.Table, line);
                 if (timeOf(line) is { } at && at > toMicros)
                 {
                     yield break;
@@ -503,6 +561,11 @@ public sealed class AzureLogAnalyticsReader : IAzureLog
                 yield break;
             }
             after = page.Rows[^1].Position;
+            max = NextPageRows(page.Rows.Count, page.Bytes);
         }
     }
+
+    /// <summary>The next page's rows: as many as make about <see cref="PageBytes"/> at the last page's bytes a row.</summary>
+    internal int NextPageRows(int rows, long bytes) =>
+        (int)Math.Clamp(PageBytes / Math.Max(1, bytes / Math.Max(1, rows)), MinPageRows, _pageRows);
 }

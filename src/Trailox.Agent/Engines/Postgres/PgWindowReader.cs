@@ -415,6 +415,7 @@ public sealed class PgWindowReader
         }
         _files += azure.Stats.Files;
         _bytes += azure.Stats.Bytes;
+        _malformed += azure.Stats.Unreadable;
     }
 
     /// <summary>Reads the window from an RDS instance through the RDS API (stderr only).</summary>

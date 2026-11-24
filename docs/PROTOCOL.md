@@ -825,8 +825,11 @@ cannot be passed on by a machine in between; a server or pooler that does not of
   | the table's first row stamped 5 minutes past the window's end, if any | a window that ended within the hour |
   | the window's rows from a second before it to a minute past it, in order of `TimeGenerated` then `_ItemId`, 20,000 a page, each page after the last row of the one before | each `pg_log` task, until a line past the window's end; and a look-back |
 
-  The resource route needs `Microsoft.Insights/logs/*/read` on the server; the workspace route Log Analytics Reader
-  on the workspace. The table is `options.azure_log_table` (`PGSQLServerLogs` or `AzureDiagnostics`), else the one
+  The resource route needs `Microsoft.Insights/logs/*/read` on the server (measured alone: it reaches the server's
+  own log tables, nothing else); the workspace route `Microsoft.OperationalInsights/workspaces/read`,
+  `workspaces/query/read` and `workspaces/query/PGSQLServerLogs/read` on the workspace (measured: `search *` then
+  reaches that table only; without `query/read` it is refused), or Log Analytics Reader. Every query sends
+  `Cache-Control: no-cache`: Azure answers repeated text from a cache for about 2 minutes (measured). The table is `options.azure_log_table` (`PGSQLServerLogs` or `AzureDiagnostics`), else the one
   the probe found the server's rows in, `PGSQLServerLogs` first. Each row is made the download's line: its `Message`
   as JSON string content, then `Detail`, `DetailLog`, `Context` and `Statement` as `","detail": "...` and so on, so
   one parser reads both sources (measured: the same stretch read from both gives every Log Analytics row as a
