@@ -73,32 +73,31 @@ public sealed class PgLineFormat
     /// </summary>
     private Regex? _refusedTail;
 
-    /// <summary>How far into a record's text a forgery's real rest of the line can start: the longest name, then the rest of the prefix.</summary>
+    /// <summary>How far into a record's text a refused client's real rest of the line can start: its name, then the rest of the prefix.</summary>
     private int _forgeWindow;
 
-    /// <summary>The line's identity (<c>%u</c>, <c>%d</c>, <c>%c</c>, <c>%p</c>) is written in or after the client's name, so a forgery can change it.</summary>
-    private bool _identityAfterClient;
-
-    /// <summary>The longest name PostgreSQL writes (NAMEDATALEN - 1 bytes): a user, a database, an application.</summary>
+    /// <summary>
+    /// The longest user or database name PostgreSQL writes: it cuts the names a client asks for to NAMEDATALEN - 1 bytes.
+    /// An application name it does not cut.
+    /// </summary>
     private const int MaxName = 63;
 
     /// <summary>
     /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a level and
     ///    a message, and the rest of a prefix, into its application name, or a refused client into the user or database
-    ///    name it asked for; read from the left, the line then reads as that message. The real rest of the prefix and the
-    ///    real level follow inside the text, at most a name and the rest of a prefix from its start: only there is a
-    ///    level marker looked for. A record is taken as forged, counted and never read:
+    ///    name it asked for; read from the left, the line then reads as that message: another user's, a sign-in, or a
+    ///    checkpoint that hides the client's own statement. The real rest of the prefix and the real level follow inside
+    ///    the text. A record is taken as forged, counted and never read:
     ///    <list type="bullet">
-    ///    <item>a connection line with a level marker there: its text is the server's, with only the names a client
-    ///      chose;</item>
-    ///    <item>where the line's own identity (<c>%u</c>, <c>%d</c>, <c>%c</c>, <c>%p</c>) is written in or after the
-    ///      name, so a forgery could name another user: with <c>%a</c>, any record with a level marker there; with
-    ///      <c>%u</c> or <c>%d</c>, any record with the rest of the prefix and <c>FATAL:  </c> there, as every refused
-    ///      client's line ends.</item>
+    ///    <item>with <c>%a</c> in the prefix, when its text holds a level marker anywhere: any signed-in client sets its
+    ///      application name, at any length. A statement that quotes a level is counted with them, which the counts
+    ///      show; a forged line read would not, and the probe warns of such a prefix;</item>
+    ///    <item>with <c>%u</c> or <c>%d</c>, which only a refused client chooses, and then at most 63 bytes, looked for
+    ///      only as far into the text as that name and the rest of the prefix reach: a connection line with a level
+    ///      marker there (its text is the server's, with the names a client chose), and any record with the rest of the
+    ///      prefix and <c>FATAL:  </c> there, as every refused client's line ends. A statement's text past that is never
+    ///      looked at, so no one hides a statement by writing a level in it.</item>
     ///    </list>
-    ///    Where the identity comes before the name (Azure's <c>%t-%c-</c> then <c>%a</c>), a forgery rewrites only the
-    ///    client's own lines, under its real user, so those are read. A statement's text past the start is never looked
-    ///    at, so no one hides a statement by writing a level in it.
     /// </summary>
     /// <remarks>
     /// ⚠ NOT CAUGHT: a newline in a refused client's user name, which starts a line of its own with any prefix at all in
@@ -106,17 +105,18 @@ public sealed class PgLineFormat
     /// </remarks>
     public bool Forged(PgLogRecord r)
     {
-        if (ClientEscape == '\0')
+        switch (ClientEscape)
         {
-            return false;
+            case '\0':
+                return false;
+            case 'a':
+                return LevelMarker.IsMatch(r.Message);
         }
         var start = r.Message.Length > _forgeWindow ? r.Message[.._forgeWindow] : r.Message;
-        if (r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
-            or PgRecordKind.Disconnection)
-        {
-            return LevelMarker.IsMatch(start);
-        }
-        return _identityAfterClient && (ClientEscape == 'a' ? LevelMarker.IsMatch(start) : _refusedTail!.IsMatch(start));
+        return r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
+            or PgRecordKind.Disconnection
+            ? LevelMarker.IsMatch(start)
+            : _refusedTail!.IsMatch(start);
     }
 
     public static PgLineFormat Of(string prefix)
@@ -124,20 +124,17 @@ public sealed class PgLineFormat
         var tokens = PgLinePrefix.Tokens(prefix);
         var escapes = tokens.Select(t => t.Escape).ToList();
         var client = escapes.Contains('a') ? 'a' : escapes.FirstOrDefault(e => e is 'u' or 'd');
-        if (client == '\0')
+        if (client is not ('u' or 'd'))
         {
-            return new PgLineFormat(prefix, tokens);
+            return new PgLineFormat(prefix, tokens) { ClientEscape = client };
         }
         var after = tokens.Skip(escapes.IndexOf(client) + 1).ToList();
-        var refused = client is 'u' or 'd'
-            ? new Regex(Pattern(after, capture: false) + "FATAL:  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline)
-            : null;
         return new PgLineFormat(prefix, tokens)
         {
             ClientEscape = client,
-            _refusedTail = refused,
+            _refusedTail = new Regex(Pattern(after, capture: false) + "FATAL:  ",
+                RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline),
             _forgeWindow = MaxName + after.Sum(MaxLength) + 16,
-            _identityAfterClient = client is 'u' or 'd' || after.Any(t => t.Escape is 'u' or 'd' or 'c' or 'p'),
         };
     }
 
@@ -145,7 +142,7 @@ public sealed class PgLineFormat
     private static int MaxLength(PgLinePrefix.Token t) => Math.Max(Math.Abs(t.Padding), t.Escape switch
     {
         '\0' => t.Text.Length,
-        'u' or 'd' or 'a' or 'i' or 'b' => MaxName,
+        'u' or 'd' or 'i' or 'b' => MaxName,
         'r' or 'h' => 262,
         't' or 's' or 'm' => 40,
         _ => 24,

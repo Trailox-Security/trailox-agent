@@ -283,46 +283,45 @@ public sealed class PgSessionMapTests : IDisposable
     }
 
     /// <summary>
-    /// With the session before the application name, a forgery rewrites only the client's own lines, which keep its
-    /// real user: they are read. A sign-in forged there is still caught.
+    /// 🔴 With %a in the prefix, a signed-in client can make its own lines read as anything: a statement, a sign-in, or a
+    ///    checkpoint that hides its real statement. Wherever %a stands, and at any length, a level in a record's text is
+    ///    taken as forged and counted.
     /// </summary>
     [Fact]
-    public async Task With_the_session_before_the_application_name_a_forgery_keeps_its_real_user()
+    public async Task With_the_application_name_in_the_prefix_a_level_anywhere_in_the_text_is_forged()
     {
         var session = $"{Micros("2026-01-15 10:00:00") / 1_000_000:x}.12c";
+        var hidden = "x LOG:  checkpoint starting: " + new string('t', 200);
         await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
         {
             $"2026-01-15 10:00:00 UTC-{session}- LOG:  connection authorized: user=mallory database=shop application_name=psql",
             $"2026-01-15 10:00:01 UTC-{session}-x LOG:  statement: DROP TABLE accounts psql LOG:  statement: SELECT 1",
             $"2026-01-15 10:00:02 UTC-{session}-x LOG:  connection authorized: user=admin database=prod psql LOG:  statement: SELECT 2",
+            $"2026-01-15 10:00:03 UTC-{session}-{hidden} LOG:  statement: DROP TABLE orders",
         });
 
         var rows = await ReadAsync(new PgLogDirectory(_dir), "%t-%c-%a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
 
-        Assert.Equal(new[]
-            {
-                ("connection authorized: user=mallory database=shop application_name=psql", "mallory"),
-                ("statement: DROP TABLE accounts psql LOG:  statement: SELECT 1", "mallory"),
-            },
+        Assert.Equal(new[] { ("connection authorized: user=mallory database=shop application_name=psql", "mallory") },
             rows.SkipLast(1).Select(r => (S(r, "message"), S(r, "user"))));
-        Assert.Equal(1, Counted(Counts(rows), "forged"));
+        Assert.Equal(3, Counted(Counts(rows), "forged"));
     }
 
     /// <summary>
-    /// 🔴 With the user after the application name, a forgery can name another user: a level near the start of a
-    ///    record's text is taken as forged. A level far into a long statement is the statement's own, and is read.
+    /// A refused client's name is at most 63 bytes, so with %u and %d its forgery is looked for only near the start of
+    /// the text: a statement that writes the same far into itself is the statement's own, and is read.
     /// </summary>
     [Fact]
-    public async Task With_the_user_after_the_application_name_a_forgery_is_caught_near_the_start_only()
+    public async Task With_the_user_name_a_forgery_is_looked_for_only_as_far_as_a_name_reaches()
     {
-        var longDdl = "statement: CREATE TABLE notes AS SELECT '" + new string('n', 600) + " ERROR:  kept' AS t";
+        var longDdl = "statement: CREATE TABLE notes AS SELECT '" + new string('n', 600) + "@postgres FATAL:  kept' AS t";
         await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
         {
-            "2026-01-15 10:00:01.000 UTC [300] x admin@prod LOG:  statement: DROP TABLE accounts psql mallory@shop LOG:  statement: SELECT 1",
-            $"2026-01-15 10:00:02.000 UTC [301] psql alice@shop LOG:  {longDdl}",
+            "2026-01-15 10:00:01.000 UTC [300] admin@prod LOG:  statement: DROP TABLE accounts@postgres FATAL:  sorry, too many clients already",
+            $"2026-01-15 10:00:02.000 UTC [301] alice@shop LOG:  {longDdl}",
         });
 
-        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %a %u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %q%u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
 
         Assert.Equal(new[] { ("alice", longDdl) }, rows.SkipLast(1).Select(r => (S(r, "user"), S(r, "message"))));
         Assert.Equal(1, Counted(Counts(rows), "forged"));
