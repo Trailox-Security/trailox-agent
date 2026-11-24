@@ -174,7 +174,7 @@ public sealed class EndpointCaps
 /// <summary>What the probe of a PostgreSQL source found. Every field is bounded by the gateway.</summary>
 public sealed class PostgresCaps
 {
-    /// <summary>rds, aurora or self_managed.</summary>
+    /// <summary>rds, aurora, azure (Azure Database for PostgreSQL flexible server) or self_managed.</summary>
     public string Platform { get; set; } = "";
 
     /// <summary>rds_api or file: where the agent reads the server log.</summary>

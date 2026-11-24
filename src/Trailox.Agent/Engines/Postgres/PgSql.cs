@@ -37,6 +37,19 @@ public static class PgSql
     public const string StatStatementsVersion = "SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements'";
 
     /// <summary>
+    /// Whether the server is Azure Database for PostgreSQL flexible server: Azure's own library, loaded at start-up,
+    /// defines the setting <c>azure.extensions</c> (the extensions its users may create).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ NEVER A PLACEHOLDER. Any name with a dot takes a value from SET or ALTER ROLE/DATABASE ... SET on any server.
+    ///   PostgreSQL 17 lists no such placeholder in pg_settings, and the context keeps one out wherever a server would
+    ///   list it (a placeholder's is <c>user</c>; Azure's own setting's is <c>sighup</c>), so only a setting the server
+    ///   itself defines says Azure. Azure reserves the prefix: SET azure.anything fails there.
+    /// </remarks>
+    public const string AzureMarker =
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_settings WHERE name = 'azure.extensions' AND context <> 'user')";
+
+    /// <summary>
     /// Aurora PostgreSQL's version, e.g. <c>17.11.1</c>: the function answers on Aurora only, and elsewhere fails with
     /// "function does not exist" (42883).
     /// </summary>
@@ -88,8 +101,9 @@ public static class PgSql
     /// <remarks>
     /// ⚠ BY THE EXTENSION'S VERSION, NOT THE SERVER'S (<see cref="PgCatalog.SnapshotSql"/>): a major upgrade keeps the
     ///   extension's old version until <c>ALTER EXTENSION pg_stat_statements UPDATE</c>, and its old columns with it.
+    /// $1 and $2 are the platform's own roles and databases (<see cref="PgPlatform"/>), whose statements are left out.
     /// </remarks>
-    public const string Snapshot = """
+    public const string Snapshot = $"""
         SELECT s.userid::bigint AS userid, coalesce(r.rolname, '') AS user_name, s.dbid::bigint AS dbid,
                coalesce(d.datname, '') AS database, s.queryid, s.toplevel, s.calls, s.rows, s.total_exec_time,
                s.shared_blks_hit, s.shared_blks_read, s.temp_blks_written, i.dealloc, i.stats_reset
@@ -97,35 +111,52 @@ public static class PgSql
         LEFT JOIN pg_roles r ON r.oid = s.userid
         LEFT JOIN pg_database d ON d.oid = s.dbid
         CROSS JOIN pg_stat_statements_info i
+        {NotPlatformOwn}
         """;
 
     /// <summary>Extension 1.8 (PostgreSQL 13): no <c>toplevel</c> column and no <c>pg_stat_statements_info</c> view.</summary>
-    public const string SnapshotWithoutInfo = """
+    public const string SnapshotWithoutInfo = $"""
         SELECT s.userid::bigint AS userid, coalesce(r.rolname, '') AS user_name, s.dbid::bigint AS dbid,
                coalesce(d.datname, '') AS database, s.queryid, NULL::boolean AS toplevel, s.calls, s.rows, s.total_exec_time,
                s.shared_blks_hit, s.shared_blks_read, s.temp_blks_written, NULL::bigint AS dealloc, NULL::timestamptz AS stats_reset
         FROM pg_stat_statements(showtext := false) s
         LEFT JOIN pg_roles r ON r.oid = s.userid
         LEFT JOIN pg_database d ON d.oid = s.dbid
+        {NotPlatformOwn}
         """;
 
     /// <summary>Extension 1.3 to 1.7, never updated since an older server: <c>total_time</c>, not yet <c>total_exec_time</c>.</summary>
-    public const string SnapshotTotalTime = """
+    public const string SnapshotTotalTime = $"""
         SELECT s.userid::bigint AS userid, coalesce(r.rolname, '') AS user_name, s.dbid::bigint AS dbid,
                coalesce(d.datname, '') AS database, s.queryid, NULL::boolean AS toplevel, s.calls, s.rows, s.total_time AS total_exec_time,
                s.shared_blks_hit, s.shared_blks_read, s.temp_blks_written, NULL::bigint AS dealloc, NULL::timestamptz AS stats_reset
         FROM pg_stat_statements(showtext := false) s
         LEFT JOIN pg_roles r ON r.oid = s.userid
         LEFT JOIN pg_database d ON d.oid = s.dbid
+        {NotPlatformOwn}
         """;
 
-    /// <summary>The statement text, once a day, cut to 4,096 characters; the agent removes passwords before it ships it.</summary>
-    public const string StatementText = "SELECT queryid, left(query, 4096) AS query FROM pg_stat_statements(showtext := true) WHERE queryid IS NOT NULL";
+    // A role or database that is gone has no name, and is kept.
+    private const string NotPlatformOwn = "WHERE coalesce(r.rolname, '') <> ALL($1::text[]) AND coalesce(d.datname, '') <> ALL($2::text[])";
 
-    /// <summary>The databases the catalog visits; <c>rdsadmin</c> is RDS's own and takes no connection.</summary>
+    /// <summary>
+    /// The statement text, once a day, cut to 4,096 characters; the agent removes passwords before it ships it. The
+    /// platform's own roles and databases ($1, $2) are left out, as in <see cref="Snapshot"/>.
+    /// </summary>
+    public const string StatementText = """
+        SELECT queryid, left(query, 4096) AS query FROM pg_stat_statements(showtext := true)
+        WHERE queryid IS NOT NULL
+          AND userid NOT IN (SELECT oid FROM pg_roles WHERE rolname = ANY($1::text[]))
+          AND dbid NOT IN (SELECT oid FROM pg_database WHERE datname = ANY($2::text[]))
+        """;
+
+    /// <summary>
+    /// The databases the catalog visits, less the platform's own ($1, <see cref="PgPlatform.Databases"/>): RDS's
+    /// <c>rdsadmin</c>, which takes no connection, and on Azure <c>azure_sys</c> and <c>azure_maintenance</c>.
+    /// </summary>
     public const string Databases = """
         SELECT datname FROM pg_database
-        WHERE datallowconn AND NOT datistemplate AND datname <> 'rdsadmin'
+        WHERE datallowconn AND NOT datistemplate AND datname <> ALL($1::text[])
         ORDER BY datname
         """;
 
@@ -167,8 +198,9 @@ public static class PgSql
     public const int ColumnPageTables = 1000;
 
     /// <summary>
-    /// Roles, and the roles each one is a member of. Roles belong to the server, not to a database. From 16 a membership
-    /// can be granted once per grantor, so the names are distinct.
+    /// Roles, and the roles each one is a member of, less the platform's own ($1, <see cref="PgPlatform.Users"/>: Azure's
+    /// <c>azuresu</c>). Roles belong to the server, not to a database. From 16 a membership can be granted once per
+    /// grantor, so the names are distinct.
     /// </summary>
     public const string Users = """
         SELECT r.rolname AS role_name, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolcanlogin, r.rolreplication,
@@ -176,6 +208,7 @@ public static class PgSql
                coalesce((SELECT string_agg(DISTINCT b.rolname, ',' ORDER BY b.rolname)
                          FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = r.oid), '') AS member_of
         FROM pg_roles r
+        WHERE r.rolname <> ALL($1::text[])
         ORDER BY r.rolname
         """;
 
