@@ -129,19 +129,28 @@ public static class PgProbeChecks
         {
             return Fail("log_line_prefix", $"{shown}: it has no %t, %m or %n, so no stderr line has a time and the agent reads none of them");
         }
+        if (line.ClientEscape == 'a')
+        {
+            return Warn("log_line_prefix", $"{shown}: it writes the application name, which any client chooses, before the rest of the "
+                + "prefix, so a client can make its own lines read as another user's or as a sign-in. The agent counts a sign-in line it "
+                + "finds forged so as unread; csvlog and jsonlog quote the name");
+        }
+        var forgeable = line.ClientTextBeforeEnd
+            ? ". A refused client's user or database name is written into the prefix as it is: a sign-in line forged in one counts as unread"
+            : "";
         if (line.HasUser)
         {
-            return Ok("log_line_prefix", $"{shown}: each line names its user");
+            return Ok("log_line_prefix", $"{shown}: each line names its user{forgeable}");
         }
         if (line.HasSession)
         {
             return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its session (%c), "
-                + "on the session's sign-in line");
+                + $"on the session's sign-in line{forgeable}");
         }
         if (line.HasPid)
         {
             return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its process (%p), "
-                + $"on the process's newest sign-in line, up to {PgSessionMap.PidLookBackMicros / 3_600_000_000} hours before");
+                + $"on the process's newest sign-in line, up to {PgSessionMap.PidLookBackMicros / 3_600_000_000} hours before{forgeable}");
         }
         return Warn("log_line_prefix", $"{shown}: a line names no user, session or process, so the agent cannot tell whose a statement "
             + "is: those lines count as unread. Sign-ins, failed sign-ins and disconnections name their user and are read");

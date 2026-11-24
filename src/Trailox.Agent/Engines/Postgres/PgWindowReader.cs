@@ -142,6 +142,12 @@ public sealed class PgWindowReader
             _outOfWindow++;
             return;
         }
+        if (r.Forged)
+        {
+            _unreadable++;
+            _counted["forged"] = _counted.GetValueOrDefault("forged") + 1;
+            return;
+        }
         if (r.NoUser)
         {
             // The prefix names no user, no session and no process: the record cannot be told whose it is.

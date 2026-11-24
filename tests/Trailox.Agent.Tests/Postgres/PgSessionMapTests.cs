@@ -221,6 +221,59 @@ public sealed class PgSessionMapTests : IDisposable
         Assert.Equal(1, Counts(rows).GetProperty("unreadable").GetInt32());
     }
 
+    /// <summary>
+    /// 🔴 A refused client chooses the user name it asks for, and Debian's prefix writes it before the database: a name
+    ///    holding a prefix's rest, a level and a sign-in read from the left as that sign-in. The real level follows in the
+    ///    text, so the line is counted forged, and neither shipped nor learned from.
+    /// </summary>
+    [Fact]
+    public async Task A_sign_in_forged_inside_a_user_name_is_counted_and_not_read()
+    {
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            "2026-01-15 10:00:01.000 UTC [300] a@b LOG:  connection authorized: user=admin database=prod@postgres FATAL:  "
+                + "password authentication failed for user \"a@b LOG:  connection authorized: user=admin database=prod\"",
+            "2026-01-15 10:00:02.000 UTC [301] alice@shop LOG:  connection authorized: user=alice database=shop",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %q%u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(new[] { "alice" }, rows.SkipLast(1).Select(r => S(r, "user")));
+        var counts = Counts(rows);
+        Assert.Equal((1, 1), (Counted(counts, "forged"), counts.GetProperty("unreadable").GetInt32()));
+    }
+
+    [Fact]
+    public void A_prefix_that_stores_no_session_never_fails_its_bound()
+    {
+        var sessions = new PgSessionMap(PgLineFormat.Of("%m "));
+        for (var i = 0; i <= PgSessionMap.MaxSessions + 10; i++)
+        {
+            var r = new PgLogRecord { TsMicros = i, Level = "LOG", Message = "connection received: host=192.0.2.1 port=1", Format = PgLogFormat.Stderr };
+            Assert.Equal(PgSessionMap.Outcome.Complete, sessions.Take(r));
+        }
+    }
+
+    [Fact]
+    public void Past_its_bound_the_map_keeps_the_newer_half()
+    {
+        var sessions = new PgSessionMap(PgLineFormat.Of("%t-%c-"));
+        for (var i = 0; i <= PgSessionMap.MaxSessions; i++)
+        {
+            sessions.Take(new PgLogRecord { TsMicros = i * 1_000_000L, SessionId = $"{i:x}.1", Level = "LOG", Message = "connection received: host=h port=1", Format = PgLogFormat.Stderr });
+            sessions.Take(new PgLogRecord { TsMicros = i * 1_000_000L + 1, SessionId = $"{i:x}.1", Level = "LOG", Message = "connection authorized: user=u" + i, Format = PgLogFormat.Stderr });
+        }
+
+        PgLogRecord Statement(int i) => new() { TsMicros = i * 1_000_000L + 2, SessionId = $"{i:x}.1", Level = "LOG", Message = "statement: DROP TABLE t", Format = PgLogFormat.Stderr };
+        var newest = Statement(PgSessionMap.MaxSessions);
+        var oldest = Statement(0);
+        sessions.Take(newest);
+        sessions.Take(oldest);
+
+        Assert.Equal("u" + PgSessionMap.MaxSessions, newest.User);
+        Assert.Equal("", oldest.User);
+    }
+
     /// <summary>A daily file, or one named with no time, is read from where the window begins, not from its start.</summary>
     [Fact]
     public async Task A_file_that_starts_long_before_the_window_is_read_from_the_window()

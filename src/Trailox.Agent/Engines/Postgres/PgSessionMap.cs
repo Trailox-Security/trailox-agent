@@ -156,7 +156,7 @@ public sealed class PgSessionMap
     /// </summary>
     public Outcome Take(PgLogRecord r)
     {
-        if (!Needed || r.UnreadLines > 0 || r.Format != PgLogFormat.Stderr)
+        if (!Needed || r.UnreadLines > 0 || r.Forged || r.Format != PgLogFormat.Stderr)
         {
             return Outcome.Complete;
         }
@@ -196,6 +196,11 @@ public sealed class PgSessionMap
     /// </summary>
     public (long From, long To)? LookBackFor(PgLogRecord r, long readFromMicros)
     {
+        if (_lookedFor.Count >= MaxSessions)
+        {
+            // Bounded too: a session looked for long ago may be looked for once more.
+            _lookedFor.Clear();
+        }
         if (_format.HasSession && r.SessionId.Length > 0)
         {
             if (PgSessionId.StartMicros(r.SessionId) is not { } start || !_lookedFor.Add(r.SessionId))
@@ -224,7 +229,14 @@ public sealed class PgSessionMap
         }
         if (_format.HasSession && r.SessionId.Length > 0)
         {
-            _bySession[r.SessionId] = session;
+            if (_bySession.TryAdd(r.SessionId, session))
+            {
+                _count++;
+            }
+            else
+            {
+                _bySession[r.SessionId] = session;
+            }
         }
         else if (r.Pid != 0)
         {
@@ -233,13 +245,16 @@ public sealed class PgSessionMap
                 _byPid[r.Pid] = list = new List<Session>();
             }
             list.Add(session);
+            _count++;
             list.Sort((a, b) => a.StartMicros.CompareTo(b.StartMicros));
             if (list.Count > 8)
             {
                 list.RemoveAt(0);
+                _count--;
             }
         }
-        if (++_count > MaxSessions)
+        // A prefix with no session id and no process stores nothing: only what a line names of itself is read.
+        if (_count > MaxSessions)
         {
             Trim();
         }
@@ -320,6 +335,11 @@ public sealed class PgSessionMap
     private void Trim()
     {
         var starts = _bySession.Values.Concat(_byPid.Values.SelectMany(l => l)).Select(s => s.StartMicros).Order().ToList();
+        if (starts.Count == 0)
+        {
+            _count = 0;
+            return;
+        }
         var cut = starts[starts.Count / 2];
         foreach (var key in _bySession.Where(kv => kv.Value.StartMicros < cut).Select(kv => kv.Key).ToList())
         {

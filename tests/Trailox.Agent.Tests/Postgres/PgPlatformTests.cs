@@ -122,6 +122,33 @@ public class PgPlatformTests
         Assert.StartsWith($"log_line_prefix is '{prefix}'{lacks}: ", check.Message);
     }
 
+    /// <summary>
+    /// 🔴 A name a client chooses, written before the rest of the prefix: with %a any signed-in client can make its lines
+    ///    read as another's, so the probe warns; a refused client's user or database name is noted.
+    /// </summary>
+    [Theory]
+    [InlineData("%m [%p] %a %u@%d ", "warn", "the application name, which any client chooses")]
+    [InlineData("%t-%c-%a-", "warn", "the application name, which any client chooses")]
+    [InlineData("%m [%p] %q%u@%d ", "ok", "A refused client's user or database name is written into the prefix")]
+    [InlineData("%m [%p] %q%u@%d %a ", "ok", "A refused client's user or database name is written into the prefix")]
+    [InlineData("%t-%c-", "ok", "")]
+    [InlineData("%m [%p] ", "ok", "")]
+    public void A_client_chosen_name_before_the_rest_of_the_prefix_is_said(string prefix, string status, string said)
+    {
+        var check = PgProbeChecks.LinePrefix(prefix, "stderr");
+
+        Assert.Equal(status, check.Status);
+        if (said.Length > 0)
+        {
+            Assert.Contains(said, check.Message);
+        }
+        else
+        {
+            Assert.DoesNotContain("chooses", check.Message);
+            Assert.DoesNotContain("refused client", check.Message);
+        }
+    }
+
     [Fact]
     public void A_long_prefix_is_cut_in_the_message()
     {

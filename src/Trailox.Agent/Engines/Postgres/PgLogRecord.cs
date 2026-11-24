@@ -96,6 +96,9 @@ public sealed class PgLogRecord
     /// </summary>
     public bool NoUser { get; set; }
 
+    /// <summary>A connection line a client wrote inside its own name (<see cref="PgLineFormat.Forged"/>): counted, never read.</summary>
+    public bool Forged { get; set; }
+
     public PgRecordKind Kind => PgRecordKinds.Of(Level, Message);
 }
 

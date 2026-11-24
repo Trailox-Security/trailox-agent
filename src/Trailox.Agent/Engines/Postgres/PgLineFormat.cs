@@ -55,7 +55,44 @@ public sealed class PgLineFormat
     /// <summary>A line's user can be known: on the line (<c>%u</c>), or from its session's or process's sign-in line.</summary>
     public bool KnowsUser => HasUser || HasSession || HasPid;
 
-    public static PgLineFormat Of(string prefix) => new(prefix, PgLinePrefix.Tokens(prefix));
+    /// <summary>
+    /// The prefix writes a name a client chose (<c>%a</c>; <c>%u</c> and <c>%d</c> as a refused client asked for them)
+    /// before more of the prefix, so that client can write the rest of a line of its own inside that name.
+    /// </summary>
+    public bool ClientTextBeforeEnd { get; private init; }
+
+    /// <summary>The client-chosen escape that comes before more of the prefix: <c>a</c>, <c>u</c> or <c>d</c>; '\0' when none does.</summary>
+    public char ClientEscape { get; private init; }
+
+    private static readonly Regex LevelMarker = new($"(?:{Levels}):  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 🔴 A FORGED CONNECTION LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a
+    ///    whole prefix, a level and the start of a sign-in into its application or user name; read from the left, its
+    ///    line then reads as that sign-in. The real rest of the prefix and the real level follow inside the text, so a
+    ///    connection line whose text holds a level marker was forged, where the prefix writes a client's name before its
+    ///    end. A real one holds none: its text is the server's, with the names the client chose.
+    /// </summary>
+    public bool Forged(PgLogRecord r) =>
+        ClientTextBeforeEnd && r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated
+            or PgRecordKind.ConnectionAuthorized or PgRecordKind.Disconnection
+        && LevelMarker.IsMatch(r.Message);
+
+    public static PgLineFormat Of(string prefix)
+    {
+        var tokens = PgLinePrefix.Tokens(prefix);
+        var client = '\0';
+        for (var i = 0; i < tokens.Count && client == '\0'; i++)
+        {
+            // Followed by another escape, or by text other than the spaces before the level.
+            if (tokens[i].Escape is 'a' or 'u' or 'd'
+                && tokens.Skip(i + 1).Any(t => t.Escape is not ('\0' or 'q') || t.Text.Trim().Length > 0))
+            {
+                client = tokens[i].Escape;
+            }
+        }
+        return new PgLineFormat(prefix, tokens) { ClientTextBeforeEnd = client != '\0', ClientEscape = client };
+    }
 
     /// <summary>The fields of a line that starts a record; null for any other line (a continuation, or another prefix).</summary>
     public Fields? Match(string line)

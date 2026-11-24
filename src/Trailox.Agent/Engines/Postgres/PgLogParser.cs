@@ -124,6 +124,7 @@ public sealed class PrefixLogParser : PgLogParser
             record.RemoteHost = remote.Host;
             record.RemotePort = remote.Port;
         }
+        record.Forged = _format.Forged(record);
         _current = record;
         _part = Part.Message;
         foreach (var field in fields ?? new List<PgAzureLine.Field>())
