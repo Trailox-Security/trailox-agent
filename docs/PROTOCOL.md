@@ -837,12 +837,13 @@ authorized` lines. Before its sign-in a session's lines have `user` and `databas
 a refused sign-in's user is the one its FATAL text names. A session that signed in before what the window reads is
 looked for once: with a session id, the minute after the start the id says; with a process only, up to 2 hours
 before the read; at most 200 look-backs per window. With none of `%u`, `%c` and `%p` a statement, pgaudit or FATAL
-record names no one and counts as `unreadable`. Where the prefix writes a name a client chose, a record taken as
-written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped: with `%a`, any record
-whose text holds a level marker (`LOG:  `, `ERROR:  `...); with `%u` or `%d`, a connection line whose text holds
-one, or any record whose text holds the rest of the prefix followed by `FATAL:  `, as every refused client's line
-ends. With `%u` or `%d` alone, a statement's own text is otherwise never taken as forged. RDS's two prefixes keep
-their own reader;
+record names no one and counts as `unreadable`. Where the prefix writes a name a client chose (`%a`, `%u`, `%d`), a
+record taken as written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped. Only
+the start of its text is looked at, as far as a name (63 bytes) and the rest of the prefix reach: a connection line
+with a level marker there (`LOG:  `, `ERROR:  `...); and, where the line's user, database, session or process is
+written in or after the name, with `%a` any record with a level marker there, with `%u` or `%d` any record with the
+rest of the prefix and `FATAL:  ` there, as every refused client's line ends. With the session before `%a`, a forgery
+keeps its real user, and is read. RDS's two prefixes keep their own reader;
 csvlog (24 columns on 13, 26 on 14-18); jsonlog. In stderr a message's `DETAIL`, `HINT` and `STATEMENT` are lines of
 their own with the same pid, and a line without the prefix continues the one before. A record is shipped when it is
 one of these, by its level and the start of its message (English messages only):

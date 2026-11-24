@@ -50,6 +50,12 @@ public sealed class PgSource : IEngineSource
     private int _rotationMinutes;
 
     /// <summary>
+    /// The server says its logging collector is off: its stderr goes to files another program writes and rotates, so
+    /// <c>log_rotation_age</c> says nothing of them. A window of such files is never said to be missing.
+    /// </summary>
+    private bool _collectorOff;
+
+    /// <summary>
     /// The server's <c>log_line_prefix</c>, from the newest probe; null until one reads it (the stderr parser then reads
     /// RDS's). The parser of a log file follows it.
     /// </summary>
@@ -118,6 +124,8 @@ public sealed class PgSource : IEngineSource
             _english = PgProbeChecks.English(settings.GetValueOrDefault("lc_messages", ""));
             _rotationMinutes = int.TryParse(settings.GetValueOrDefault("log_rotation_age", ""), System.Globalization.NumberStyles.None,
                 System.Globalization.CultureInfo.InvariantCulture, out var minutes) ? minutes : 0;
+            // log_rotation_age is the logging collector's: with it off, whatever saves the server's stderr rotates the files.
+            _collectorOff = settings.GetValueOrDefault("logging_collector", "") == "off";
             var extension = await ScalarAsync(conn, PgSql.StatStatementsVersion, ct) as string;
             caps.StatStatements = extension != null;
             checks.Add(PgProbeChecks.StatStatements(extension, settings, _catalog.Database));
@@ -217,7 +225,7 @@ public sealed class PgSource : IEngineSource
             {
                 var directory = new PgLogDirectory(_logDirectory!);
                 var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
-                    _english, _rotationMinutes, _prefix, _sessions, directory);
+                    _english, _collectorOff ? 0 : _rotationMinutes, _prefix, _sessions, directory);
                 await window.ReadAsync(directory, ct);
                 window.WriteCounts();
             }
@@ -328,7 +336,9 @@ public sealed class PgSource : IEngineSource
                 var starts = files.Where(f => f.Format == newest.Format).Select(f => f.StartMicros).OfType<long>().OrderBy(t => t).ToList();
                 report.OldestLogMicros = starts.FirstOrDefault();
                 report.LogFileMinutes = PgProbeChecks.FileMinutes(starts);
-                checks.Add(PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes, _rotationMinutes));
+                checks.Add(_collectorOff
+                    ? PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes)
+                    : PgProbeChecks.LogFiles(report.Id, starts.Count, report.LogFileMinutes, _rotationMinutes));
             }
         }
         catch (SourceException ex)

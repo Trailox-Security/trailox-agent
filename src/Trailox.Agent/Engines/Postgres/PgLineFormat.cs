@@ -73,49 +73,83 @@ public sealed class PgLineFormat
     /// </summary>
     private Regex? _refusedTail;
 
+    /// <summary>How far into a record's text a forgery's real rest of the line can start: the longest name, then the rest of the prefix.</summary>
+    private int _forgeWindow;
+
+    /// <summary>The line's identity (<c>%u</c>, <c>%d</c>, <c>%c</c>, <c>%p</c>) is written in or after the client's name, so a forgery can change it.</summary>
+    private bool _identityAfterClient;
+
+    /// <summary>The longest name PostgreSQL writes (NAMEDATALEN - 1 bytes): a user, a database, an application.</summary>
+    private const int MaxName = 63;
+
     /// <summary>
     /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a level and
     ///    a message, and the rest of a prefix, into its application name, or a refused client into the user or database
-    ///    name it asked for; read from the left, the line then reads as that message, of the user it names. The real rest
-    ///    of the prefix and the real level follow inside the text. A record is taken as forged, counted and never read:
+    ///    name it asked for; read from the left, the line then reads as that message. The real rest of the prefix and the
+    ///    real level follow inside the text, at most a name and the rest of a prefix from its start: only there is a
+    ///    level marker looked for. A record is taken as forged, counted and never read:
     ///    <list type="bullet">
-    ///    <item>with <c>%a</c> in the prefix, when its text holds any level marker: any signed-in client can write one
-    ///      there. A statement that holds such text itself is counted with them, which the counts show; a forged one read
-    ///      would not;</item>
-    ///    <item>with <c>%u</c> or <c>%d</c>, a connection line whose text holds a level marker (that text is the server's,
-    ///      with only the names a client chose), and any record whose text holds the rest of the prefix followed by
-    ///      <c>FATAL:  </c>: every refused client's line ends so, whatever the failure. A statement's own text is not
-    ///      otherwise taken as forged, so no one hides a statement by writing <c>ERROR:  </c> in it.</item>
+    ///    <item>a connection line with a level marker there: its text is the server's, with only the names a client
+    ///      chose;</item>
+    ///    <item>where the line's own identity (<c>%u</c>, <c>%d</c>, <c>%c</c>, <c>%p</c>) is written in or after the
+    ///      name, so a forgery could name another user: with <c>%a</c>, any record with a level marker there; with
+    ///      <c>%u</c> or <c>%d</c>, any record with the rest of the prefix and <c>FATAL:  </c> there, as every refused
+    ///      client's line ends.</item>
     ///    </list>
+    ///    Where the identity comes before the name (Azure's <c>%t-%c-</c> then <c>%a</c>), a forgery rewrites only the
+    ///    client's own lines, under its real user, so those are read. A statement's text past the start is never looked
+    ///    at, so no one hides a statement by writing a level in it.
     /// </summary>
     /// <remarks>
     /// ⚠ NOT CAUGHT: a newline in a refused client's user name, which starts a line of its own with any prefix at all in
     ///   a real stderr file. csvlog and jsonlog quote the names, and Azure's download writes a newline as <c>\n</c>.
     /// </remarks>
-    public bool Forged(PgLogRecord r) => ClientEscape switch
+    public bool Forged(PgLogRecord r)
     {
-        '\0' => false,
-        'a' => LevelMarker.IsMatch(r.Message),
-        _ => r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
-                or PgRecordKind.Disconnection
-            ? LevelMarker.IsMatch(r.Message)
-            : _refusedTail!.IsMatch(r.Message),
-    };
+        if (ClientEscape == '\0')
+        {
+            return false;
+        }
+        var start = r.Message.Length > _forgeWindow ? r.Message[.._forgeWindow] : r.Message;
+        if (r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
+            or PgRecordKind.Disconnection)
+        {
+            return LevelMarker.IsMatch(start);
+        }
+        return _identityAfterClient && (ClientEscape == 'a' ? LevelMarker.IsMatch(start) : _refusedTail!.IsMatch(start));
+    }
 
     public static PgLineFormat Of(string prefix)
     {
         var tokens = PgLinePrefix.Tokens(prefix);
         var escapes = tokens.Select(t => t.Escape).ToList();
         var client = escapes.Contains('a') ? 'a' : escapes.FirstOrDefault(e => e is 'u' or 'd');
-        Regex? refused = null;
-        if (client is 'u' or 'd')
+        if (client == '\0')
         {
-            var after = tokens.Skip(escapes.IndexOf(client) + 1).ToList();
-            refused = new Regex(Pattern(after, capture: false) + "FATAL:  ",
-                RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            return new PgLineFormat(prefix, tokens);
         }
-        return new PgLineFormat(prefix, tokens) { ClientEscape = client, _refusedTail = refused };
+        var after = tokens.Skip(escapes.IndexOf(client) + 1).ToList();
+        var refused = client is 'u' or 'd'
+            ? new Regex(Pattern(after, capture: false) + "FATAL:  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline)
+            : null;
+        return new PgLineFormat(prefix, tokens)
+        {
+            ClientEscape = client,
+            _refusedTail = refused,
+            _forgeWindow = MaxName + after.Sum(MaxLength) + 16,
+            _identityAfterClient = client is 'u' or 'd' || after.Any(t => t.Escape is 'u' or 'd' or 'c' or 'p'),
+        };
     }
+
+    /// <summary>The most a part of a prefix writes.</summary>
+    private static int MaxLength(PgLinePrefix.Token t) => Math.Max(Math.Abs(t.Padding), t.Escape switch
+    {
+        '\0' => t.Text.Length,
+        'u' or 'd' or 'a' or 'i' or 'b' => MaxName,
+        'r' or 'h' => 262,
+        't' or 's' or 'm' => 40,
+        _ => 24,
+    });
 
     /// <summary>The fields of a line that starts a record; null for any other line (a continuation, or another prefix).</summary>
     public Fields? Match(string line)
