@@ -28,6 +28,18 @@ public sealed class PgSource : IEngineSource
     /// <summary>The server's log files on Azure (<c>log_source: azure_files</c>); null for any other source.</summary>
     private readonly IAzureLogFiles? _azure;
 
+    /// <summary>The server's rows in Log Analytics (<c>log_source: azure_log_analytics</c>); null for any other source.</summary>
+    private readonly IAzureLogQuery? _logAnalytics;
+
+    /// <summary>The Log Analytics table given in <c>options.azure_log_table</c>; null to read the one the rows are in.</summary>
+    private readonly string? _givenTable;
+
+    /// <summary>
+    /// Where the server's rows in Log Analytics are read (<see cref="LogTargetOf"/>), from the newest probe, or the first
+    /// window when no probe found it: null until then. No window reads a table it has not seen the rows in.
+    /// </summary>
+    private AzureLogTarget? _logTarget;
+
     /// <summary>The Region's RDS API calls, shared with this agent's other sources there; null without the RDS API.</summary>
     private readonly RdsCallBudget? _budget;
     private readonly Func<DateTime> _utcNow;
@@ -71,7 +83,7 @@ public sealed class PgSource : IEngineSource
     public const string AzureDefaultPrefix = "%t-%c-";
 
     public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null, IAzureLogFiles? azure = null,
-        HttpClient? http = null)
+        HttpClient? http = null, IAzureLogQuery? logAnalytics = null)
     {
         _endpoint = endpoint;
         _catalog = new PgCatalog(endpoint);
@@ -90,6 +102,14 @@ public sealed class PgSource : IEngineSource
             _azure = azure ?? new ArmAzureLogFiles(http ?? new HttpClient(), endpoint.Options["azure_subscription"],
                 endpoint.Options["azure_resource_group"], server);
         }
+        else if (source == PostgresEngine.LogSourceAzureLogAnalytics)
+        {
+            var server = endpoint.Options["azure_server"];
+            _instances = new[] { new PgInstance(server, endpoint.Host, "primary") };
+            _logAnalytics = logAnalytics ?? new ArmLogAnalyticsQuery(http ?? new HttpClient(), endpoint.Options["azure_subscription"],
+                endpoint.Options["azure_resource_group"], server, endpoint.Options.GetValueOrDefault("azure_workspace_id"));
+            _givenTable = endpoint.Options.GetValueOrDefault("azure_log_table");
+        }
         else
         {
             _instances = new[] { new PgInstance(endpoint.Host, endpoint.Host, "primary") };
@@ -102,7 +122,10 @@ public sealed class PgSource : IEngineSource
         var checks = new List<PostgresCheck>();
         var caps = new PostgresCaps
         {
-            LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : _azure != null ? PostgresEngine.LogSourceAzureFiles : PostgresEngine.LogSourceFile,
+            LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi
+                : _azure != null ? PostgresEngine.LogSourceAzureFiles
+                : _logAnalytics != null ? PostgresEngine.LogSourceAzureLogAnalytics
+                : PostgresEngine.LogSourceFile,
         };
         string version;
         Dictionary<string, string> settings;
@@ -144,6 +167,7 @@ public sealed class PgSource : IEngineSource
         }
         var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct)
             : _azure != null ? await AzureLogsAsync(ct)
+            : _logAnalytics != null ? await LogAnalyticsAsync(ct)
             : DirectoryLogs(caps.Platform);
         caps.Instances = instances;
         caps.LogFormat = format;
@@ -221,6 +245,10 @@ public sealed class PgSource : IEngineSource
             {
                 await AzureWindowAsync(task, instance, rows, callsPerSecond, ct);
             }
+            else if (_logAnalytics != null)
+            {
+                await LogAnalyticsWindowAsync(task, instance, rows, ct);
+            }
             else
             {
                 var directory = new PgLogDirectory(_logDirectory!);
@@ -260,6 +288,100 @@ public sealed class PgSource : IEngineSource
             _english, _rotationMinutes, _prefix, _sessions, reader, azureFile: true);
         await window.ReadAsync(reader, ct);
         window.WriteCounts();
+    }
+
+    /// <summary>
+    /// A window older than this needs only some row of the server after it: every row of the window has arrived by then.
+    /// </summary>
+    internal static readonly TimeSpan LogAnalyticsSettled = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How far past a window a row must have reached Log Analytics before the window is read. Rows reach it in batches,
+    /// 120 to 347 s after they are written, and a batch can come after a newer one: at worst 176 s behind the newest row
+    /// already there (6,480 rows over 5.5 hours, measured).
+    /// </summary>
+    internal const long LogAnalyticsArrivalMicros = 300_000_000;
+
+    /// <summary>
+    /// One window of the server's rows in Log Analytics. A recent window waits until a row stamped
+    /// <see cref="LogAnalyticsArrivalMicros"/> past its end is there; an older one needs a row after its end.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 No row after a window is never read as an empty window: on Azure the platform's own sign-ins write rows every
+    ///    minute, so none means the server is stopped or nothing sends its log there any more (a diagnostic setting
+    ///    removed or changed). The window fails and says so, while the download still holds those days.
+    /// </remarks>
+    private async Task LogAnalyticsWindowAsync(AgentTask task, PgInstance instance, RowWriter rows, CancellationToken ct)
+    {
+        if (_prefix == null)
+        {
+            Prefix(AzureDefaultPrefix);
+        }
+        var target = _logTarget ?? (await LogTargetAsync(ct)).Target;
+        var reader = new AzureLogAnalyticsReader(_logAnalytics!, target);
+        var recent = _utcNow() - FromMicros(task.EndMicros) < LogAnalyticsSettled;
+        if (!await reader.WrittenPastAsync(task.EndMicros + (recent ? LogAnalyticsArrivalMicros : 0), ct))
+        {
+            throw recent
+                ? new SourceException("Log Analytics has not received the whole window yet") { NotYetPublished = true }
+                : new SourceException($"Log Analytics has no row of {instance.Id} in {target.Table} after the window: the server is stopped, "
+                    + "or nothing sends its PostgreSQLLogs there any more (check its diagnostic setting). The server log download keeps "
+                    + "the last logfiles.retention_days");
+        }
+        var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+            _english, _rotationMinutes, _prefix, _sessions, reader, azureFile: true);
+        await window.ReadAsync(reader, ct);
+        window.WriteCounts();
+    }
+
+    /// <summary>
+    /// The server's rows in Log Analytics: which table and workspace hold them (<see cref="LogTargetOf"/>), how many came
+    /// in the last day, the newest and the oldest. A workspace keeps them for its retention.
+    /// </summary>
+    private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> LogAnalyticsAsync(CancellationToken ct)
+    {
+        var report = new PostgresInstance { Id = _instances[0].Id, Role = "primary" };
+        var checks = new List<PostgresCheck>();
+        try
+        {
+            var (target, tables) = await LogTargetAsync(ct);
+            var inTable = tables.Where(r => r.Table == target.Table && r.Rows > 0).ToList();
+            var read = inTable.Where(r => target.Workspace == null || r.Workspace == target.Workspace).ToList();
+            var rows = read.Sum(r => r.Rows);
+            report.OldestLogMicros = rows > 0 ? await _logAnalytics!.OldestMicrosAsync(target, ct) ?? 0 : 0;
+            checks.Add(PgProbeChecks.AzureLogAnalytics(report.Id, target, rows, report.OldestLogMicros,
+                read.Select(r => r.NewestMicros ?? 0).DefaultIfEmpty(0).Max(), (_utcNow() - DateTime.UnixEpoch).Ticks / 10,
+                tables.Where(r => r.Table != target.Table && r.Rows > 0).Select(r => r.Table).Distinct().ToList(),
+                inTable.Select(r => r.Workspace).Distinct().ToList()));
+        }
+        catch (SourceException ex)
+        {
+            checks.Add(new PostgresCheck { Name = "log_analytics", Status = "fail", Message = Runner.EndpointSession.Trim(ex.Message) });
+        }
+        return (new List<PostgresInstance> { report }, checks, "stderr");
+    }
+
+    /// <summary>Finds where the server's rows are (<see cref="LogTargetOf"/>) and keeps it for the windows.</summary>
+    private async Task<(AzureLogTarget Target, IReadOnlyList<AzureLogTableRows> Tables)> LogTargetAsync(CancellationToken ct)
+    {
+        var tables = await _logAnalytics!.TablesAsync(ct);
+        var target = LogTargetOf(tables, _givenTable);
+        _logTarget = target;
+        return (target, tables);
+    }
+
+    /// <summary>
+    /// Where the server's rows are read: the table given, else the one that holds them (the resource-specific one first,
+    /// and it when neither does). 🔴 When they reach more than one workspace (two diagnostic settings), the server's own
+    /// query answers every row once per workspace, as Microsoft documents a resource's query (not measured: only one
+    /// workspace was there to send to): only the workspace with the most of them is read.
+    /// </summary>
+    internal static AzureLogTarget LogTargetOf(IReadOnlyList<AzureLogTableRows> tables, string? given = null)
+    {
+        var table = given ?? AzureLogTables.All.FirstOrDefault(t => tables.Any(r => r.Table == t && r.Rows > 0)) ?? AzureLogTables.ResourceSpecific;
+        var workspaces = tables.Where(r => r.Table == table && r.Rows > 0 && r.Workspace.Length > 0)
+            .OrderByDescending(r => r.Rows).ThenBy(r => r.Workspace, StringComparer.Ordinal).ToList();
+        return new AzureLogTarget(table, workspaces.Count > 1 ? workspaces[0].Workspace : null);
     }
 
     /// <summary>The server's log files on Azure: how many, and the oldest; Azure keeps them for <c>logfiles.retention_days</c>.</summary>

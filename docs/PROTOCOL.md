@@ -814,6 +814,32 @@ cannot be passed on by a machine in between; a server or pooler that does not of
   minutes, each time the current hour's and the hour before's, so a window that ended within 2 hours fails with
   `not_yet_published` until the newest file holds a line 5 s past its end. The lines are JSON string content: `\"` is a quote, `\n` a newline, and a
   record's `statement` and `detail_log` follow its text on the same line as `","statement": "...`.
+- `azure_log_analytics` (from 1.22.0), Azure Database for PostgreSQL flexible server: the rows a diagnostic setting
+  sends to Log Analytics (category `PostgreSQLLogs`), through the Log Analytics query API, as the same Azure identity
+  as `azure_files`, with a token for `https://api.loganalytics.io`.
+
+  | call | when |
+  |---|---|
+  | `POST https://api.loganalytics.azure.com/v1/subscriptions/{azure_subscription}/resourceGroups/{azure_resource_group}/providers/Microsoft.DBforPostgreSQL/flexibleServers/{azure_server}/query` (with `azure_workspace_id`: `.../v1/workspaces/{azure_workspace_id}/query`, the rows filtered on the server's `_ResourceId`) | every query |
+  | `union isfuzzy=true` of both tables, the server's rows in the last day; then the chosen table's oldest row | the probe |
+  | the table's first row stamped 5 minutes past the window's end, if any | a window that ended within the hour |
+  | the window's rows from a second before it to a minute past it, in order of `TimeGenerated` then `_ItemId`, 20,000 a page, each page after the last row of the one before | each `pg_log` task, until a line past the window's end; and a look-back |
+
+  The resource route needs `Microsoft.Insights/logs/*/read` on the server (measured alone: it reaches the server's
+  own log tables, nothing else); the workspace route `Microsoft.OperationalInsights/workspaces/read`,
+  `workspaces/query/read` and `workspaces/query/PGSQLServerLogs/read` on the workspace (measured: `search *` then
+  reaches that table only; without `query/read` it is refused), or Log Analytics Reader. Every query sends
+  `Cache-Control: no-cache`: Azure answers repeated text from a cache for about 2 minutes (measured). The table is `options.azure_log_table` (`PGSQLServerLogs` or `AzureDiagnostics`), else the one
+  the probe found the server's rows in, `PGSQLServerLogs` first. Each row is made the download's line: its `Message`
+  as JSON string content, then `Detail`, `DetailLog`, `Context` and `Statement` as `","detail": "...` and so on, so
+  one parser reads both sources (measured: the same stretch read from both gives every Log Analytics row as a
+  download line, to the character; the download also holds Azure's own `[Microsoft Entra]`, `[pg-availability]` and
+  `pg_qs` lines). An answer past 500,000 rows or about 64 MB comes back 200 with a `PartialError`: the page is asked
+  again with half as many rows, down to 100. A 429 or 503 is sent again after its `Retry-After` (else 10, 20, 30 s),
+  3 times. Queries carry `Prefer: wait=600`, are paced to 2 a second for the agent, and give `bytes` (the answers'
+  size) and no `files`. A window that ended within the hour fails with `not_yet_published` until a row stamped 5
+  minutes past its end has arrived: rows arrive 120 to 347 s after they are written, in batches that can come after
+  a newer one, at worst 176 s behind the newest row already there (6,480 rows over 5.5 hours, measured).
 - `file`, a self-managed server: the directory `options.log_directory`, mounted read-only. Only `.json` files are
   read when there are any, else `.csv`, else stderr. A file covers [the time in its name, its last write]. From
   1.22.0 a stderr file of any prefix but RDS's that starts before the window is read from where the window begins,
@@ -936,7 +962,7 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
 
   From 1.22.0 the count row adds `look_backs` (reads of the log before the window for a session's sign-in),
   `counted.no_user` (records shipped without a user: their session's sign-in was not found) and `counted.forged`;
-  `log_bytes` is also given for `azure_files`.
+  `log_bytes` is also given for `azure_files` and `azure_log_analytics`.
 - `pg_stat_snapshot`: the statement follows the version of the extension installed in `options.database`, not
   the server's (a major upgrade keeps the old version until `ALTER EXTENSION pg_stat_statements UPDATE`): before
   1.9 (PostgreSQL 13) `toplevel`, `dealloc` and `stats_reset` are null, and before 1.8 `total_exec_time` is read
@@ -966,13 +992,15 @@ function, no reset of `pg_stat_statements`, and its text only in `catalog_statem
 
 **The probe** reports `caps.postgres` in the check-in: `platform` (`rds`, `aurora`, `self_managed`, and from 1.21.0
 `azure` for Azure Database for PostgreSQL flexible server, where the server defines Azure's own setting
-`azure.extensions`), `logSource` (`rds_api`, `file`, from 1.22.0 `azure_files`),
+`azure.extensions`), `logSource` (`rds_api`, `file`, from 1.22.0 `azure_files` and `azure_log_analytics`),
 `logFormat`, `serverVersionNum`, `statStatements`, `instances` (`id`, `role`, `oldestLogMicros`, `logFileMinutes`)
 and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `role`, `logging`, `lc_messages`, `log_timezone`,
 `logging_collector` (self-managed, not on Azure; from 1.22.0 only when no log file is found), `pg_stat_statements`
 (a warning before extension 1.8, and from 1.21.0 when `pg_stat_statements.track` is `none`), `log_error_verbosity`
 (where pgaudit is loaded: a warning at `terse`), `instances` (each replica signed in to once), `replicas`,
-`log_files` (for `azure_files`, the files listed and the oldest), and from 1.21.0 `log_line_prefix` (the prefix, and
+`log_files` (for `azure_files`, the files listed and the oldest), `log_analytics` (for `azure_log_analytics`, the
+server's rows in the last day and the oldest kept: a failure with none, a warning when another table also holds them),
+and from 1.21.0 `log_line_prefix` (the prefix, and
 which of `%u`, `%c` and `%p` it lacks; in 1.21.0 a warning when it is not a prefix the agent reads stderr lines of;
 from 1.22.0 `ok` when a line's user can be found, a warning when none of the three is there or `%a` comes before
 more of the prefix, and a failure with no time). A failed check does not fail the probe. `earliestEventMicros` and

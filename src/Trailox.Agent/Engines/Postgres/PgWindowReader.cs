@@ -352,16 +352,17 @@ public sealed class PgWindowReader
     }
 
     /// <summary>
-    /// Reads the window from Azure's server log download: the part of each hourly file that holds it, its lines parsed by
-    /// the server's prefix, each record's user from its session (<see cref="PgSessionMap"/>).
+    /// Reads the window from a log Azure keeps: the part of each hourly file of the server log download that holds it, or
+    /// its rows in Log Analytics. The lines are parsed by the server's prefix, each record's user from its session
+    /// (<see cref="PgSessionMap"/>).
     /// </summary>
-    public async Task ReadAsync(AzureLogReader azure, CancellationToken ct)
+    public async Task ReadAsync(IAzureLog azure, CancellationToken ct)
     {
         var prefix = _prefix ?? PgLineFormat.Of(PgSource.AzureDefaultPrefix);
-        var oldest = (await azure.FilesAsync(ct)).Select(f => f.StartMicros).OfType<long>().DefaultIfEmpty(long.MaxValue).Min();
-        if (oldest != long.MaxValue && oldest > _start)
+        if (await azure.OldestMicrosAsync(ct) is { } oldest && oldest > _start)
         {
-            // Azure keeps the files for logfiles.retention_days: the log before the oldest is gone.
+            // Azure keeps the files for logfiles.retention_days, and a workspace its rows for its retention: the log
+            // before the oldest is gone.
             _firstLogMicros = oldest;
         }
         var done = new List<PgLogRecord>();
@@ -414,6 +415,7 @@ public sealed class PgWindowReader
         }
         _files += azure.Stats.Files;
         _bytes += azure.Stats.Bytes;
+        _malformed += azure.Stats.Unreadable;
     }
 
     /// <summary>Reads the window from an RDS instance through the RDS API (stderr only).</summary>

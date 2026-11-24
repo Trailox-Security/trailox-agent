@@ -144,6 +144,26 @@ endpoints:
   #     azure_server: orders                             # the server's name, the first label of host
   #   backfillDays: 7                                    # Azure keeps the files logfiles.retention_days, 7 at most
   #
+  # The same server when a diagnostic setting already sends its PostgreSQLLogs to Log Analytics: the agent reads
+  # those rows (minutes behind, not the download's up to 25). It needs a custom role with only
+  # Microsoft.Insights/logs/*/read on the server. (With azure_workspace_id instead: workspaces/read,
+  # workspaces/query/read and workspaces/query/PGSQLServerLogs/read on the workspace.)
+  # - alias: orders-azure-la
+  #   engine: postgres
+  #   kind: cloud
+  #   host: orders.postgres.database.azure.com
+  #   port: 5432
+  #   tls: true
+  #   username: trailox_monitor
+  #   password_env: TRAILOX_PG_PASSWORD
+  #   options:
+  #     log_source: azure_log_analytics
+  #     azure_subscription: 00000000-0000-0000-0000-000000000000
+  #     azure_resource_group: rg-databases
+  #     azure_server: orders
+  #     # azure_workspace_id: 00000000-0000-0000-0000-000000000000   # only to query the workspace, not the server
+  #     # azure_log_table: AzureDiagnostics                         # only for the legacy table; default: where the rows are
+  #
   # A self-managed server: its log directory is mounted read-only (see docker-compose.yml), and the agent
   # runs on the database host with network_mode: host. A log another reader already uses is read where it is,
   # in its own log_line_prefix: mount that directory (Debian: /var/log/postgresql, readable by group adm).

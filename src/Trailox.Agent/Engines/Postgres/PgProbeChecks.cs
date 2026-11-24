@@ -188,6 +188,52 @@ public static class PgProbeChecks
             + DateTime.UnixEpoch.AddTicks(oldestMicros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
             + " UTC. Azure keeps them for logfiles.retention_days (at most 7): a longer outage loses the gap");
 
+    /// <summary>How old the newest row may be before the probe says nothing sends the server's log any more.</summary>
+    internal const long LogAnalyticsSilentMicros = 3_600_000_000;
+
+    /// <summary>
+    /// The server's rows in Log Analytics over the last day. None, or none for an hour, fails: on Azure the platform's own
+    /// sign-ins write rows every minute, so silence means nothing sends the server's <c>PostgreSQLLogs</c> there.
+    /// </summary>
+    /// <param name="otherTables">
+    /// Other tables that hold the server's rows. With none in the target's table, that is a table given in
+    /// <c>options.azure_log_table</c> while the rows go to the other; with some, a second diagnostic setting.
+    /// </param>
+    /// <param name="workspaces">The workspaces that hold the server's rows in the target's table.</param>
+    public static PostgresCheck AzureLogAnalytics(string server, AzureLogTarget target, long rowsLastDay, long oldestMicros, long newestMicros,
+        long nowMicros, IReadOnlyList<string> otherTables, IReadOnlyList<string> workspaces)
+    {
+        var table = target.Table;
+        string Utc(long micros) =>
+            DateTime.UnixEpoch.AddTicks(micros * 10).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+        if (rowsLastDay == 0)
+        {
+            return Fail("log_analytics", otherTables.Count > 0
+                ? $"{server}: no row of its server log came to {table} in the last day, but {string.Join(", ", otherTables)} has them: "
+                    + "set options.azure_log_table to it, or leave it out"
+                : $"{server}: no row of its server log came to Log Analytics in the last day in {table}. Send its PostgreSQLLogs "
+                    + "category there with a diagnostic setting (destination table: Resource specific), or read it with log_source: azure_files");
+        }
+        if (nowMicros - newestMicros > LogAnalyticsSilentMicros)
+        {
+            return Fail("log_analytics", $"{server}: the newest row of its server log in {table} is from {Utc(newestMicros)}: nothing has "
+                + "sent it there since. Check the server is running and its diagnostic setting still sends PostgreSQLLogs");
+        }
+        var notes = new List<string>();
+        if (workspaces.Count > 1)
+        {
+            notes.Add($"its rows reach {workspaces.Count} workspaces ({string.Join(", ", workspaces)}), each with the same rows: the agent "
+                + $"reads {target.Workspace}'s only");
+        }
+        if (otherTables.Count > 0)
+        {
+            notes.Add($"{string.Join(", ", otherTables)} also holds them: the agent reads {table} only");
+        }
+        var message = $"{server}: {rowsLastDay} rows of its server log came to {table} in the last day, the newest from "
+            + $"{Utc(newestMicros)}, the oldest kept from {Utc(oldestMicros)}. Log Analytics leaves out a record longer than about 64 KB";
+        return notes.Count > 0 ? Warn("log_analytics", message + "; " + string.Join("; ", notes)) : Ok("log_analytics", message);
+    }
+
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0
         ? Ok("instances", listed == 1 ? "the agent signs in to the replica" : $"the agent signs in to all {listed} replicas")
