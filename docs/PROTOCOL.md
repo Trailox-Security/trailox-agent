@@ -838,12 +838,12 @@ a refused sign-in's user is the one its FATAL text names. A session that signed 
 looked for once: with a session id, the minute after the start the id says; with a process only, up to 2 hours
 before the read; at most 200 look-backs per window. With none of `%u`, `%c` and `%p` a statement, pgaudit or FATAL
 record names no one and counts as `unreadable`. Where the prefix writes a name a client chose (`%a`, `%u`, `%d`), a
-record taken as written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped. With
-`%a`, which any signed-in client sets at any length: any record whose text holds a level marker (`LOG:  `,
-`ERROR:  `...). With `%u` or `%d`, which only a refused client chooses, and which the server cuts to 63 bytes, the
-text is looked at only as far as such a name and the rest of the prefix reach: a connection line with a level marker
-there, and any record with the rest of the prefix and `FATAL:  ` there, as every refused client's line ends. RDS's
-two prefixes keep their own reader;
+record taken as written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped. The
+server cuts each such name to 63 bytes, so a record whose prefix reads a longer one is forged, and its text is looked
+at only as far as a name and the rest of the prefix reach from the first such escape. With `%a`, which any signed-in
+client sets: any record with a level marker (`LOG:  `, `ERROR:  `...) there. With `%u` or `%d` only, which only a
+refused client chooses: a connection line with a level marker there, and any record with the rest of the prefix and
+`FATAL:  ` there, as every refused client's line ends. RDS's two prefixes keep their own reader;
 csvlog (24 columns on 13, 26 on 14-18); jsonlog. In stderr a message's `DETAIL`, `HINT` and `STATEMENT` are lines of
 their own with the same pid, and a line without the prefix continues the one before. A record is shipped when it is
 one of these, by its level and the start of its message (English messages only):

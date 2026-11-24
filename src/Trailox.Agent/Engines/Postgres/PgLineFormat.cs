@@ -73,12 +73,12 @@ public sealed class PgLineFormat
     /// </summary>
     private Regex? _refusedTail;
 
-    /// <summary>How far into a record's text a refused client's real rest of the line can start: its name, then the rest of the prefix.</summary>
+    /// <summary>How far into a record's text a forgery's real rest of the line can start: a name, then the rest of the prefix.</summary>
     private int _forgeWindow;
 
     /// <summary>
-    /// The longest user or database name PostgreSQL writes: it cuts the names a client asks for to NAMEDATALEN - 1 bytes.
-    /// An application name it does not cut.
+    /// The longest name PostgreSQL writes: it cuts a user, database or application name a client gives to NAMEDATALEN - 1
+    /// bytes (an application name both at sign-in and on SET, measured on 17.11).
     /// </summary>
     private const int MaxName = 63;
 
@@ -87,16 +87,16 @@ public sealed class PgLineFormat
     ///    a message, and the rest of a prefix, into its application name, or a refused client into the user or database
     ///    name it asked for; read from the left, the line then reads as that message: another user's, a sign-in, or a
     ///    checkpoint that hides the client's own statement. The real rest of the prefix and the real level follow inside
-    ///    the text. A record is taken as forged, counted and never read:
+    ///    the text, at most a name (63 bytes) and the rest of the prefix from its start: only that far is anything
+    ///    looked for, so a level a statement quotes further in is the statement's own. A record is taken as forged,
+    ///    counted and never read:
     ///    <list type="bullet">
-    ///    <item>with <c>%a</c> in the prefix, when its text holds a level marker anywhere: any signed-in client sets its
-    ///      application name, at any length. A statement that quotes a level is counted with them, which the counts
-    ///      show; a forged line read would not, and the probe warns of such a prefix;</item>
-    ///    <item>with <c>%u</c> or <c>%d</c>, which only a refused client chooses, and then at most 63 bytes, looked for
-    ///      only as far into the text as that name and the rest of the prefix reach: a connection line with a level
+    ///    <item>with <c>%a</c> in the prefix, which any signed-in client sets: any record with a level marker there. A
+    ///      statement that quotes a level that early is counted with them, which the counts show; a forged line read
+    ///      would not, and the probe warns of such a prefix;</item>
+    ///    <item>with <c>%u</c> or <c>%d</c> only, which only a refused client chooses: a connection line with a level
     ///      marker there (its text is the server's, with the names a client chose), and any record with the rest of the
-    ///      prefix and <c>FATAL:  </c> there, as every refused client's line ends. A statement's text past that is never
-    ///      looked at, so no one hides a statement by writing a level in it.</item>
+    ///      prefix and <c>FATAL:  </c> there, as every refused client's line ends.</item>
     ///    </list>
     /// </summary>
     /// <remarks>
@@ -105,14 +105,20 @@ public sealed class PgLineFormat
     /// </remarks>
     public bool Forged(PgLogRecord r)
     {
-        switch (ClientEscape)
+        if (ClientEscape == '\0')
         {
-            case '\0':
-                return false;
-            case 'a':
-                return LevelMarker.IsMatch(r.Message);
+            return false;
+        }
+        // A name longer than the server writes one: the line was split at a level a client wrote, not the server's.
+        if (TooLong(r.User) || TooLong(r.Database) || TooLong(r.ApplicationName))
+        {
+            return true;
         }
         var start = r.Message.Length > _forgeWindow ? r.Message[.._forgeWindow] : r.Message;
+        if (ClientEscape == 'a')
+        {
+            return LevelMarker.IsMatch(start);
+        }
         return r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
             or PgRecordKind.Disconnection
             ? LevelMarker.IsMatch(start)
@@ -124,25 +130,29 @@ public sealed class PgLineFormat
         var tokens = PgLinePrefix.Tokens(prefix);
         var escapes = tokens.Select(t => t.Escape).ToList();
         var client = escapes.Contains('a') ? 'a' : escapes.FirstOrDefault(e => e is 'u' or 'd');
-        if (client is not ('u' or 'd'))
+        if (client == '\0')
         {
-            return new PgLineFormat(prefix, tokens) { ClientEscape = client };
+            return new PgLineFormat(prefix, tokens);
         }
+        // From the first name a client chooses: whichever it forges in, the rest of the line follows from there.
+        var first = escapes.FindIndex(e => e is 'a' or 'u' or 'd');
         var after = tokens.Skip(escapes.IndexOf(client) + 1).ToList();
         return new PgLineFormat(prefix, tokens)
         {
             ClientEscape = client,
-            _refusedTail = new Regex(Pattern(after, capture: false) + "FATAL:  ",
+            _refusedTail = client == 'a' ? null : new Regex(Pattern(after, capture: false) + "FATAL:  ",
                 RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline),
-            _forgeWindow = MaxName + after.Sum(MaxLength) + 16,
+            _forgeWindow = MaxName + tokens.Skip(first + 1).Sum(MaxLength) + 16,
         };
     }
+
+    private static bool TooLong(string? name) => name is { Length: > MaxName / 4 } && Encoding.UTF8.GetByteCount(name) > MaxName;
 
     /// <summary>The most a part of a prefix writes.</summary>
     private static int MaxLength(PgLinePrefix.Token t) => Math.Max(Math.Abs(t.Padding), t.Escape switch
     {
         '\0' => t.Text.Length,
-        'u' or 'd' or 'i' or 'b' => MaxName,
+        'u' or 'd' or 'a' or 'i' or 'b' => MaxName,
         'r' or 'h' => 262,
         't' or 's' or 'm' => 40,
         _ => 24,

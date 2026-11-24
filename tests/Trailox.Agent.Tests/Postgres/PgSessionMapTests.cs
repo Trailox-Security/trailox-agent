@@ -284,25 +284,30 @@ public sealed class PgSessionMapTests : IDisposable
 
     /// <summary>
     /// 🔴 With %a in the prefix, a signed-in client can make its own lines read as anything: a statement, a sign-in, or a
-    ///    checkpoint that hides its real statement. Wherever %a stands, and at any length, a level in a record's text is
-    ///    taken as forged and counted.
+    ///    checkpoint that hides its real statement. Its name is at most 63 bytes, so a level near the start of a record's
+    ///    text is taken as forged and counted; one a statement quotes further in is the statement's own, and is read.
     /// </summary>
     [Fact]
-    public async Task With_the_application_name_in_the_prefix_a_level_anywhere_in_the_text_is_forged()
+    public async Task With_the_application_name_in_the_prefix_a_level_near_the_start_is_forged()
     {
         var session = $"{Micros("2026-01-15 10:00:00") / 1_000_000:x}.12c";
-        var hidden = "x LOG:  checkpoint starting: " + new string('t', 200);
+        var deep = "statement: CREATE TABLE notes AS SELECT '" + new string('n', 300) + " ERROR:  kept' AS t";
         await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
         {
             $"2026-01-15 10:00:00 UTC-{session}- LOG:  connection authorized: user=mallory database=shop application_name=psql",
-            $"2026-01-15 10:00:01 UTC-{session}-x LOG:  statement: DROP TABLE accounts psql LOG:  statement: SELECT 1",
-            $"2026-01-15 10:00:02 UTC-{session}-x LOG:  connection authorized: user=admin database=prod psql LOG:  statement: SELECT 2",
-            $"2026-01-15 10:00:03 UTC-{session}-{hidden} LOG:  statement: DROP TABLE orders",
+            $"2026-01-15 10:00:01 UTC-{session}-x LOG:  statement: DROP TABLE a psql LOG:  statement: SELECT 1",
+            $"2026-01-15 10:00:02 UTC-{session}-x LOG:  connection authorized: user=admin psql LOG:  statement: SELECT 2",
+            $"2026-01-15 10:00:03 UTC-{session}-x LOG:  checkpoint starting: time psql LOG:  statement: DROP TABLE orders",
+            $"2026-01-15 10:00:04 UTC-{session}-psql LOG:  {deep}",
         });
 
         var rows = await ReadAsync(new PgLogDirectory(_dir), "%t-%c-%a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
 
-        Assert.Equal(new[] { ("connection authorized: user=mallory database=shop application_name=psql", "mallory") },
+        Assert.Equal(new[]
+            {
+                ("connection authorized: user=mallory database=shop application_name=psql", "mallory"),
+                (deep, "mallory"),
+            },
             rows.SkipLast(1).Select(r => (S(r, "message"), S(r, "user"))));
         Assert.Equal(3, Counted(Counts(rows), "forged"));
     }
@@ -324,6 +329,28 @@ public sealed class PgSessionMapTests : IDisposable
         var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %q%u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
 
         Assert.Equal(new[] { ("alice", longDdl) }, rows.SkipLast(1).Select(r => (S(r, "user"), S(r, "message"))));
+        Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
+    /// <summary>
+    /// 🔴 With %u before %a, a refused client's forgery in its user name ends past the application name: the window
+    ///    starts at the first name a client chooses, so it reaches. A split that leaves a name longer than the server
+    ///    writes one (63 bytes) is a forgery too.
+    /// </summary>
+    [Theory]
+    [InlineData("password authentication failed for user \"admin LOG:  statement: DROP TABLE accounts\"")]
+    [InlineData("password authentication failed for user \"x\"")]   // inconsistent, but its application name reads as 100 bytes
+    public async Task The_window_reaches_from_the_first_name_a_client_chooses(string refusal)
+    {
+        var app = new string('p', 63);
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            $"2026-01-15 10:00:01.000 UTC admin LOG:  statement: DROP TABLE accounts {app} FATAL:  {refusal}",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m %u %a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Single(rows);
         Assert.Equal(1, Counted(Counts(rows), "forged"));
     }
 
