@@ -167,13 +167,37 @@ public class AzureLogFilesTests
     }
 
     [Fact]
-    public async Task A_window_that_ended_an_hour_ago_is_read_as_it_is()
+    public async Task A_window_that_ended_two_hours_ago_is_read_as_it_is()
     {
-        var source = new PgSource(Endpoint(), utcNow: () => new DateTime(2026, 1, 15, 12, 30, 0, DateTimeKind.Utc), azure: Fixture());
+        var source = new PgSource(Endpoint(), utcNow: () => new DateTime(2026, 1, 15, 13, 10, 0, DateTimeKind.Utc), azure: Fixture());
 
         var rows = await RowsAsync((await source.OpenAsync(Window("2026-01-15 10:59:00", "2026-01-15 11:04:00"), CancellationToken.None))!);
 
         Assert.Contains(rows, r => S(r, "level") == "summary");
+    }
+
+    /// <summary>
+    /// 🔴 Azure writes the hour before's file again with the current one, up to about 25 minutes after that hour ended,
+    ///    so a newer file alone does not make the hour before whole: the newest file's last line must be past the window.
+    /// </summary>
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("2026-01-15 11:00:30 UTC-6968cad6.500-LOG:  checkpoint starting: time\n", true)]
+    public async Task A_newer_file_counts_only_with_a_line_past_the_window(string newest, bool written)
+    {
+        var azure = Fixture();
+        azure.Add("postgresql_2026_01_15_11_00_00.log", Encoding.UTF8.GetBytes(newest));
+        var reader = new AzureLogReader(azure, 1000);
+
+        Assert.Equal(written, await reader.WrittenPastAsync(Micros("2026-01-15 11:00:05"), PgLineFormat.Of("%t-%c-").TimeOf, CancellationToken.None));
+    }
+
+    [Fact]
+    public void The_list_gives_sizes_in_thousands_of_bytes()
+    {
+        using var doc = JsonDocument.Parse("""{"name":"postgresql_2026_01_15_10_00_00.log","properties":{"sizeInKb":103,"url":"https://h.example/f?sig=x"}}""");
+
+        Assert.Equal(103_000, ArmAzureLogFiles.Parse(doc.RootElement)!.SizeBytes);
     }
 
     private sealed class StaticToken : TokenCredential
@@ -232,7 +256,7 @@ public class AzureLogFilesTests
         var files = await api.ListAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "postgresql_2026_01_15_10_00_00.log", "postgresql_2026_01_15_11_00_00.log" }, files.Select(f => f.Name));
-        Assert.Equal((70 * 1024L, Micros("2026-01-15 10:59:58")), (files[0].SizeBytes, files[0].LastModifiedMicros));
+        Assert.Equal((70_000L, Micros("2026-01-15 10:59:58")), (files[0].SizeBytes, files[0].LastModifiedMicros));
         Assert.Equal(Micros("2026-01-15 10:00:00"), files[0].StartMicros);
         Assert.Equal("https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-databases/providers/"
             + "Microsoft.DBforPostgreSQL/flexibleServers/orders/logFiles?api-version=2024-08-01", http.Requests[0].RequestUri!.ToString());

@@ -234,8 +234,15 @@ public sealed class PgSource : IEngineSource
     }
 
     /// <summary>
-    /// One window of Azure's server log download. Azure adds to the newest file every few minutes, so a recent window
-    /// waits until a line past its end is there (or an hour has gone by: an idle server writes nothing to wait for).
+    /// A window older than this is read as Azure's files hold it: Azure writes them about every 20 minutes, the hour
+    /// before's too, up to about 25 minutes after that hour ended.
+    /// </summary>
+    internal static readonly TimeSpan AzureSettled = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// One window of Azure's server log download. Azure writes the files about every 20 minutes, so a recent window
+    /// waits until a line past its end is there (or <see cref="AzureSettled"/> has gone by: an idle server writes nothing
+    /// to wait for).
     /// </summary>
     private async Task AzureWindowAsync(AgentTask task, PgInstance instance, RowWriter rows, double callsPerSecond, CancellationToken ct)
     {
@@ -244,7 +251,7 @@ public sealed class PgSource : IEngineSource
             Prefix(AzureDefaultPrefix);
         }
         var reader = new AzureLogReader(_azure!, callsPerSecond);
-        var recent = _utcNow() - FromMicros(task.EndMicros) < CatchUp;
+        var recent = _utcNow() - FromMicros(task.EndMicros) < AzureSettled;
         if (recent && !await reader.WrittenPastAsync(task.EndMicros + PgWindowReader.StopMarginMicros, _prefix!.TimeOf, ct))
         {
             throw new SourceException("Azure has not written the whole window to the server's log files yet") { NotYetPublished = true };

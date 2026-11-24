@@ -162,7 +162,7 @@ public sealed class ArmAzureLogFiles : IAzureLogFiles
             ? (m.UtcDateTime - DateTime.UnixEpoch).Ticks / 10
             : 0;
         var kb = props.ValueKind == JsonValueKind.Object && props.TryGetProperty("sizeInKb", out var size) && size.TryGetInt64(out var s) ? s : 0;
-        return new AzureLogFile(name, modified, kb * 1024, url);
+        return new AzureLogFile(name, modified, kb * AzureLogReader.SizeUnit, url);
     }
 
     public async Task<byte[]> ReadAsync(AzureLogFile file, long offset, int count, CancellationToken ct)
@@ -266,6 +266,12 @@ public sealed class AzureLogReader : IPgLogLines
     public const int ChunkBytes = 4 << 20;
     public const int ProbeBytes = 64 << 10;
 
+    /// <summary>
+    /// What one of the list's <c>sizeInKb</c> is: a thousand bytes, rounded down (a file of 103,233 bytes is listed as
+    /// 103), so the size listed is a lower bound.
+    /// </summary>
+    public const int SizeUnit = 1000;
+
     private readonly IAzureLogFiles _api;
     private readonly TimeSpan _interval;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
@@ -298,22 +304,20 @@ public sealed class AzureLogReader : IPgLogLines
     }
 
     /// <summary>
-    /// Whether the log already holds what was written up to <paramref name="micros"/>: a file starts after it, or the
-    /// newest file's last line is past it. Azure adds to the newest file every few minutes.
+    /// Whether the log already holds what was written up to <paramref name="micros"/>: the newest file's last line is past
+    /// it. Azure writes the files about every 20 minutes, each time the current hour's and the hour before's, so a
+    /// newer file alone does not say the hour before is whole: its last lines can come with the next write.
     /// </summary>
     public async Task<bool> WrittenPastAsync(long micros, Func<string, long?> timeOf, CancellationToken ct)
     {
         var files = await FilesAsync(ct);
-        if (files.Any(f => f.StartMicros > micros))
-        {
-            return true;
-        }
         if (files.LastOrDefault() is not { } newest)
         {
             return false;
         }
-        var tail = await ReadAsync(newest, Math.Max(0, newest.SizeBytes + 1024 - _probeBytes), _probeBytes + 1024, ct);
-        return LastTime(tail, timeOf) is { } last && last >= micros;
+        var offset = Math.Max(0, newest.SizeBytes - _probeBytes);
+        var tail = await ReadAsync(newest, offset, _probeBytes + 2 * SizeUnit, ct);
+        return LastTime(tail, timeOf, wholeFirstLine: offset == 0) is { } last && last >= micros;
     }
 
     public async IAsyncEnumerable<PgFileLine> LinesAsync(long fromMicros, long toMicros, Func<string, long?> timeOf,
@@ -339,8 +343,8 @@ public sealed class AzureLogReader : IPgLogLines
     /// <summary>A byte offset at or before the file's first line of <paramref name="targetMicros"/>, as <see cref="PgLogDirectory.OffsetOf"/>.</summary>
     private async Task<long> OffsetOfAsync(AzureLogFile file, long targetMicros, Func<string, long?> timeOf, CancellationToken ct)
     {
-        // The list gives the size in whole kilobytes, and the file grows while it is read.
-        long lo = 0, hi = file.SizeBytes + 1024;
+        // The list gives the size in whole thousands of bytes, rounded down, and the file grows while it is read.
+        long lo = 0, hi = file.SizeBytes + SizeUnit;
         while (hi - lo > _probeBytes)
         {
             var mid = lo + (hi - lo) / 2;
@@ -422,10 +426,11 @@ public sealed class AzureLogReader : IPgLogLines
         return bytes;
     }
 
-    private static long? LastTime(byte[] bytes, Func<string, long?> timeOf)
+    /// <param name="wholeFirstLine">The bytes start at the file's start, so the first line is whole, not the tail of one.</param>
+    private static long? LastTime(byte[] bytes, Func<string, long?> timeOf, bool wholeFirstLine)
     {
         var lines = Encoding.UTF8.GetString(bytes).Split('\n');
-        for (var i = lines.Length - 1; i > 0; i--)
+        for (var i = lines.Length - 1; i >= (wholeFirstLine ? 0 : 1); i--)
         {
             if (timeOf(lines[i]) is { } at)
             {

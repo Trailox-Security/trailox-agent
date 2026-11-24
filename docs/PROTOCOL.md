@@ -807,11 +807,12 @@ cannot be passed on by a machine in between; a server or pooler that does not of
   | `GET` of a file's signed link with `Range`, 64 KB | to find where a window begins in a file that starts before it: the file is halved on the times of its lines; and for a recent window, once, on the newest file's end |
   | `GET` of a file's signed link with `Range`, 4 MB | from that offset, until a line 5 s past the window's end |
 
-  The list needs `Microsoft.DBforPostgreSQL/flexibleServers/logFiles/read` on the server; a link takes no token. A
-  link that answers 403 or 404 is listed again once. List calls are paced to 2 a second per subscription, file reads
-  to 4 a second (2 for a window that ended more than an hour ago). A window that ended within the hour fails with
-  `not_yet_published` until the newest file holds a line 5 s past its end, or a newer file exists: Azure adds to the
-  newest file every few minutes. The lines are JSON string content: `\"` is a quote, `\n` a newline, and a
+  The list needs `Microsoft.DBforPostgreSQL/flexibleServers/logFiles/read` on the server. Each link is a read-only
+  blob link that expires about 5 minutes after the list and takes no token; one that answers 403 or 404 is listed
+  again. `sizeInKb` is in thousands of bytes, rounded down. List calls are paced to 2 a second per subscription, file
+  reads to 4 a second (2 for a window that ended more than an hour ago). Azure writes the files about every 20
+  minutes, each time the current hour's and the hour before's, so a window that ended within 2 hours fails with
+  `not_yet_published` until the newest file holds a line 5 s past its end. The lines are JSON string content: `\"` is a quote, `\n` a newline, and a
   record's `statement` and `detail_log` follow its text on the same line as `","statement": "...`.
 - `file`, a self-managed server: the directory `options.log_directory`, mounted read-only. Only `.json` files are
   read when there are any, else `.csv`, else stderr. A file covers [the time in its name, its last write]. From
