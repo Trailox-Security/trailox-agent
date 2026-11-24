@@ -56,62 +56,65 @@ public sealed class PgLineFormat
     public bool KnowsUser => HasUser || HasSession || HasPid;
 
     /// <summary>
-    /// The prefix writes a name a client chose (<c>%a</c>; <c>%u</c> and <c>%d</c> as a refused client asked for them)
-    /// before more of the prefix, so that client can write the rest of a line of its own inside that name.
+    /// The prefix writes a name a client chose: <c>%a</c>, which any client sets, or <c>%u</c> and <c>%d</c>, which a
+    /// refused client asks for. Wherever it stands, the level follows it, so that client can write the rest of a line of
+    /// its own inside the name.
     /// </summary>
-    public bool ClientTextBeforeEnd { get; private init; }
+    public bool ClientText => ClientEscape != '\0';
 
-    /// <summary>The client-chosen escape that comes before more of the prefix: <c>a</c>, <c>u</c> or <c>d</c>; '\0' when none does.</summary>
+    /// <summary>The client-chosen escape: <c>a</c> when the prefix has it, else the first of <c>u</c> and <c>d</c>; '\0' for none.</summary>
     public char ClientEscape { get; private init; }
 
     private static readonly Regex LevelMarker = new($"(?:{Levels}):  ", RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
-    // The server's own text that ends a refused client's line: a sign-in that failed.
-    private static readonly Regex RefusedTail = new(
-        @"FATAL:  (?:password authentication failed for user|no pg_hba\.conf entry for|pg_hba\.conf rejects connection|role ""|database ""|"
-        + @"(?:Ident|Peer|PAM|LDAP|RADIUS|GSSAPI|SSPI|BSD|certificate) authentication failed for user)",
-        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+    /// <summary>
+    /// What follows a refused client's own name on its line: the rest of the prefix, then the server's FATAL. Null when
+    /// the prefix writes no user or database name.
+    /// </summary>
+    private Regex? _refusedTail;
 
     /// <summary>
-    /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put the rest of a
-    ///    prefix, a level and a message into its application name, or a refused client into the user or database name it
-    ///    asked for; read from the left, the line then reads as that message, of the user it names. Where the prefix
-    ///    writes such a name before its end, a record is taken as forged, counted and never read, when
+    /// 🔴 A FORGED LINE. PostgreSQL writes a client's names into the prefix as they are, so a client can put a level and
+    ///    a message, and the rest of a prefix, into its application name, or a refused client into the user or database
+    ///    name it asked for; read from the left, the line then reads as that message, of the user it names. The real rest
+    ///    of the prefix and the real level follow inside the text. A record is taken as forged, counted and never read:
     ///    <list type="bullet">
-    ///    <item>it is a connection line whose text holds a level marker: that text is the server's, with only the names
-    ///      a client chose in it;</item>
-    ///    <item>its text holds the FATAL of a refused sign-in: the real end of a refused client's line, which follows
-    ///      whatever it wrote inside its name.</item>
+    ///    <item>with <c>%a</c> in the prefix, when its text holds any level marker: any signed-in client can write one
+    ///      there. A statement that holds such text itself is counted with them, which the counts show; a forged one read
+    ///      would not;</item>
+    ///    <item>with <c>%u</c> or <c>%d</c>, a connection line whose text holds a level marker (that text is the server's,
+    ///      with only the names a client chose), and any record whose text holds the rest of the prefix followed by
+    ///      <c>FATAL:  </c>: every refused client's line ends so, whatever the failure. A statement's own text is not
+    ///      otherwise taken as forged, so no one hides a statement by writing <c>ERROR:  </c> in it.</item>
     ///    </list>
-    ///    Any other text is a client's own (a statement's, a message's), so a level marker in it proves nothing: taking
-    ///    it as forged would let anyone hide a statement by writing <c>ERROR:  </c> in it.
     /// </summary>
     /// <remarks>
-    /// ⚠ NOT CAUGHT: a signed-in client's line forged in its application name, with a prefix that writes %a before
-    ///   more of itself (the probe warns of such a prefix), and a newline in a refused client's user name, which starts
-    ///   a line of its own with any prefix at all in a real stderr file. csvlog and jsonlog quote the names, and Azure's
-    ///   download writes a newline as <c>\n</c>.
+    /// ⚠ NOT CAUGHT: a newline in a refused client's user name, which starts a line of its own with any prefix at all in
+    ///   a real stderr file. csvlog and jsonlog quote the names, and Azure's download writes a newline as <c>\n</c>.
     /// </remarks>
-    public bool Forged(PgLogRecord r) => ClientTextBeforeEnd
-        && (r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
+    public bool Forged(PgLogRecord r) => ClientEscape switch
+    {
+        '\0' => false,
+        'a' => LevelMarker.IsMatch(r.Message),
+        _ => r.Kind is PgRecordKind.ConnectionReceived or PgRecordKind.ConnectionAuthenticated or PgRecordKind.ConnectionAuthorized
                 or PgRecordKind.Disconnection
             ? LevelMarker.IsMatch(r.Message)
-            : RefusedTail.IsMatch(r.Message));
+            : _refusedTail!.IsMatch(r.Message),
+    };
 
     public static PgLineFormat Of(string prefix)
     {
         var tokens = PgLinePrefix.Tokens(prefix);
-        var client = '\0';
-        for (var i = 0; i < tokens.Count && client == '\0'; i++)
+        var escapes = tokens.Select(t => t.Escape).ToList();
+        var client = escapes.Contains('a') ? 'a' : escapes.FirstOrDefault(e => e is 'u' or 'd');
+        Regex? refused = null;
+        if (client is 'u' or 'd')
         {
-            // Followed by another escape, or by text other than the spaces before the level.
-            if (tokens[i].Escape is 'a' or 'u' or 'd'
-                && tokens.Skip(i + 1).Any(t => t.Escape is not ('\0' or 'q') || t.Text.Trim().Length > 0))
-            {
-                client = tokens[i].Escape;
-            }
+            var after = tokens.Skip(escapes.IndexOf(client) + 1).ToList();
+            refused = new Regex(Pattern(after, capture: false) + "FATAL:  ",
+                RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.Singleline);
         }
-        return new PgLineFormat(prefix, tokens) { ClientTextBeforeEnd = client != '\0', ClientEscape = client };
+        return new PgLineFormat(prefix, tokens) { ClientEscape = client, _refusedTail = refused };
     }
 
     /// <summary>The fields of a line that starts a record; null for any other line (a continuation, or another prefix).</summary>
@@ -191,7 +194,7 @@ public sealed class PgLineFormat
             : null;
     }
 
-    private static string Pattern(IReadOnlyList<PgLinePrefix.Token> tokens)
+    private static string Pattern(IReadOnlyList<PgLinePrefix.Token> tokens, bool capture = true)
     {
         var pattern = new StringBuilder();
         var captured = new HashSet<char>();
@@ -214,7 +217,7 @@ public sealed class PgLineFormat
             {
                 continue;   // an escape PostgreSQL does not know writes nothing
             }
-            var group = captured.Add(token.Escape) && Captured.Contains(token.Escape)
+            var group = capture && captured.Add(token.Escape) && Captured.Contains(token.Escape)
                 ? $"(?<{token.Escape}>{value})"
                 : $"(?:{value})";
             pattern.Append(token.Padding > 0 ? " *" + group : token.Padding < 0 ? group + " *" : group);

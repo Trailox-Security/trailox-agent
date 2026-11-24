@@ -129,14 +129,14 @@ public static class PgProbeChecks
         {
             return Fail("log_line_prefix", $"{shown}: it has no %t, %m or %n, so no stderr line has a time and the agent reads none of them");
         }
-        if (line.ClientEscape == 'a')
+        if (line.ClientEscape == 'a' && !StderrLogParser.Reads(prefix))
         {
-            return Warn("log_line_prefix", $"{shown}: it writes the application name, which any client chooses, before the rest of the "
-                + "prefix, so a client can make its own lines read as another user's or as a sign-in. The agent counts a sign-in line it "
-                + "finds forged so as unread; csvlog and jsonlog quote the name");
+            return Warn("log_line_prefix", $"{shown}: it writes the application name, which any client chooses, so a client can make "
+                + "its own lines read as another user's or as a sign-in. The agent counts a line that holds a level in its text as "
+                + "forged, and does not read it; csvlog and jsonlog quote the name");
         }
-        var forgeable = line.ClientTextBeforeEnd
-            ? ". A refused client's user or database name is written into the prefix as it is: a sign-in line forged in one counts as unread"
+        var forgeable = line.ClientText && !StderrLogParser.Reads(prefix)
+            ? ". A refused client's user or database name is written into the prefix as it is: a line forged in one counts as unread"
             : "";
         if (line.HasUser)
         {

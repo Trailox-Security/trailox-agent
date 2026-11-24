@@ -165,7 +165,9 @@ public sealed class PgSessionMap
             _reading = _reading is { } s ? (Math.Min(s.From, r.TsMicros), Math.Max(s.To, r.TsMicros)) : (r.TsMicros, r.TsMicros);
         }
         var kind = r.Kind;
-        var session = kind == PgRecordKind.ConnectionReceived ? Open(r) : Find(r);
+        // A sign-in whose connection line came before the read opens its session too.
+        var session = kind == PgRecordKind.ConnectionReceived ? Open(r)
+            : Find(r) ?? (kind == PgRecordKind.ConnectionAuthorized ? Open(r) : null);
         Learn(session, r, kind);
         return Complete(r, kind, session);
     }

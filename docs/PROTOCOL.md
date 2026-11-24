@@ -837,10 +837,12 @@ authorized` lines. Before its sign-in a session's lines have `user` and `databas
 a refused sign-in's user is the one its FATAL text names. A session that signed in before what the window reads is
 looked for once: with a session id, the minute after the start the id says; with a process only, up to 2 hours
 before the read; at most 200 look-backs per window. With none of `%u`, `%c` and `%p` a statement, pgaudit or FATAL
-record names no one and counts as `unreadable`. Where the prefix writes `%a`, `%u` or `%d` before more of itself, a
-record written inside a client's name counts as `unreadable` and in `counted.forged`, and is never shipped: a
-connection line whose text holds a level marker (`LOG:  `, `ERROR:  `...), or any record whose text holds the
-FATAL of a refused sign-in, which ends a refused client's line. A statement's own text is never taken as forged;
+record names no one and counts as `unreadable`. Where the prefix writes a name a client chose, a record taken as
+written inside that name counts as `unreadable` and in `counted.forged`, and is never shipped: with `%a`, any record
+whose text holds a level marker (`LOG:  `, `ERROR:  `...); with `%u` or `%d`, a connection line whose text holds
+one, or any record whose text holds the rest of the prefix followed by `FATAL:  `, as every refused client's line
+ends. With `%u` or `%d` alone, a statement's own text is otherwise never taken as forged. RDS's two prefixes keep
+their own reader;
 csvlog (24 columns on 13, 26 on 14-18); jsonlog. In stderr a message's `DETAIL`, `HINT` and `STATEMENT` are lines of
 their own with the same pid, and a line without the prefix continues the one before. A record is shipped when it is
 one of these, by its level and the start of its message (English messages only):

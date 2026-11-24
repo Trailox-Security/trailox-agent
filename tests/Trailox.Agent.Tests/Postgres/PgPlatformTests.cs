@@ -130,7 +130,8 @@ public class PgPlatformTests
     [InlineData("%m [%p] %a %u@%d ", "warn", "the application name, which any client chooses")]
     [InlineData("%t-%c-%a-", "warn", "the application name, which any client chooses")]
     [InlineData("%m [%p] %q%u@%d ", "ok", "A refused client's user or database name is written into the prefix")]
-    [InlineData("%m [%p] %q%u@%d %a ", "ok", "A refused client's user or database name is written into the prefix")]
+    [InlineData("%m [%p] %q%u@%d %a ", "warn", "the application name, which any client chooses")]   // last before the level is no safer
+    [InlineData("%m %u ", "ok", "A refused client's user or database name is written into the prefix")]
     [InlineData("%t-%c-", "ok", "")]
     [InlineData("%m [%p] ", "ok", "")]
     public void A_client_chosen_name_before_the_rest_of_the_prefix_is_said(string prefix, string status, string said)

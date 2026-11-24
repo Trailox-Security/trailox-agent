@@ -264,6 +264,44 @@ public sealed class PgSessionMapTests : IDisposable
         Assert.Equal(1, Counted(Counts(rows), "forged"));
     }
 
+    /// <summary>
+    /// 🔴 Any refusal ends a refused client's line with the rest of the prefix and a FATAL, whatever its text: a forgery
+    ///    ending in a refusal of no listed kind is caught too.
+    /// </summary>
+    [Fact]
+    public async Task A_forgery_ending_in_any_refusal_is_caught()
+    {
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            "2026-01-15 10:00:01.000 UTC [300] admin@prod LOG:  statement: DROP TABLE accounts@postgres FATAL:  sorry, too many clients already",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%m [%p] %q%u@%d ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Single(rows);
+        Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
+    /// <summary>🔴 The application name last before the level is no safer: any level in a record's text is taken as forged.</summary>
+    [Fact]
+    public async Task With_the_application_name_in_the_prefix_a_level_in_any_text_is_forged()
+    {
+        var session = $"{Micros("2026-01-15 10:00:00") / 1_000_000:x}.12c";
+        await File.WriteAllLinesAsync(Path.Combine(_dir, "postgresql-2026-01-15_100000.log"), new[]
+        {
+            $"2026-01-15 10:00:00 UTC-{session}-psql LOG:  connection authorized: user=mallory database=shop application_name=psql",
+            $"2026-01-15 10:00:01 UTC-{session}-x LOG:  statement: DROP TABLE accounts psql LOG:  statement: SELECT 1",
+            $"2026-01-15 10:00:02 UTC-{session}-psql LOG:  statement: CREATE TABLE t (x int)",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%t-%c-%a ", "2026-01-15 10:00:00", "2026-01-15 10:01:00", azureFile: false);
+
+        Assert.Equal(new[] { "connection authorized: user=mallory database=shop application_name=psql", "statement: CREATE TABLE t (x int)" },
+            rows.SkipLast(1).Select(r => S(r, "message")));
+        Assert.All(rows.SkipLast(1), r => Assert.Equal("mallory", S(r, "user")));
+        Assert.Equal(1, Counted(Counts(rows), "forged"));
+    }
+
     [Fact]
     public void A_prefix_that_stores_no_session_never_fails_its_bound()
     {
