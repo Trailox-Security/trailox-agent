@@ -210,10 +210,11 @@ public class PostgresEngineTests
     }
 
     [Fact]
-    public void A_self_managed_server_without_the_logging_collector_fails()
+    public void A_self_managed_server_without_the_logging_collector_or_log_files_fails()
     {
-        Assert.Equal("fail", StatusOf(PgProbeChecks.Settings(Settings(collector: "off"), "file"), "logging_collector"));
-        Assert.DoesNotContain(PgProbeChecks.Settings(Settings(collector: "off"), "rds_api"), c => c.Name == "logging_collector");
+        Assert.Equal("fail", PgProbeChecks.LoggingCollector(Settings(collector: "off"), "file", "self_managed", filesFound: false)!.Status);
+        Assert.Null(PgProbeChecks.LoggingCollector(Settings(collector: "off"), "rds_api", "rds", filesFound: false));
+        Assert.DoesNotContain(PgProbeChecks.Settings(Settings(collector: "off"), "file"), c => c.Name == "logging_collector");
     }
 
     [Fact]

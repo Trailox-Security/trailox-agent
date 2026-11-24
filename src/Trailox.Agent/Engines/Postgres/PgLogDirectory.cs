@@ -64,17 +64,37 @@ public static class PgLogFileNames
     }
 }
 
+/// <summary>One line of a log, and the file it came from.</summary>
+public readonly record struct PgFileLine(string File, string Text);
+
+/// <summary>A server's stderr log as lines over time, for a look-back before a window (<see cref="PgSessionMap"/>).</summary>
+public interface IPgLogLines
+{
+    /// <summary>
+    /// The lines from shortly before <paramref name="fromMicros"/> (records of one second can be out of order) up to
+    /// and including the first line past <paramref name="toMicros"/>, in order.
+    /// </summary>
+    /// <param name="timeOf">The time of a line that starts a record; null for any other line.</param>
+    IAsyncEnumerable<PgFileLine> LinesAsync(long fromMicros, long toMicros, Func<string, long?> timeOf, CancellationToken ct);
+}
+
 /// <summary>
 /// A self-managed server's log directory, mounted read-only in the agent's container. The agent only lists and reads
-/// it. Setup gives the directory the agent's group (mode 2750) and the files mode 0640, so the agent's user can read them.
+/// it, where the server, or whatever saves its stderr, writes it.
 /// </summary>
-public sealed class PgLogDirectory
+public sealed class PgLogDirectory : IPgLogLines
 {
-    private readonly string _path;
+    /// <summary>What one step of <see cref="OffsetOf"/> reads to find a line's time.</summary>
+    internal const int ProbeBytes = 64 * 1024;
 
-    public PgLogDirectory(string path)
+    private readonly string _path;
+    private readonly int _probeBytes;
+
+    /// <param name="probeBytes">What one step of <see cref="OffsetOf"/> reads; smaller in tests.</param>
+    public PgLogDirectory(string path, int probeBytes = ProbeBytes)
     {
         _path = path;
+        _probeBytes = probeBytes;
     }
 
     /// <summary>Every log file in the directory (not its subdirectories). Compressed copies (logrotate's .gz) are not read.</summary>
@@ -152,6 +172,93 @@ public sealed class PgLogDirectory
         catch (Exception ex) when (ex is IOException or SourceException)
         {
             return "";
+        }
+    }
+
+    /// <summary>
+    /// Where to start reading a stderr file for records from <paramref name="targetMicros"/> on: a byte offset at or before
+    /// the first line of that time, found by halving the file on the times of its lines. A step that finds no time
+    /// (one line longer than <see cref="ProbeBytes"/>) looks earlier, so the offset is never past the target.
+    /// </summary>
+    public long OffsetOf(PgLogFile file, long targetMicros, Func<string, long?> timeOf)
+    {
+        using var stream = Open(file);
+        long lo = 0, hi = stream.Length;
+        var buffer = new byte[_probeBytes];
+        while (hi - lo > _probeBytes)
+        {
+            var mid = lo + (hi - lo) / 2;
+            stream.Seek(mid, SeekOrigin.Begin);
+            var read = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            if (FirstTime(buffer.AsSpan(0, read), timeOf) is { } at && at < targetMicros)
+            {
+                lo = mid;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    /// <summary>The time of the first whole line in <paramref name="bytes"/> that starts a record; null when none does.</summary>
+    internal static long? FirstTime(ReadOnlySpan<byte> bytes, Func<string, long?> timeOf)
+    {
+        var nl = bytes.IndexOf((byte)'\n');
+        while (nl >= 0)
+        {
+            bytes = bytes[(nl + 1)..];
+            nl = bytes.IndexOf((byte)'\n');
+            if (nl < 0)
+            {
+                return null;
+            }
+            if (timeOf(Encoding.UTF8.GetString(bytes[..nl]).TrimEnd('\r')) is { } at)
+            {
+                return at;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The lines of one file from <paramref name="offset"/>; past 0, the first (partial) line is left out.</summary>
+    public async IAsyncEnumerable<string> LinesFromAsync(PgLogFile file, long offset,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var stream = Open(file);
+        stream.Seek(offset, SeekOrigin.Begin);
+        using var lines = new Trailox.Agent.Engines.MongoDb.LogLines(stream, gzip: false);
+        var skip = offset > 0;
+        while (await lines.FillAsync(ct))
+        {
+            while (lines.TryReadLine(out var span))
+            {
+                if (skip)
+                {
+                    skip = false;
+                    continue;
+                }
+                yield return Encoding.UTF8.GetString(span);
+            }
+        }
+    }
+
+    public async IAsyncEnumerable<PgFileLine> LinesAsync(long fromMicros, long toMicros, Func<string, long?> timeOf,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var margin = PgWindowReader.StopMarginMicros;
+        foreach (var file in PgLogFileNames.ForWindow(List(), fromMicros, toMicros, margin).Where(f => f.Format == PgLogFormat.Stderr))
+        {
+            var offset = (file.StartMicros ?? long.MinValue) < fromMicros ? OffsetOf(file, fromMicros - margin, timeOf) : 0;
+            await foreach (var line in LinesFromAsync(file, offset, ct))
+            {
+                yield return new PgFileLine(file.Name, line);
+                if (timeOf(line) is { } at && at > toMicros + margin)
+                {
+                    yield break;
+                }
+            }
         }
     }
 

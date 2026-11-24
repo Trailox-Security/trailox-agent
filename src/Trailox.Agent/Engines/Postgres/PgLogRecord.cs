@@ -90,6 +90,12 @@ public sealed class PgLogRecord
     /// </summary>
     public bool Preamble { get; init; }
 
+    /// <summary>
+    /// The record should name a user and does not: its prefix names none, and its session's sign-in was not found
+    /// (<see cref="PgSessionMap"/>).
+    /// </summary>
+    public bool NoUser { get; set; }
+
     public PgRecordKind Kind => PgRecordKinds.Of(Level, Message);
 }
 

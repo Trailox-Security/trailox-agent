@@ -45,6 +45,18 @@ public sealed class PgSource : IEngineSource
     /// </summary>
     private int _rotationMinutes;
 
+    /// <summary>
+    /// The server's <c>log_line_prefix</c>, from the newest probe; null until one reads it (the stderr parser then reads
+    /// RDS's). The parser of a log file follows it.
+    /// </summary>
+    private PgLineFormat? _prefix;
+
+    /// <summary>
+    /// The sessions of the server's log, for a prefix that names no user (<see cref="PgSessionMap"/>): kept from window to
+    /// window, and started again when the prefix changes.
+    /// </summary>
+    private PgSessionMap? _sessions;
+
     public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null)
     {
         _endpoint = endpoint;
@@ -107,9 +119,14 @@ public sealed class PgSource : IEngineSource
         caps.Instances = instances;
         caps.LogFormat = format;
         checks.AddRange(logChecks);
+        if (PgProbeChecks.LoggingCollector(settings, caps.LogSource, caps.Platform, format.Length > 0) is { } collector)
+        {
+            checks.Add(collector);
+        }
         if (settings.TryGetValue("log_line_prefix", out var prefix))
         {
             checks.Add(PgProbeChecks.LinePrefix(prefix, format));
+            Prefix(prefix);
         }
         caps.Checks = checks;
         var oldest = instances.Where(i => i.OldestLogMicros > 0).Select(i => i.OldestLogMicros).DefaultIfEmpty(0).Min();
@@ -163,19 +180,35 @@ public sealed class PgSource : IEngineSource
         var callsPerSecond = _utcNow() - FromMicros(task.EndMicros) > CatchUp ? CatchUpCallsPerSecond : LiveCallsPerSecond;
         foreach (var instance in _instances)
         {
-            var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
-                _english, _rotationMinutes);
             if (_rds != null)
             {
+                // RDS writes its own prefix, which names the user on every line.
+                var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+                    _english, _rotationMinutes);
                 await window.ReadAsync(new RdsLogReader(_rds, instance.Id, callsPerSecond, budget: _budget), ct);
+                window.WriteCounts();
             }
             else
             {
-                await window.ReadAsync(new PgLogDirectory(_logDirectory!), ct);
+                var directory = new PgLogDirectory(_logDirectory!);
+                var window = new PgWindowReader(instance.Id, task.StartMicros, task.EndMicros, _endpoint.StoreRawQueryText, rows.Sink, rows,
+                    _english, _rotationMinutes, _prefix, _sessions, directory);
+                await window.ReadAsync(directory, ct);
+                window.WriteCounts();
             }
-            window.WriteCounts();
             await rows.FlushAsync(ct);
         }
+    }
+
+    /// <summary>The prefix the newest probe read: a new one gets a parser, and sessions, of its own.</summary>
+    internal void Prefix(string prefix)
+    {
+        if (_prefix?.Prefix == prefix)
+        {
+            return;
+        }
+        _prefix = PgLineFormat.Of(prefix);
+        _sessions = _prefix.HasUser ? null : new PgSessionMap(_prefix);
     }
 
     private async Task<(List<PostgresInstance>, List<PostgresCheck>, string)> RdsLogsAsync(CancellationToken ct)

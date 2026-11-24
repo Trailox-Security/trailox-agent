@@ -37,7 +37,7 @@ public static class PgProbeChecks
             : Warn("role", "the agent's role: " + string.Join("; ", problems));
     }
 
-    /// <param name="platform">The probe's platform (<see cref="PgPlatform"/>): Azure runs with no logging collector, and lets none be turned on.</param>
+    /// <remarks>The logging collector is checked once the log directory is listed: <see cref="LoggingCollector"/>.</remarks>
     public static IEnumerable<PostgresCheck> Settings(IReadOnlyDictionary<string, string> s, string logSource, string platform = "")
     {
         var missing = new List<string>();
@@ -66,11 +66,6 @@ public static class PgProbeChecks
         yield return UtcZones.Contains(zone)
             ? Ok("log_timezone", "the log's times are UTC")
             : Fail("log_timezone", $"the log's times are in {zone}: set log_timezone = 'UTC'");
-
-        if (logSource == PostgresEngine.LogSourceFile && platform != PgPlatform.Azure && !On(s.GetValueOrDefault("logging_collector", "")))
-        {
-            yield return Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart)");
-        }
 
         // A pgaudit line carries no CONTEXT, and a function's RAISE LOG 'AUDIT: ...' does; terse writes no CONTEXT at all.
         if (Loads(s, "pgaudit"))
@@ -129,10 +124,44 @@ public static class PgProbeChecks
         {
             return Ok("log_line_prefix", $"{shown}: the agent reads {format}, whose records name their user, database and session whatever the prefix");
         }
-        return StderrLogParser.Reads(prefix)
-            ? Ok("log_line_prefix", $"{shown}: each line names its user, database and process")
-            : Warn("log_line_prefix", $"{shown}: the agent reads stderr lines with the prefix '{StderrLogParser.RdsPrefix}' only, so lines "
-                + "with this one count as unread");
+        var line = PgLineFormat.Of(prefix);
+        if (!line.HasTime)
+        {
+            return Fail("log_line_prefix", $"{shown}: it has no %t, %m or %n, so no stderr line has a time and the agent reads none of them");
+        }
+        if (line.HasUser)
+        {
+            return Ok("log_line_prefix", $"{shown}: each line names its user");
+        }
+        if (line.HasSession)
+        {
+            return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its session (%c), "
+                + "on the session's sign-in line");
+        }
+        if (line.HasPid)
+        {
+            return Ok("log_line_prefix", $"{shown}: the agent finds each line's user, database and client by its process (%p), "
+                + $"on the process's newest sign-in line, up to {PgSessionMap.PidLookBackMicros / 3_600_000_000} hours before");
+        }
+        return Warn("log_line_prefix", $"{shown}: a line names no user, session or process, so the agent cannot tell whose a statement "
+            + "is: those lines count as unread. Sign-ins, failed sign-ins and disconnections name their user and are read");
+    }
+
+    /// <summary>
+    /// A self-managed server with the logging collector off writes its log to stderr, which another program can save to
+    /// files (a service manager, a package's start script): the agent reads those files where they are. Only with no
+    /// file found does it ask for the collector. Null when there is nothing to check.
+    /// </summary>
+    public static PostgresCheck? LoggingCollector(IReadOnlyDictionary<string, string> s, string logSource, string platform, bool filesFound)
+    {
+        if (logSource != PostgresEngine.LogSourceFile || platform == PgPlatform.Azure || On(s.GetValueOrDefault("logging_collector", "")))
+        {
+            return null;
+        }
+        return filesFound
+            ? Ok("logging_collector", "logging_collector is off: the agent reads the log files it found, as they are written")
+            : Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart), or "
+                + "mount the directory where its stderr is saved");
     }
 
     private const int MaxPrefixShown = 80;
