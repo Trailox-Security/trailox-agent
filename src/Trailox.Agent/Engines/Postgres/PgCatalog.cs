@@ -26,6 +26,15 @@ public sealed class PgCatalog
 
     public string Database => _database;
 
+    /// <summary>
+    /// The platform, from the newest probe (<see cref="PgPlatform"/>); "" until one says. The counters, the statement
+    /// texts and the catalog leave out the platform's own roles and databases.
+    /// </summary>
+    public string Platform { get; set; } = "";
+
+    /// <summary>$1 and $2 of the statements that leave the platform's own roles and databases out.</summary>
+    private object[] PlatformOwn => new object[] { PgPlatform.Users(Platform), PgPlatform.Databases(Platform) };
+
     internal string ConnectionString(string host, string database) => new NpgsqlConnectionStringBuilder
     {
         Host = host,
@@ -159,7 +168,7 @@ public sealed class PgCatalog
             }
             try
             {
-                await WriteAsync(conn, sql, output, ct, ("instance", (object?)instance.Id), ("taken_at", (object?)null));
+                await WriteAsync(conn, sql, output, ct, PlatformOwn, null, ("instance", (object?)instance.Id), ("taken_at", (object?)null));
                 read++;
             }
             catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedFunction or PostgresErrorCodes.UndefinedTable
@@ -199,8 +208,9 @@ public sealed class PgCatalog
             await using var conn = await OpenAsync(instance.Host, _database, ct);
             try
             {
-                await WriteAsync(conn, PgSql.StatementText, output, ct, ("instance", (object?)instance.Id), ("snapshot_date", (object?)date),
-                    transform: (column, text) => column == "query" ? PgPasswordRedactor.Redact(text) : text);
+                await WriteAsync(conn, PgSql.StatementText, output, ct, PlatformOwn,
+                    (column, text) => column == "query" ? PgPasswordRedactor.Redact(text) : text,
+                    ("instance", (object?)instance.Id), ("snapshot_date", (object?)date));
             }
             catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedFunction or PostgresErrorCodes.ObjectNotInPrerequisiteState)
             {
@@ -263,7 +273,7 @@ public sealed class PgCatalog
     {
         var date = Today();
         await using var conn = await FirstAsync(candidates, instance => OpenAsync(instance.Host, _database, ct));
-        await WriteAsync(conn, PgSql.Users, output, ct, ("snapshot_date", (object?)date));
+        await WriteAsync(conn, PgSql.Users, output, ct, new object[] { PgPlatform.Users(Platform) }, null, ("snapshot_date", (object?)date));
     }
 
     /// <summary>
@@ -277,7 +287,7 @@ public sealed class PgCatalog
         var (instance, databases) = await FirstAsync(candidates, async candidate =>
         {
             await using var conn = await OpenAsync(candidate.Host, _database, ct);
-            return (candidate, await ListAsync(conn, PgSql.Databases, ct));
+            return (candidate, await ListAsync(conn, PgSql.Databases, PgPlatform.Databases(Platform), ct));
         });
         var columns = 0L;
         var listCut = false;
@@ -405,10 +415,11 @@ public sealed class PgCatalog
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
 
-    private static async Task<List<string>> ListAsync(NpgsqlConnection conn, string sql, CancellationToken ct)
+    private static async Task<List<string>> ListAsync(NpgsqlConnection conn, string sql, string[] parameter, CancellationToken ct)
     {
         var list = new List<string>();
         await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.Add(new NpgsqlParameter { Value = parameter });
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -419,10 +430,6 @@ public sealed class PgCatalog
 
     private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, RowWriter output, CancellationToken ct,
         params (string Name, object? Value)[] extra) => WriteAsync(conn, sql, output, ct, Array.Empty<object>(), null, extra);
-
-    private static Task<long> WriteAsync(NpgsqlConnection conn, string sql, RowWriter output, CancellationToken ct,
-        (string Name, object? Value) a, (string Name, object? Value) b, Func<string, string, string> transform) =>
-        WriteAsync(conn, sql, output, ct, Array.Empty<object>(), transform, a, b);
 
     /// <summary>
     /// Runs one statement and writes each row as JSON, then the <paramref name="extra"/> columns. An extra column with

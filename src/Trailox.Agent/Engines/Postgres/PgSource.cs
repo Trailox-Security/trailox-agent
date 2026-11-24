@@ -68,6 +68,7 @@ public sealed class PgSource : IEngineSource
         var checks = new List<PostgresCheck>();
         var caps = new PostgresCaps { LogSource = _rds != null ? PostgresEngine.LogSourceRdsApi : PostgresEngine.LogSourceFile };
         string version;
+        Dictionary<string, string> settings;
         await using (var conn = await _catalog.OpenAsync(_endpoint.Host, _catalog.Database, ct))
         {
             (caps.ServerVersionNum, version) = await ScalarPairAsync(conn, PgSql.ServerVersion, ct);
@@ -76,19 +77,20 @@ public sealed class PgSource : IEngineSource
                 throw new SourceException($"PostgreSQL {version} is not supported: the agent reads PostgreSQL 13 and later");
             }
             checks.Add(await RoleCheckAsync(conn, ct));
-            var settings = await SettingsAsync(conn, ct);
-            checks.AddRange(PgProbeChecks.Settings(settings, caps.LogSource));
+            settings = await SettingsAsync(conn, ct);
+            // Asked at every probe that may call an Aurora function: one can be planted after the platform is known.
+            var mayCallAurora = _rds != null && _platform != PgPlatform.Rds
+                && MayCallAurora(await ScalarAsync(conn, PgSql.AuroraFunctionListed, ct));
+            caps.Platform = _platform ?? await PlatformAsync(conn, mayCallAurora, ct);
+            _catalog.Platform = caps.Platform;
+            checks.AddRange(PgProbeChecks.Settings(settings, caps.LogSource, caps.Platform));
             _english = PgProbeChecks.English(settings.GetValueOrDefault("lc_messages", ""));
             _rotationMinutes = int.TryParse(settings.GetValueOrDefault("log_rotation_age", ""), System.Globalization.NumberStyles.None,
                 System.Globalization.CultureInfo.InvariantCulture, out var minutes) ? minutes : 0;
             var extension = await ScalarAsync(conn, PgSql.StatStatementsVersion, ct) as string;
             caps.StatStatements = extension != null;
             checks.Add(PgProbeChecks.StatStatements(extension, settings, _catalog.Database));
-            // Asked at every probe that may call an Aurora function: one can be planted after the platform is known.
-            var mayCallAurora = _rds != null && _platform != "rds"
-                && MayCallAurora(await ScalarAsync(conn, PgSql.AuroraFunctionListed, ct));
-            caps.Platform = _platform ?? await PlatformAsync(conn, mayCallAurora, ct);
-            var aurora = caps.Platform == "aurora";
+            var aurora = caps.Platform == PgPlatform.Aurora;
             if (_rds != null)
             {
                 // A call that fails, or is not made, reads as 0: the check then counts the replicas in options.instances.
@@ -101,10 +103,14 @@ public sealed class PgSource : IEngineSource
         {
             checks.Add(await ReplicasAnswerAsync(ct));
         }
-        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct) : DirectoryLogs();
+        var (instances, logChecks, format) = _rds != null ? await RdsLogsAsync(ct) : DirectoryLogs(caps.Platform);
         caps.Instances = instances;
         caps.LogFormat = format;
         checks.AddRange(logChecks);
+        if (settings.TryGetValue("log_line_prefix", out var prefix))
+        {
+            checks.Add(PgProbeChecks.LinePrefix(prefix, format));
+        }
         caps.Checks = checks;
         var oldest = instances.Where(i => i.OldestLogMicros > 0).Select(i => i.OldestLogMicros).DefaultIfEmpty(0).Min();
         return new EndpointCaps
@@ -197,7 +203,7 @@ public sealed class PgSource : IEngineSource
         return (instances, checks, "stderr");
     }
 
-    private (List<PostgresInstance>, List<PostgresCheck>, string) DirectoryLogs()
+    private (List<PostgresInstance>, List<PostgresCheck>, string) DirectoryLogs(string platform)
     {
         var report = new PostgresInstance { Id = _instances[0].Id, Role = "primary" };
         var checks = new List<PostgresCheck>();
@@ -210,7 +216,7 @@ public sealed class PgSource : IEngineSource
                 .OrderBy(f => f.LastWrittenMicros).LastOrDefault();
             if (newest == null)
             {
-                checks.Add(new PostgresCheck { Name = "log_files", Status = "fail", Message = $"no log file in {_logDirectory}: check logging_collector, log_directory and the mount" });
+                checks.Add(PgProbeChecks.NoLogFiles(_logDirectory!, platform));
             }
             else
             {
@@ -277,15 +283,26 @@ public sealed class PgSource : IEngineSource
     }
 
     /// <summary>
-    /// <c>aurora</c>, <c>rds</c> or <c>self_managed</c>. An RDS API source asks <see cref="PgSql.AuroraVersion"/> once: on
-    /// plain RDS the call fails, and each failure is a line in the customer's server log. An answer that is not definite
-    /// (any failure but "function does not exist") is not kept, so the next probe asks again. Neither is a planted
-    /// function's: without <paramref name="mayCall"/> the call is not made, and the answer is not known.
+    /// <c>aurora</c>, <c>rds</c>, <c>azure</c> or <c>self_managed</c>. An RDS API source asks <see cref="PgSql.AuroraVersion"/>
+    /// once: on plain RDS the call fails, and each failure is a line in the customer's server log. An answer that is not
+    /// definite (any failure but "function does not exist") is not kept, so the next probe asks again. Neither is a
+    /// planted function's: without <paramref name="mayCall"/> the call is not made, and the answer is not known. Any
+    /// other source is Azure when the server defines Azure's own setting (<see cref="PgSql.AzureMarker"/>).
     /// </summary>
     private async Task<string> PlatformAsync(NpgsqlConnection conn, bool mayCall, CancellationToken ct)
     {
-        string? answer = _rds == null ? "" : null;
-        if (_rds != null && mayCall)
+        if (_rds == null)
+        {
+            var marker = await ScalarAsync(conn, PgSql.AzureMarker, ct);
+            var own = PlatformOf(false, null, marker is true);
+            if (marker is bool)
+            {
+                _platform = own;
+            }
+            return own;
+        }
+        string? answer = null;
+        if (mayCall)
         {
             try
             {
@@ -296,7 +313,7 @@ public sealed class PgSource : IEngineSource
                 answer = AuroraAnswer(null, ex.SqlState);
             }
         }
-        var platform = PlatformOf(_rds != null, answer);
+        var platform = PlatformOf(true, answer);
         if (answer != null)
         {
             _platform = platform;
@@ -321,9 +338,13 @@ public sealed class PgSource : IEngineSource
     /// </summary>
     internal static bool MayCallAurora(object? listed) => listed is false;
 
-    /// <summary>The platform caps report: a file source is self-managed; an RDS API source is Aurora when it answered a version.</summary>
-    internal static string PlatformOf(bool rdsApi, string? auroraVersion) =>
-        !rdsApi ? "self_managed" : string.IsNullOrEmpty(auroraVersion) ? "rds" : "aurora";
+    /// <summary>
+    /// The platform caps report: an RDS API source is Aurora when it answered a version, else RDS; any other source is
+    /// Azure where the server defines Azure's own setting, else self-managed.
+    /// </summary>
+    internal static string PlatformOf(bool rdsApi, string? auroraVersion, bool azure = false) =>
+        !rdsApi ? (azure ? PgPlatform.Azure : PgPlatform.SelfManaged)
+        : string.IsNullOrEmpty(auroraVersion) ? PgPlatform.Rds : PgPlatform.Aurora;
 
     /// <param name="pinned">An Aurora call: through <see cref="AuroraCallAsync"/>.</param>
     private static async Task<object?> ScalarAsync(NpgsqlConnection conn, string sql, CancellationToken ct, bool pinned = false)

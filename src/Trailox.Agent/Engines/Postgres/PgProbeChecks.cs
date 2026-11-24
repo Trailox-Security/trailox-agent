@@ -37,7 +37,8 @@ public static class PgProbeChecks
             : Warn("role", "the agent's role: " + string.Join("; ", problems));
     }
 
-    public static IEnumerable<PostgresCheck> Settings(IReadOnlyDictionary<string, string> s, string logSource)
+    /// <param name="platform">The probe's platform (<see cref="PgPlatform"/>): Azure runs with no logging collector, and lets none be turned on.</param>
+    public static IEnumerable<PostgresCheck> Settings(IReadOnlyDictionary<string, string> s, string logSource, string platform = "")
     {
         var missing = new List<string>();
         if (!On(s.GetValueOrDefault("log_connections", "")))
@@ -66,7 +67,7 @@ public static class PgProbeChecks
             ? Ok("log_timezone", "the log's times are UTC")
             : Fail("log_timezone", $"the log's times are in {zone}: set log_timezone = 'UTC'");
 
-        if (logSource == PostgresEngine.LogSourceFile && !On(s.GetValueOrDefault("logging_collector", "")))
+        if (logSource == PostgresEngine.LogSourceFile && platform != PgPlatform.Azure && !On(s.GetValueOrDefault("logging_collector", "")))
         {
             yield return Fail("logging_collector", "logging_collector is off, so the server writes no log files: turn it on (one restart)");
         }
@@ -87,20 +88,60 @@ public static class PgProbeChecks
             .Any(l => l.Trim('"') == library);
 
     /// <param name="extversion">The installed extension's version in <paramref name="database"/>; null when it is not created.</param>
+    /// <remarks>
+    /// ⚠ CREATED IS NOT COUNTING. With <c>pg_stat_statements.track = none</c> (Azure's default) the extension is there and
+    ///   records nothing, so the counters read as an idle server. A setting the role cannot read is not taken for none.
+    /// </remarks>
     public static PostgresCheck StatStatements(string? extversion, IReadOnlyDictionary<string, string> s, string database)
     {
+        var tracksNothing = string.Equals(s.GetValueOrDefault("pg_stat_statements.track", ""), "none", StringComparison.OrdinalIgnoreCase);
         if (PgCatalog.ExtensionVersion(extversion) is { } version)
         {
+            if (tracksNothing)
+            {
+                return Warn("pg_stat_statements", "pg_stat_statements.track is none, so pg_stat_statements records no statement and there "
+                    + "is no read volume per user: set pg_stat_statements.track = top");
+            }
             return version >= new Version(1, 8)
                 ? Ok("pg_stat_statements", "read volume per user is collected")
                 : Warn("pg_stat_statements", $"pg_stat_statements {extversion} is older than this server's: read volume per user is collected, "
                     + $"but run ALTER EXTENSION pg_stat_statements UPDATE in database {database} to read it as the server counts it");
         }
+        var track = tracksNothing ? "; and set pg_stat_statements.track = top, which is none" : "";
         return Warn("pg_stat_statements", Loads(s, "pg_stat_statements")
-            ? $"pg_stat_statements is loaded but not created in database {database}: CREATE EXTENSION pg_stat_statements"
+            ? $"pg_stat_statements is loaded but not created in database {database}: CREATE EXTENSION pg_stat_statements" + track
             : "pg_stat_statements is not loaded: add it to shared_preload_libraries (one restart), then CREATE EXTENSION pg_stat_statements. "
                 + "Until then there is no read volume per user");
     }
+
+    /// <summary>
+    /// <c>log_line_prefix</c>, as the server has it, and which of <c>%u</c> (user), <c>%c</c> (session) and <c>%p</c>
+    /// (process) it lacks. It shapes stderr lines only: jsonlog and csvlog records carry every field, whatever the prefix.
+    /// </summary>
+    /// <param name="format">The format the agent reads: stderr, csvlog or jsonlog; "" when no file was found.</param>
+    public static PostgresCheck LinePrefix(string prefix, string format)
+    {
+        var escapes = PgLinePrefix.Escapes(prefix);
+        var lacks = new[] { 'u', 'c', 'p' }.Where(e => !escapes.Contains(e)).Select(e => "%" + e).ToList();
+        var shown = $"log_line_prefix is '{(prefix.Length > MaxPrefixShown ? prefix[..MaxPrefixShown] + "..." : prefix)}'"
+            + (lacks.Count == 0 ? "" : $" (it has no {string.Join(", ", lacks)})");
+        if (format is "csvlog" or "jsonlog")
+        {
+            return Ok("log_line_prefix", $"{shown}: the agent reads {format}, whose records name their user, database and session whatever the prefix");
+        }
+        return StderrLogParser.Reads(prefix)
+            ? Ok("log_line_prefix", $"{shown}: each line names its user, database and process")
+            : Warn("log_line_prefix", $"{shown}: the agent reads stderr lines with the prefix '{StderrLogParser.RdsPrefix}' only, so lines "
+                + "with this one count as unread");
+    }
+
+    private const int MaxPrefixShown = 80;
+
+    /// <summary>log_files when no file was found in the log directory.</summary>
+    public static PostgresCheck NoLogFiles(string directory, string platform) => platform == PgPlatform.Azure
+        ? Fail("log_files", "Azure Database for PostgreSQL flexible server has no log directory to mount, so the agent reads no server "
+            + "log: sign-ins, failed sign-ins and DDL are not collected")
+        : Fail("log_files", $"no log file in {directory}: check logging_collector, log_directory and the mount");
 
     /// <summary>Whether every replica listed could be signed in to; one that cannot is skipped by every task.</summary>
     public static PostgresCheck ReplicasAnswer(int listed, IReadOnlyList<string> failures) => failures.Count == 0

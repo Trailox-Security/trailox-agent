@@ -418,9 +418,16 @@ or a self-managed server, whose log directory is mounted read-only into the agen
   (`csvlog` on 13 and 14), `log_timezone = UTC` and `log_rotation_age = 10min`. Mount the directory read-only and
   run the agent with its group: `group_add` in compose, `logVolume` and `supplementalGroups` in the chart. On the
   database host, `network_mode: host` lets the agent reach a server that listens on `localhost`.
+- **Azure Database for PostgreSQL flexible server** (from 1.21.0): the probe reports the platform `azure`. The agent
+  signs in and reads the counters and the catalog, but no server log, so no sign-ins, failed sign-ins or DDL. Azure's
+  own role `azuresu` and its databases `azure_sys` and `azure_maintenance` are left out of the counters, the statement
+  texts and the catalog. Azure ships `pg_stat_statements.track = none`, which records nothing: set it to `top` in the
+  server parameters.
 - **The probe's checks:** `role`, `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
-  (UTC), `logging_collector` (self-managed), `pg_stat_statements`, `log_error_verbosity` (where pgaudit is loaded,
-  not `terse`), `instances` (each replica answers), `replicas` and `log_files`, each `ok`, `warn` or `fail` with what to change.
+  (UTC), `logging_collector` (self-managed), `pg_stat_statements` (created, and `pg_stat_statements.track` not
+  `none`), `log_error_verbosity` (where pgaudit is loaded, not `terse`), `instances` (each replica answers),
+  `replicas`, `log_files` and `log_line_prefix` (the prefix, and which of `%u`, `%c` and `%p` it lacks), each `ok`,
+  `warn` or `fail` with what to change.
 - **A rejected password:** the agent stops signing in to that source, for its probe and its tasks, until it
   restarts, so it never fills your log with its own failed sign-ins. Fix the password, then restart the agent.
 

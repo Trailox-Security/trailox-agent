@@ -46,6 +46,13 @@ public sealed class StderrLogParser : PgLogParser
 {
     private const string Levels = "DEBUG[1-5]|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION";
 
+    /// <summary>RDS's default prefix, which this parser reads.</summary>
+    public const string RdsPrefix = "%t:%r:%u@%d:[%p]:";
+
+    /// <summary>Whether this parser reads lines of <paramref name="prefix"/>: RDS's two, the time to the second or the millisecond.</summary>
+    internal static bool Reads(string prefix) => prefix is RdsPrefix or "%m:%r:%u@%d:[%p]:"
+        or "%t:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:" or "%m:%r:%u@%d:[%p]:%l:%e:%s:%v:%x:%c:%q%a:";
+
     // The time, then everything up to the first ":[pid]:". A user or database name holding ":[digits]:" would mis-split.
     private static readonly Regex Head = new(@"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{1,6})? [A-Za-z0-9+\-]+):(.*?):\[(\d+)\]:(.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);

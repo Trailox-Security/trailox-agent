@@ -909,6 +909,10 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
   that returns as many rows as its limit counts as cut. A stream cut at a limit ends with one more row of its own
   columns, every one empty or 0 but `snapshot_date` and the kind (`kind`, `data_type` or `object_kind`), which
   reads `truncated`. Columns are read 1,000 tables per statement.
+- The platform's own (from 1.21.0): on Azure Database for PostgreSQL (`platform` `azure`), the role `azuresu` and the
+  databases `azure_sys` and `azure_maintenance` run the service. `pg_stat_snapshot` and `catalog_statement_text` leave
+  out their entries, `catalog_users` the role, and the per-database streams the databases. `rdsadmin` is never
+  visited, on any platform.
 - Times: a time PostgreSQL stores as `infinity` or `-infinity` (`rolvaliduntil` of a role whose password never
   expires), or outside the years 1900 to 2299, is sent as null.
 
@@ -917,11 +921,16 @@ OBJECT_NAME,STATEMENT,PARAMETER`, each field CSV-quoted when it holds a comma, a
 `default_transaction_read_only`, with application name `trailox-agent`; one connection at a time. No size
 function, no reset of `pg_stat_statements`, and its text only in `catalog_statement_text`.
 
-**The probe** reports `caps.postgres` in the check-in: `platform` (`rds`, `aurora`, `self_managed`), `logSource`,
+**The probe** reports `caps.postgres` in the check-in: `platform` (`rds`, `aurora`, `self_managed`, and from 1.21.0
+`azure` for Azure Database for PostgreSQL flexible server, where the server defines Azure's own setting
+`azure.extensions`), `logSource`,
 `logFormat`, `serverVersionNum`, `statStatements`, `instances` (`id`, `role`, `oldestLogMicros`, `logFileMinutes`)
 and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `role`, `logging`, `lc_messages`, `log_timezone`,
-`logging_collector` (self-managed), `pg_stat_statements` (a warning before extension 1.8), `log_error_verbosity`
-(where pgaudit is loaded: a warning at `terse`), `instances` (each replica signed in to once), `replicas`, `log_files`. A failed check does not fail the probe. `earliestEventMicros` and
+`logging_collector` (self-managed, not on Azure), `pg_stat_statements` (a warning before extension 1.8, and from
+1.21.0 when `pg_stat_statements.track` is `none`), `log_error_verbosity` (where pgaudit is loaded: a warning at
+`terse`), `instances` (each replica signed in to once), `replicas`, `log_files`, and from 1.21.0 `log_line_prefix`
+(the prefix, and which of `%u`, `%c` and `%p` it lacks; a warning when it is not a prefix the agent reads stderr
+lines of). A failed check does not fail the probe. `earliestEventMicros` and
 `earliestSessionMicros` are the start of the oldest log file. A rejected password (SQLSTATE 28P01) fails the probe
 or the task, and the agent then does not sign in to that source again, for a probe or a task, until it restarts.
 
