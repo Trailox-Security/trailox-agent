@@ -48,9 +48,10 @@ public sealed class PgSessionMap
     private static readonly Regex Received = new(@"^connection received: host=(?<h>\S*)(?: port=(?<p>\d+))?",
         RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
-    // The user a refused sign-in asked for, as the FATAL text names it.
+    // The user a refused sign-in asked for, as the FATAL text names it. Azure's refusal of a Microsoft Entra token for a
+    // role it does not take one for (1.23.0, measured on PostgreSQL 17): Microsoft Entra user token for role "x" is ...
     private static readonly Regex RefusedUser = new(
-        @"^(?:password authentication failed for user|role) ""(?<u>[^""]*)""|^no pg_hba\.conf entry for host ""[^""]*"", user ""(?<u>[^""]*)""|authentication failed for user ""(?<u>[^""]*)""",
+        @"^(?:password authentication failed for user|role|Microsoft Entra user token for role) ""(?<u>[^""]*)""|^no pg_hba\.conf entry for host ""[^""]*"", user ""(?<u>[^""]*)""|authentication failed for user ""(?<u>[^""]*)""",
         RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
     private readonly PgLineFormat _format;

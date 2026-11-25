@@ -164,6 +164,23 @@ endpoints:
   #     # azure_workspace_id: 00000000-0000-0000-0000-000000000000   # only to query the workspace, not the server
   #     # azure_log_table: AzureDiagnostics                         # only for the legacy table; default: where the rows are
   #
+  # Either one signed in to with the agent's Microsoft Entra identity instead of a password (agent 1.23.0 or later),
+  # for a server whose authentication is "Microsoft Entra authentication only", or both: the same identity reads the
+  # log and signs in. Its Entra admin maps a role to the identity (pgaadauth_create_principal_with_oid, see README).
+  # - alias: orders-azure-entra
+  #   engine: postgres
+  #   kind: cloud
+  #   host: orders.postgres.database.azure.com           # the server's own name: its certificate is checked against it
+  #   port: 5432
+  #   tls: true
+  #   username: trailox_monitor                          # the role mapped to the identity; no password_env
+  #   options:
+  #     log_source: azure_files
+  #     azure_subscription: 00000000-0000-0000-0000-000000000000
+  #     azure_resource_group: rg-databases
+  #     azure_server: orders
+  #     azure_sign_in: entra
+  #
   # A self-managed server: its log directory is mounted read-only (see docker-compose.yml), and the agent
   # runs on the database host with network_mode: host. A log another reader already uses is read where it is,
   # in its own log_line_prefix: mount that directory (Debian: /var/log/postgresql, readable by group adm).

@@ -48,6 +48,30 @@ public sealed class PgSessionMapTests : IDisposable
         counts.GetProperty("counted").TryGetProperty(key, out var v) ? v.GetInt32() : 0;
 
     /// <summary>
+    /// A Microsoft Entra token refused for a role names the role in Azure's text (measured), and the row takes it; a token
+    /// refused for its format names none, and counts as a row without a user.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_entra_token_takes_the_role_its_text_names()
+    {
+        File.WriteAllLines(Path.Combine(_dir, "postgresql-2026-01-15_110000.log"), new[]
+        {
+            "2026-01-15 11:00:01 UTC-6968c900.500-LOG:  connection received: host=192.0.2.10 port=58900",
+            "2026-01-15 11:00:01 UTC-6968c900.500-FATAL:  Microsoft Entra user token for role \\\"reporting\\\" is neither an "
+                + "AAD_AUTH_TOKENTYPE_APP_USER or an AAD_AUTH_TOKENTYPE_APP_OBO token.",
+            "2026-01-15 11:00:02 UTC-6968c901.501-LOG:  connection received: host=192.0.2.10 port=58901",
+            "2026-01-15 11:00:02 UTC-6968c901.501-FATAL:  The access token has invalid format. Try again after making sure that the token is "
+                + "passed exactly as returned by the authentication endpoint.",
+        });
+
+        var rows = await ReadAsync(new PgLogDirectory(_dir), "%t-%c-", "2026-01-15 11:00:00", "2026-01-15 11:00:10");
+
+        var refused = rows.Where(r => S(r, "level") == "FATAL").Select(r => (S(r, "user"), S(r, "remote_port"))).ToList();
+        Assert.Equal(new[] { ("reporting", "58900"), ("", "58901") }, refused);
+        Assert.Equal(1, Counted(Counts(rows), "no_user"));
+    }
+
+    /// <summary>
     /// 🔴 With Azure's prefix no line names its user: each row takes its session's, from the session's connection
     ///    authorized line, so every row of the window names one.
     /// </summary>

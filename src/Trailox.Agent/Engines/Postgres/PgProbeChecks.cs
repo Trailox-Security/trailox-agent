@@ -37,6 +37,14 @@ public static class PgProbeChecks
             : Warn("role", "the agent's role: " + string.Join("; ", problems));
     }
 
+    /// <summary>
+    /// <c>entra_sign_in</c> (1.23.0): the agent signed in with a Microsoft Entra token, and as whom. Only a probe that signed
+    /// in reports it: a token that could not be had, or a refused sign-in, fails the probe, with what to do.
+    /// </summary>
+    public static PostgresCheck EntraSignIn(string host, string role, PgEntraIdentity? identity) =>
+        Ok("entra_sign_in", $"signed in as {role} with a Microsoft Entra token of {identity?.ToString() ?? "the agent's Azure identity"}, "
+            + $"over TLS with the server's certificate verified for {host}");
+
     /// <remarks>The logging collector is checked once the log directory is listed: <see cref="LoggingCollector"/>.</remarks>
     public static IEnumerable<PostgresCheck> Settings(IReadOnlyDictionary<string, string> s, string logSource, string platform = "")
     {

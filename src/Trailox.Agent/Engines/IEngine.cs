@@ -26,6 +26,12 @@ public interface IEngine
     /// </summary>
     bool TakesCatalogUser => false;
 
+    /// <summary>
+    /// Why this endpoint signs in without a password (1.23.0: PostgreSQL on Azure with a Microsoft Entra token), as the end
+    /// of "no password_env or password_file ..."; null when it needs one, as every endpoint did before.
+    /// </summary>
+    string? SignsInWithout(EndpointConfig endpoint) => null;
+
     /// <summary>A live connection to one endpoint of this engine.</summary>
     IEngineSource CreateSource(EndpointConfig endpoint, IHttpClientFactory httpClientFactory);
 }

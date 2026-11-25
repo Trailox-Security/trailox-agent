@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Data;
 using System.Globalization;
 using System.Text.Json;
+using Azure.Core;
 using Npgsql;
 using Trailox.Agent.Config;
 using Trailox.Agent.Engines.MongoDb;
@@ -17,14 +19,23 @@ public sealed class PgCatalog
     private readonly EndpointConfig _endpoint;
     private readonly string _database;
     private string? _rejected;
+    private string? _rejectedFix;
 
-    public PgCatalog(EndpointConfig endpoint)
+    /// <summary>One data source per server and database, with Entra sign-in: each asks the token for its password.</summary>
+    private readonly ConcurrentDictionary<string, NpgsqlDataSource> _entraSources = new(StringComparer.Ordinal);
+
+    /// <param name="entraCredential">The identity for <c>options.azure_sign_in: entra</c>; by default the agent's Azure identity.</param>
+    public PgCatalog(EndpointConfig endpoint, TokenCredential? entraCredential = null)
     {
         _endpoint = endpoint;
         _database = endpoint.Options.GetValueOrDefault("database", PostgresEngine.DefaultDatabase);
+        Entra = PostgresEngine.EntraSignIn(endpoint) ? new PgEntraToken(entraCredential ?? ArmAzureLogFiles.Credential()) : null;
     }
 
     public string Database => _database;
+
+    /// <summary>The Microsoft Entra token the agent signs in with (<c>options.azure_sign_in: entra</c>); null with a password.</summary>
+    public PgEntraToken? Entra { get; }
 
     /// <summary>
     /// The platform, from the newest probe (<see cref="PgPlatform"/>); "" until one says. The counters, the statement
@@ -35,29 +46,43 @@ public sealed class PgCatalog
     /// <summary>$1 and $2 of the statements that leave the platform's own roles and databases out.</summary>
     private object[] PlatformOwn => new object[] { PgPlatform.Users(Platform), PgPlatform.Databases(Platform) };
 
-    internal string ConnectionString(string host, string database) => new NpgsqlConnectionStringBuilder
+    internal string ConnectionString(string host, string database)
     {
-        Host = host,
-        Port = _endpoint.Port,
-        Database = database,
-        Username = _endpoint.Username,
-        Password = _endpoint.Password,
-        SslMode = _endpoint.Tls ? SslMode.Require : SslMode.Disable,
+        var b = new NpgsqlConnectionStringBuilder
+        {
+            Host = host,
+            Port = _endpoint.Port,
+            Database = database,
+            Username = _endpoint.Username,
+            // Npgsql 10 probes GSS encryption by default and, on a distroless image without a Kerberos library, fails the
+            // open before the password is ever sent.
+            GssEncryptionMode = GssEncryptionMode.Disable,
+            ApplicationName = "trailox-agent",
+            Pooling = false,
+            Timeout = 30,
+            CommandTimeout = 30,
+            Options = PgSql.SessionOptions,
+        };
+        if (Entra != null)
+        {
+            // 🔴 A Microsoft Entra sign-in sends the token as a clear-text password, and channel binding is SCRAM's, so it
+            //    does not apply. The token goes only inside TLS with the server's certificate checked against its name
+            //    by the system's CA store, whatever tls says, and only to a server that asks for a password.
+            b.SslMode = SslMode.VerifyFull;
+            b.RequireAuth = "Password";
+            b.ChannelBinding = ChannelBinding.Disable;
+            return b.ConnectionString;
+        }
+        b.Password = _endpoint.Password;
+        b.SslMode = _endpoint.Tls ? SslMode.Require : SslMode.Disable;
         // SCRAM-SHA-256 only: a server, or anything answering in its place, that asks for the password in clear text or
         // as MD5, or lets the agent in without one, is refused before the password leaves the agent.
-        RequireAuth = "ScramSHA256",
+        b.RequireAuth = "ScramSHA256";
         // tls: true checks no certificate (an RDS one needs the RDS CA bundle). Channel binding ties the SCRAM sign-in
         // to the certificate the agent saw, so a machine in the path that shows its own cannot pass the sign-in on.
-        ChannelBinding = _endpoint.Tls ? ChannelBinding.Require : ChannelBinding.Disable,
-        // Npgsql 10 probes GSS encryption by default and, on a distroless image without a Kerberos library, fails the
-        // open before the password is ever sent.
-        GssEncryptionMode = GssEncryptionMode.Disable,
-        ApplicationName = "trailox-agent",
-        Pooling = false,
-        Timeout = 30,
-        CommandTimeout = 30,
-        Options = PgSql.SessionOptions,
-    }.ConnectionString;
+        b.ChannelBinding = _endpoint.Tls ? ChannelBinding.Require : ChannelBinding.Disable;
+        return b.ConnectionString;
+    }
 
     /// <summary>A connection to one server and database. A rejected password is said so, and the runner then stops signing in.</summary>
     /// <remarks>
@@ -69,7 +94,11 @@ public sealed class PgCatalog
     {
         if (_rejected != null)
         {
-            throw Rejected(_rejected);
+            throw Rejected(_rejected, _rejectedFix);
+        }
+        if (Entra != null)
+        {
+            return await OpenWithEntraAsync(host, database, ct);
         }
         var conn = new NpgsqlConnection(ConnectionString(host, database));
         try
@@ -90,11 +119,107 @@ public sealed class PgCatalog
     }
 
     /// <summary>
+    /// A connection signed in with the agent's Microsoft Entra token (<c>options.azure_sign_in: entra</c>). A refused
+    /// sign-in stops every sign-in, as a rejected password does; only a token sent from the agent's cache is first
+    /// replaced by a new one and tried once more (it may have expired by the server's clock). So an identity the server
+    /// does not know writes one failed sign-in into its log, and the agent then stops.
+    /// </summary>
+    private Task<NpgsqlConnection> OpenWithEntraAsync(string host, string database, CancellationToken ct)
+    {
+        var source = _entraSources.GetOrAdd(host + "\n" + database, _ => EntraSource(host, database));
+        return SignInWithEntraAsync(host, async token =>
+        {
+            var conn = source.CreateConnection();
+            try
+            {
+                await conn.OpenAsync(token);
+                return conn;
+            }
+            catch
+            {
+                await conn.DisposeAsync();
+                throw;
+            }
+        }, ct);
+    }
+
+    /// <summary>
+    /// One sign-in with the token, through <paramref name="open"/>, as <see cref="OpenWithEntraAsync"/> describes: a
+    /// refusal of a token sent from the cache is tried once more with a new one; any other refusal stops every sign-in.
+    /// </summary>
+    internal async Task<T> SignInWithEntraAsync<T>(string host, Func<CancellationToken, Task<T>> open, CancellationToken ct)
+    {
+        var cached = Entra!.Held;
+        while (true)
+        {
+            // Asked for before the open, so that a token that cannot be had fails here, in the agent's own words; the
+            // data source's password is then the token held.
+            await Entra.TokenAsync(host, ct);
+            try
+            {
+                return await open(ct);
+            }
+            catch (PostgresException ex) when (EntraRefusal(ex.SqlState))
+            {
+                Entra.Drop();
+                if (cached)
+                {
+                    cached = false;
+                    continue;
+                }
+                // Short: the probe error that carries it is cut at 600 characters, and its end says to restart.
+                var said = ex.MessageText.Length > MaxRefusalShown ? ex.MessageText[..MaxRefusalShown] + "..." : ex.MessageText;
+                throw Reject($"PostgreSQL {host}: the sign-in as {_endpoint.Username} with the agent's Microsoft Entra token was refused ({said})",
+                    $"as a Microsoft Entra admin of the server, in database postgres, run {PgEntraToken.MappingSql(_endpoint.Username, Entra.Identity)} "
+                        + "and the setup script's grants");
+            }
+            catch (Exception ex) when (ex is NpgsqlException or System.Security.Authentication.AuthenticationException)
+            {
+                throw new SourceException(Explain(host, Detail(ex)));
+            }
+        }
+    }
+
+    private const int MaxRefusalShown = 80;
+
+    /// <summary>A refused sign-in: the token, or the role it signs in as (28P01), or the sign-in itself (28000).</summary>
+    internal static bool EntraRefusal(string sqlState) =>
+        sqlState is PostgresErrorCodes.InvalidPassword or PostgresErrorCodes.InvalidAuthorizationSpecification;
+
+    private NpgsqlDataSource EntraSource(string host, string database)
+    {
+        var builder = new NpgsqlDataSourceBuilder(ConnectionString(host, database));
+        // The agent opens connections asynchronously only; the token is held by then (OpenWithEntraAsync).
+        builder.UsePasswordProvider(
+            _ => throw new InvalidOperationException("the agent opens PostgreSQL connections asynchronously only"),
+            async (_, ct) => await Entra!.TokenAsync(host, ct));
+        return builder.Build();
+    }
+
+    /// <summary>An exception's message and its causes': Npgsql's "Exception while ..." says little alone.</summary>
+    internal static string Detail(Exception ex)
+    {
+        var parts = new List<string>();
+        for (var e = ex; e != null && parts.Count < 3; e = e.InnerException)
+        {
+            if (!parts.Contains(e.Message, StringComparer.Ordinal))
+            {
+                parts.Add(e.Message);
+            }
+        }
+        return string.Join(": ", parts);
+    }
+
+    /// <summary>
     /// A failed open as the probe reports it. The sign-in refusals of <see cref="ConnectionString"/> say what to change,
     /// and that a server set up right means something else answered.
     /// </summary>
     internal string Explain(string host, string message)
     {
+        if (Entra != null)
+        {
+            return ExplainEntra(host, message);
+        }
         // Npgsql: "\"MD5\" authentication method is not allowed. Allowed methods: ScramSHA256"
         if (message.Contains("authentication method is not allowed", StringComparison.Ordinal))
         {
@@ -119,6 +244,33 @@ public sealed class PgCatalog
                 + "at a connection pooler. If it is the server itself, something between the agent and the server answered "
                 + "in its place.";
         }
+        // Azure set to "Microsoft Entra authentication only" refuses every password so (measured on PostgreSQL 17).
+        if (message.Contains("pg_hba.conf rejects connection", StringComparison.Ordinal)
+            && _endpoint.Options.GetValueOrDefault("log_source") is PostgresEngine.LogSourceAzureFiles or PostgresEngine.LogSourceAzureLogAnalytics)
+        {
+            return $"PostgreSQL {host}: {message}. A server set to Microsoft Entra authentication only refuses every password so: "
+                + "sign in with options.azure_sign_in: entra";
+        }
+        return $"PostgreSQL {host}: {message}";
+    }
+
+    /// <summary>A failed open with Entra sign-in: the certificate, or a server that does not take a token.</summary>
+    private string ExplainEntra(string host, string message)
+    {
+        // .NET: "The remote certificate is invalid because of errors in the certificate chain: ..." or "... according to
+        // the validation procedure: RemoteCertificateNameMismatch".
+        if (message.Contains("remote certificate", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"PostgreSQL {host}: the server's certificate does not verify ({message}). With azure_sign_in: entra the agent "
+                + "sends its token only to a server whose certificate a CA in the system's store issued for the host it connects to: "
+                + "use the server's own name, <server>.postgres.database.azure.com, never an address or another name";
+        }
+        if (message.Contains("authentication method is not allowed", StringComparison.Ordinal))
+        {
+            return $"PostgreSQL {host}: the server did not ask for a Microsoft Entra token for role {_endpoint.Username} ({message}). "
+                + "Set the server's authentication to \"PostgreSQL and Microsoft Entra authentication\" or \"Microsoft Entra authentication "
+                + "only\", and map the role to the agent's identity";
+        }
         return $"PostgreSQL {host}: {message}";
     }
 
@@ -127,13 +279,15 @@ public sealed class PgCatalog
         System.Text.RegularExpressions.Regex.IsMatch(role, @"^[a-z_][a-z0-9_]*\z") ? role : "\"" + role + "\"";
 
     /// <summary>The password was rejected: remembered, so that no other sign-in is tried until the agent restarts.</summary>
-    internal SourceException Reject(string message)
+    /// <param name="fix">What to do, when that is not fixing the password.</param>
+    internal SourceException Reject(string message, string? fix = null)
     {
         _rejected = message;
-        return Rejected(message);
+        _rejectedFix = fix;
+        return Rejected(message, fix);
     }
 
-    private static SourceException Rejected(string message) => new(message) { AuthenticationRejected = true };
+    private static SourceException Rejected(string message, string? fix) => new(message) { AuthenticationRejected = true, AuthenticationFix = fix };
 
     /// <summary>
     /// The snapshot statement for an installed <c>pg_stat_statements</c> version (<c>extversion</c>); null when the
