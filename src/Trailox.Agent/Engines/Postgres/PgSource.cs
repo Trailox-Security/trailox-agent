@@ -82,11 +82,12 @@ public sealed class PgSource : IEngineSource
     /// <summary>Azure's default <c>log_line_prefix</c>, read until a probe reads the server's own.</summary>
     public const string AzureDefaultPrefix = "%t-%c-";
 
+    /// <param name="entraCredential">The identity for <c>options.azure_sign_in: entra</c>; by default the agent's Azure identity.</param>
     public PgSource(EndpointConfig endpoint, IRdsLogs? rds = null, Func<DateTime>? utcNow = null, IAzureLogFiles? azure = null,
-        HttpClient? http = null, IAzureLogQuery? logAnalytics = null)
+        HttpClient? http = null, IAzureLogQuery? logAnalytics = null, Azure.Core.TokenCredential? entraCredential = null)
     {
         _endpoint = endpoint;
-        _catalog = new PgCatalog(endpoint);
+        _catalog = new PgCatalog(endpoint, entraCredential);
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         var source = endpoint.Options.GetValueOrDefault("log_source");
         if (source == PostgresEngine.LogSourceRdsApi)
@@ -135,6 +136,10 @@ public sealed class PgSource : IEngineSource
             if (caps.ServerVersionNum < 130000)
             {
                 throw new SourceException($"PostgreSQL {version} is not supported: the agent reads PostgreSQL 13 and later");
+            }
+            if (_catalog.Entra is { } entra)
+            {
+                checks.Add(PgProbeChecks.EntraSignIn(_endpoint.Host, _endpoint.Username, entra.Identity));
             }
             checks.Add(await RoleCheckAsync(conn, ct));
             settings = await SettingsAsync(conn, ct);

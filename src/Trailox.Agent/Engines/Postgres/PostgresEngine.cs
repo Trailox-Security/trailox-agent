@@ -22,6 +22,8 @@ namespace Trailox.Agent.Engines.Postgres;
 /// <item><c>azure_log_analytics</c>: the same three, and optionally <c>azure_workspace_id</c> (query the workspace, not
 ///   the server) and <c>azure_log_table</c> (<c>PGSQLServerLogs</c> or <c>AzureDiagnostics</c>; default: the one the
 ///   server's rows are in); the agent's own Azure identity queries them (<see cref="ArmLogAnalyticsQuery"/>);</item>
+/// <item><c>azure_sign_in</c> (1.23.0), with either Azure source: <c>entra</c> signs in with a Microsoft Entra token of the
+///   agent's Azure identity instead of a password (<see cref="PgEntraToken"/>); <c>password</c>, the default, does not;</item>
 /// <item><c>file</c>: <c>log_directory</c>, the server's log directory mounted read-only in the agent's container;</item>
 /// <item><c>database</c>: where the agent signs in for the counters (default <c>postgres</c>).</item>
 /// </list>
@@ -34,10 +36,17 @@ public sealed class PostgresEngine : IEngine
     public const string LogSourceAzureLogAnalytics = "azure_log_analytics";
     public const string DefaultDatabase = "postgres";
 
+    /// <summary><c>options.azure_sign_in</c>: the role's password (the default), or the agent's Microsoft Entra identity (1.23.0).</summary>
+    public const string SignInPassword = "password";
+    public const string SignInEntra = "entra";
+
+    /// <summary>The end of every Azure Database for PostgreSQL flexible server's own name in Azure's public cloud.</summary>
+    public const string AzureHostSuffix = ".postgres.database.azure.com";
+
     private static readonly HashSet<string> KnownOptions = new(StringComparer.Ordinal)
     {
         "log_source", "instances", "rds_region", "log_directory", "database", "azure_subscription", "azure_resource_group", "azure_server",
-        "azure_workspace_id", "azure_log_table",
+        "azure_workspace_id", "azure_log_table", "azure_sign_in",
     };
 
     private static readonly string[] RdsOptions = { "instances", "rds_region" };
@@ -128,7 +137,50 @@ public sealed class PostgresEngine : IEngine
                 + $"{LogSourceAzureLogAnalytics} (Azure Database for PostgreSQL flexible server: its server log download, or its "
                 + $"rows in Log Analytics) or {LogSourceFile} (a self-managed server's log directory)");
         }
+        ValidateSignIn(e, source, problems);
         return problems;
+    }
+
+    /// <summary>Whether the endpoint signs in with the agent's Microsoft Entra identity (<c>options.azure_sign_in: entra</c>).</summary>
+    public static bool EntraSignIn(EndpointConfig e) => e.Options.TryGetValue("azure_sign_in", out var signIn) && signIn.Trim() == SignInEntra;
+
+    /// <summary>With Entra sign-in there is no password: the agent's identity signs in with a token.</summary>
+    public string? SignsInWithout(EndpointConfig e) => EntraSignIn(e)
+        ? "with options.azure_sign_in: entra: the agent signs in with a Microsoft Entra token of its Azure identity"
+        : null;
+
+    /// <summary>
+    /// <c>options.azure_sign_in</c>. Entra sign-in is Azure's, and sends a token as a clear-text password, so it needs TLS
+    /// and the server's own Azure name: the agent checks the certificate against it, and sends the token to no other host.
+    /// </summary>
+    private static void ValidateSignIn(EndpointConfig e, string source, List<string> problems)
+    {
+        if (!e.Options.TryGetValue("azure_sign_in", out var signIn))
+        {
+            return;
+        }
+        if (signIn is not (SignInPassword or SignInEntra))
+        {
+            problems.Add($"options.azure_sign_in: {SignInEntra} (the agent's Microsoft Entra identity signs in) or {SignInPassword} (the default)");
+            return;
+        }
+        if (signIn != SignInEntra)
+        {
+            return;
+        }
+        if (source is not (LogSourceAzureFiles or LogSourceAzureLogAnalytics))
+        {
+            problems.Add($"options.azure_sign_in: {SignInEntra} only with log_source: {AzureSources} (Azure Database for PostgreSQL flexible server)");
+        }
+        if (!e.Tls)
+        {
+            problems.Add($"tls: true with options.azure_sign_in: {SignInEntra}: the token is sent only inside TLS, with the server's certificate checked");
+        }
+        if (!e.Host.EndsWith(AzureHostSuffix, StringComparison.OrdinalIgnoreCase) || e.Host.Length == AzureHostSuffix.Length)
+        {
+            problems.Add($"host: the server's own name, e.g. orders{AzureHostSuffix}, with options.azure_sign_in: {SignInEntra}: the agent "
+                + "checks the server's certificate against it, and sends its token to no other host");
+        }
     }
 
     private static void OnlyWith(EndpointConfig e, IEnumerable<string> keys, string source, List<string> problems)

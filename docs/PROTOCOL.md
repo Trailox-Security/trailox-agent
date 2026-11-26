@@ -775,6 +775,19 @@ check) and `Channel Binding=Require`: the sign-in is SCRAM-SHA-256-PLUS, bound t
 cannot be passed on by a machine in between; a server or pooler that does not offer it is refused. With
 `tls: false`, no TLS and no channel binding. Either refusal is the probe's failure, with what to change.
 
+**Microsoft Entra sign-in** (from 1.23.0, `options.azure_sign_in: entra`; Azure Database for PostgreSQL flexible
+server, `log_source` `azure_files` or `azure_log_analytics`): no password is read. The password is an access token
+for scope `https://ossrdbms-aad.database.windows.net/.default`, from the agent's Azure identity as for the log (its
+managed identity, else a service principal from `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` or
+`AZURE_CLIENT_CERTIFICATE_PATH`), asked for when a connection opens with no token held, and kept until 5 minutes before
+its expiry. `SSL Mode=VerifyFull` (the server's certificate checked against `host` by the system's CA store, whatever
+`tls` says), `Require Auth=Password` (the token goes only to a server that asks for a password, never as SCRAM or
+MD5) and `Channel Binding=Disable` (SCRAM's, which does not apply). agent.yaml must give `tls: true` and a `host` that
+ends in `.postgres.database.azure.com`. A refusal (SQLSTATE 28P01 or 28000) of a token kept from an earlier
+connection asks for a new token and signs in once more; any other refusal stops every sign-in to the source, as a
+rejected password does, and the probe's error names the SQL that maps the role to the token's object id
+(`pgaadauth_create_principal_with_oid`). A token that cannot be had fails the probe or the task, without a sign-in.
+
 **Where the log comes from** (`options.log_source`):
 - `rds_api`, Amazon RDS and Aurora: as the agent's own AWS identity, from the AWS SDK's default chain, in
   `options.rds_region`. Only stderr files (`postgresql.log.YYYY-MM-DD[-HH[MM]]`) are read.
@@ -994,7 +1007,9 @@ function, no reset of `pg_stat_statements`, and its text only in `catalog_statem
 `azure` for Azure Database for PostgreSQL flexible server, where the server defines Azure's own setting
 `azure.extensions`), `logSource` (`rds_api`, `file`, from 1.22.0 `azure_files` and `azure_log_analytics`),
 `logFormat`, `serverVersionNum`, `statStatements`, `instances` (`id`, `role`, `oldestLogMicros`, `logFileMinutes`)
-and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): `role`, `logging`, `lc_messages`, `log_timezone`,
+and `checks` (`name`, `status` `ok`/`warn`/`fail`, `message`): from 1.23.0 `entra_sign_in` (with
+`azure_sign_in: entra`: `ok`, naming the identity the token was issued to and the host whose certificate was
+verified; a sign-in that fails fails the probe instead), `role`, `logging`, `lc_messages`, `log_timezone`,
 `logging_collector` (self-managed, not on Azure; from 1.22.0 only when no log file is found), `pg_stat_statements`
 (a warning before extension 1.8, and from 1.21.0 when `pg_stat_statements.track` is `none`), `log_error_verbosity`
 (where pgaudit is loaded: a warning at `terse`), `instances` (each replica signed in to once), `replicas`,
@@ -1005,7 +1020,8 @@ which of `%u`, `%c` and `%p` it lacks; in 1.21.0 a warning when it is not a pref
 from 1.22.0 `ok` when a line's user can be found, a warning when none of the three is there or `%a` comes before
 more of the prefix, and a failure with no time). A failed check does not fail the probe. `earliestEventMicros` and
 `earliestSessionMicros` are the start of the oldest log file. A rejected password (SQLSTATE 28P01) fails the probe
-or the task, and the agent then does not sign in to that source again, for a probe or a task, until it restarts.
+or the task, and the agent then does not sign in to that source again, for a probe or a task, until it restarts; so
+does a refused Microsoft Entra token (above).
 
 **Instances** (`options.instances`, `rds_api`): the RDS instance identifiers, primary first, each `id` or
 `id=host`. A replica given as `id` alone gets the primary's host with its first label replaced, only when the

@@ -161,7 +161,18 @@ public static class ConfigLoader
                 problems.AddRange(engine.Validate(e).Select(p => $"{where}.{p}"));
             }
 
-            ResolvePassword(e, where, secrets, problems);
+            if (engine?.SignsInWithout(e) is { } without)
+            {
+                // A password given anyway is refused rather than ignored: it says the customer meant another sign-in.
+                if (!string.IsNullOrWhiteSpace(e.PasswordEnv) || !string.IsNullOrWhiteSpace(e.PasswordFile))
+                {
+                    problems.Add($"{where}: no {PasswordKeys.Env} or {PasswordKeys.File} {without}");
+                }
+            }
+            else
+            {
+                ResolvePassword(e, where, secrets, problems);
+            }
             ResolveCatalogPassword(e, engine, where, secrets, problems);
         }
         return problems;

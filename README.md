@@ -402,8 +402,10 @@ or from Log Analytics; or a self-managed server, whose log directory is mounted 
   that lets it in without one, before the password is sent: set the role's password as SCRAM and use `scram-sha-256`
   in `pg_hba.conf`. With `tls: true` the connection is encrypted and the sign-in uses channel binding
   (SCRAM-SHA-256-PLUS), so a machine between the agent and the server cannot pass it on; the agent does not check
-  the server's certificate. Point the agent at the server itself, not at a connection pooler.
-- **agent.yaml:** `host`/`port`/`tls` = the primary's address; `username` and its password;
+  the server's certificate. Point the agent at the server itself, not at a connection pooler. On Azure the agent can
+  sign in with its Microsoft Entra identity instead (from 1.23.0, below).
+- **agent.yaml:** `host`/`port`/`tls` = the primary's address; `username` and its password (on Azure, or
+  `options.azure_sign_in: entra` and no password);
   `options.log_source` = `rds_api`, `azure_files`, `azure_log_analytics` or `file`. With `rds_api`: `options.instances` = the instance identifiers,
   primary first, each `id` or `id=host`, and `options.rds_region`. A replica's host is derived only when `host` is
   the primary's RDS instance endpoint; with an address, a CNAME or an Aurora cluster endpoint, name each replica's
@@ -461,14 +463,37 @@ or from Log Analytics; or a self-managed server, whose log directory is mounted 
   (or Log Analytics Reader): it reads that table only, but every server's rows in it, and with `AzureDiagnostics`, the
   table every resource's legacy diagnostics share, every resource's. ⚠ Azure leaves out of both its sources
   a record longer than about 64 KB: a 70,000-character DDL statement was in neither, a 10,000-character one in both.
-- **The probe's checks:** `role`, `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
+- **Microsoft Entra sign-in on Azure** (from 1.23.0), for a server whose authentication is "Microsoft Entra
+  authentication only", or "PostgreSQL and Microsoft Entra authentication": `options.azure_sign_in: entra`, with
+  `log_source` `azure_files` or `azure_log_analytics`, and no `password_env` or `password_file`. The agent signs in as
+  `username` with an access token of its Azure identity, the same one that reads the log, for
+  `https://ossrdbms-aad.database.windows.net/.default`, asked for when a connection opens and kept until 5 minutes
+  before it expires (about an hour). 🔒 The token goes as a clear-text password, where channel binding does not apply,
+  so the agent sends it only inside TLS with the server's certificate verified against `host` by the system's CA store
+  (`verify-full`; the image's bundle holds the roots Azure's certificates chain to), only to a host that ends in
+  `.postgres.database.azure.com` (the server's own name, never an address), and only to a server that asks for a
+  password; `tls: true` is required. A Microsoft Entra admin of the server maps the role to the identity, signed in to
+  database `postgres` with their own token, then gives it the limits and grants of a password role:
+
+      SELECT * FROM pgaadauth_create_principal_with_oid('trailox_monitor', '<object id>', 'service', false, false);
+      ALTER ROLE trailox_monitor CONNECTION LIMIT 2;
+      GRANT pg_read_all_stats, pg_read_all_settings TO trailox_monitor;
+
+  The object id is the service principal's (its Enterprise application's Object ID) or the managed identity's
+  (principal) id; the role name is yours to choose. A server that does not know the role as an Entra one asks for a
+  SCRAM password instead, and the agent sends nothing. A refused token stops the agent signing in, as a rejected
+  password does, and the probe's error names the SQL with the object id the token carries; a token kept from before
+  that is refused (it may have expired by the server's clock) is first replaced once.
+- **The probe's checks:** `entra_sign_in` (with `azure_sign_in: entra`: the identity the token was issued to), `role`,
+  `logging`, `lc_messages` (the agent reads English log messages), `log_timezone`
   (UTC), `logging_collector` (self-managed, when no log file is found), `pg_stat_statements` (created, and
   `pg_stat_statements.track` not `none`), `log_error_verbosity` (where pgaudit is loaded, not `terse`), `instances`
   (each replica answers), `replicas`, `log_files`, `log_analytics` (the server's rows in the last day) and
   `log_line_prefix` (the prefix, which of `%u`, `%c` and `%p` it
   lacks, and how a line's user is found), each `ok`, `warn` or `fail` with what to change.
 - **A rejected password:** the agent stops signing in to that source, for its probe and its tasks, until it
-  restarts, so it never fills your log with its own failed sign-ins. Fix the password, then restart the agent.
+  restarts, so it never fills your log with its own failed sign-ins. Fix the password, then restart the agent. The
+  same for a refused Microsoft Entra token: map the role to the identity, then restart the agent.
 
 ### Oracle
 
